@@ -22,6 +22,11 @@
  * header switches to that column, ascending. (Matches the existing securities /
  * admin / holdings tables — none of which had a 3rd "reset" click.)
  *
+ * Sort/filter are CLIENT-side by default, which suits the small row counts most
+ * consumers have. A table that pages server-side must pass `manualSort` (see the
+ * prop docs) so the component stops re-ordering the fetched page on top of the
+ * server's ORDER BY — the admin users table is the reference consumer.
+ *
  * Null-safe comparators (load-bearing — decrypted name fields can be null; see
  * CLAUDE.md "String methods on decrypted-name fields must defend against null"):
  * string accessors compare via `(a ?? "").localeCompare(b ?? "")`; numeric
@@ -83,6 +88,21 @@ export interface DataTableProps<T> {
   // ── Controlled sort (optional). Uncontrolled by default. ──
   sort?: { key: string; dir: SortDir } | null;
   onSortChange?: (sort: { key: string; dir: SortDir } | null) => void;
+
+  /**
+   * Server-side sort/filter mode. When true the component renders `rows` in the
+   * exact order given and applies NO client-side sort or filter — headers still
+   * render, still show the sort indicator, and still fire `onSortChange` so the
+   * owner can refetch.
+   *
+   * Required for any table that pages server-side. Without it the internal sort
+   * re-orders the fetched page on top of the server's ORDER BY, which is wrong
+   * twice over: it can only order the rows already fetched (page 1 of N sorted
+   * in isolation), and its comparator is `localeCompare`, which disagrees with
+   * Postgres collation on case and punctuation. Combine with the `sort` /
+   * `onSortChange` controlled props.
+   */
+  manualSort?: boolean;
 }
 
 function defaultCellValue(v: string | number | null): React.ReactNode {
@@ -115,6 +135,7 @@ export function DataTable<T>({
   className,
   sort: controlledSort,
   onSortChange,
+  manualSort = false,
 }: DataTableProps<T>) {
   // ── Sort state (uncontrolled unless `sort`/`onSortChange` provided). ──
   const [internalSort, setInternalSort] = React.useState<{
@@ -181,6 +202,10 @@ export function DataTable<T>({
 
   // ── Derived rows: filter → sort. ──
   const processedRows = React.useMemo(() => {
+    // Server-side mode: the rows arrive already filtered, sorted and paged.
+    // Touching them here would re-order one page in isolation — see `manualSort`.
+    if (manualSort) return rows;
+
     let out = rows;
 
     // Filter (client-side over accessor).
@@ -209,7 +234,7 @@ export function DataTable<T>({
       }
     }
     return out;
-  }, [rows, columns, filters, sort]);
+  }, [rows, columns, filters, sort, manualSort]);
 
   if (rows.length === 0 && emptyState) {
     return <>{emptyState}</>;

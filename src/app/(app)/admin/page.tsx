@@ -21,13 +21,13 @@ import {
   CheckCircle,
   XCircle,
   Mail,
-  ChevronUp,
-  ChevronDown,
-  ChevronsUpDown,
   KeyRound,
 } from "lucide-react";
 import { motion } from "framer-motion";
-import { DORMANT_DAYS, isDormant, compareLastActive } from "@/lib/auth/dormancy";
+import { DORMANT_DAYS, isDormant } from "@/lib/auth/dormancy";
+import { SPAN_BUCKETS } from "@/lib/auth/activity-span";
+import { DataTable, type DataTableColumn } from "@/components/ui/data-table";
+import { Pagination } from "@/components/ui/pagination";
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 
@@ -46,6 +46,12 @@ interface AdminUser {
   createdAt: string;
   updatedAt: string;
   transactionCount: number;
+  /**
+   * Whole days from signup to last recorded activity, computed SERVER-side so
+   * it can be sorted and filtered across the whole table rather than one page.
+   * Never null — a never-active user is 0 (see @/lib/auth/activity-span).
+   */
+  activeSpanDays: number;
 }
 
 // FINLYNQ-166 — DORMANT_DAYS + the dormancy/sort math live in the pure,
@@ -105,9 +111,19 @@ interface AdminGrant {
   lastUsedAt: string | null;
 }
 
-// ─── Sort ───────────────────────────────────────────────────────────────────
+// ─── Sort / paging ──────────────────────────────────────────────────────────
+//
+// Sort, filter AND paging are all SERVER-side (see listUsersPage in
+// @/lib/auth/queries). The hand-rolled client comparator that used to live here
+// was removed with the 50-row cap: it could only ever order the rows already
+// fetched, so sorting a multi-page table silently sorted one page in isolation.
+// `DataTable` renders in `manualSort` mode and reports header clicks upward.
 
-type SortColumn =
+/** Rows per page. The route clamps `limit` to 200. */
+const USERS_PAGE_SIZE = 50;
+
+/** Sort keys accepted by GET /api/admin/users — mirrors USER_SORT_SQL. */
+type UserSortKey =
   | "user"
   | "role"
   | "plan"
@@ -115,76 +131,17 @@ type SortColumn =
   | "mfa"
   | "txns"
   | "lastActive"
-  | "joined";
-type SortDirection = "asc" | "desc";
+  | "joined"
+  | "span";
 
-interface SortState {
-  column: SortColumn;
-  direction: SortDirection;
-}
-
-function sortUsers(
-  users: AdminUser[],
-  sort: SortState | null
-): AdminUser[] {
-  if (!sort) return users;
-  const { column, direction } = sort;
-  const mul = direction === "asc" ? 1 : -1;
-
-  return [...users].sort((a, b) => {
-    let cmp = 0;
-    switch (column) {
-      case "user": {
-        // Sort by the display label shown in the first cell (displayName ?? username ?? email)
-        const aLabel = (a.displayName ?? a.username ?? a.email ?? "").toLowerCase();
-        const bLabel = (b.displayName ?? b.username ?? b.email ?? "").toLowerCase();
-        cmp = aLabel.localeCompare(bLabel);
-        break;
-      }
-      case "role":
-        cmp = (a.role ?? "").localeCompare(b.role ?? "");
-        break;
-      case "plan":
-        cmp = (a.plan ?? "").localeCompare(b.plan ?? "");
-        break;
-      case "verified":
-        cmp = (a.emailVerified ? 1 : 0) - (b.emailVerified ? 1 : 0);
-        break;
-      case "mfa":
-        cmp = (a.mfaEnabled ? 1 : 0) - (b.mfaEnabled ? 1 : 0);
-        break;
-      case "txns":
-        cmp = (a.transactionCount ?? 0) - (b.transactionCount ?? 0);
-        break;
-      case "lastActive":
-        // Null-safe: never-active (null) sorts as least-recently-active.
-        cmp = compareLastActive(a.lastActiveAt, b.lastActiveAt);
-        break;
-      case "joined":
-        cmp =
-          new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime();
-        break;
-    }
-    return cmp * mul;
-  });
-}
-
-function SortIcon({
-  column,
-  sort,
-}: {
-  column: SortColumn;
-  sort: SortState | null;
-}) {
-  if (!sort || sort.column !== column) {
-    return <ChevronsUpDown className="h-3.5 w-3.5 ml-1 inline-block opacity-40" />;
-  }
-  return sort.direction === "asc" ? (
-    <ChevronUp className="h-3.5 w-3.5 ml-1 inline-block" />
-  ) : (
-    <ChevronDown className="h-3.5 w-3.5 ml-1 inline-block" />
-  );
-}
+/**
+ * A column descriptor whose key is constrained to a real sort key (or the
+ * non-sortable actions column). Typo a key and this fails at compile time
+ * rather than at runtime with a 400 from the route's strict validation.
+ */
+type UserColumn = DataTableColumn<AdminUser> & {
+  key: UserSortKey | "actions";
+};
 
 // ─── Animation ──────────────────────────────────────────────────────────────
 
@@ -274,61 +231,95 @@ export default function AdminPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [updatingUser, setUpdatingUser] = useState<string | null>(null);
-  const [sort, setSort] = useState<SortState | null>(null);
+  // Server-driven table state. Changing any of these refetches the page.
+  const [sort, setSort] = useState<{ key: string; dir: "asc" | "desc" } | null>(
+    null
+  );
+  const [page, setPage] = useState(0);
+  const [spanBucket, setSpanBucket] = useState<string>("");
   // FINLYNQ-167 — OAuth grants panel.
   const [grants, setGrants] = useState<AdminGrant[]>([]);
   const [revokingGrant, setRevokingGrant] = useState<number | null>(null);
 
-  const handleSort = useCallback((column: SortColumn) => {
-    setSort((prev) => {
-      if (!prev || prev.column !== column) return { column, direction: "asc" };
-      if (prev.direction === "asc") return { column, direction: "desc" };
-      return null; // third click clears sort
+  /**
+   * The users page. Split from the stats/grants fetch below so paging or
+   * re-sorting doesn't re-run the (much heavier) stats aggregation.
+   */
+  const fetchUsers = useCallback(async () => {
+    const params = new URLSearchParams({
+      limit: String(USERS_PAGE_SIZE),
+      offset: String(page * USERS_PAGE_SIZE),
     });
-  }, []);
+    if (sort) {
+      params.set("sort", sort.key);
+      params.set("sortDir", sort.dir);
+    }
+    if (spanBucket) params.set("spanBucket", spanBucket);
 
-  const sortedUsers = useMemo(() => sortUsers(users, sort), [users, sort]);
-
-  const fetchData = useCallback(async () => {
     try {
-      const [usersRes, statsRes, grantsRes] = await Promise.all([
-        fetch("/api/admin/users"),
-        fetch("/api/admin/stats"),
-        fetch("/api/admin/oauth-grants"),
-      ]);
-
-      if (!usersRes.ok || !statsRes.ok) {
+      const res = await fetch(`/api/admin/users?${params.toString()}`);
+      if (!res.ok) {
         setError(
-          usersRes.status === 403
+          res.status === 403
             ? "Admin access required."
             : "Failed to load admin data."
         );
         setLoading(false);
         return;
       }
+      const data = await res.json();
+      setUsers(data.users);
+      setTotal(data.total);
+      setLoading(false);
+    } catch {
+      setError("Failed to connect to server.");
+      setLoading(false);
+    }
+  }, [page, sort, spanBucket]);
 
-      const usersData = await usersRes.json();
-      const statsData = await statsRes.json();
-
-      setUsers(usersData.users);
-      setTotal(usersData.total);
-      setStats(statsData);
+  const fetchStatsAndGrants = useCallback(async () => {
+    try {
+      const [statsRes, grantsRes] = await Promise.all([
+        fetch("/api/admin/stats"),
+        fetch("/api/admin/oauth-grants"),
+      ]);
+      if (statsRes.ok) setStats(await statsRes.json());
       // Grants are non-fatal: a failed grants fetch leaves the panel empty
       // rather than blanking the whole admin page.
       if (grantsRes.ok) {
         const grantsData = await grantsRes.json();
         setGrants(grantsData.grants ?? []);
       }
-      setLoading(false);
     } catch {
-      setError("Failed to connect to server.");
-      setLoading(false);
+      // Stats/grants are supplementary — the users table drives the error state.
     }
   }, []);
 
   useEffect(() => {
-    fetchData();
-  }, [fetchData]);
+    fetchUsers();
+  }, [fetchUsers]);
+
+  useEffect(() => {
+    fetchStatsAndGrants();
+  }, [fetchStatsAndGrants]);
+
+  /**
+   * A new sort or filter invalidates the current offset — page 4 of the old
+   * ordering has nothing to do with page 4 of the new one, and with a filter
+   * applied the offset can land past the end and render an empty table.
+   */
+  const handleSortChange = useCallback(
+    (next: { key: string; dir: "asc" | "desc" } | null) => {
+      setSort(next);
+      setPage(0);
+    },
+    []
+  );
+
+  const handleSpanBucketChange = useCallback((next: string) => {
+    setSpanBucket(next);
+    setPage(0);
+  }, []);
 
   const handleRoleToggle = async (userId: string, currentRole: string) => {
     const newRole = currentRole === "admin" ? "user" : "admin";
@@ -366,6 +357,170 @@ export default function AdminPage() {
       setUpdatingUser(null);
     }
   };
+
+  /**
+   * Column descriptors for the shared DataTable. `accessor` is only the
+   * fallback cell value here — every column renders explicitly, and sorting is
+   * server-side (`manualSort`), so the accessors are never used to order rows.
+   * The `key` of each sortable column MUST match a key in USER_SORT_SQL
+   * (@/lib/auth/queries); the route 400s on anything else.
+   */
+  const userColumns: UserColumn[] = useMemo(
+    () => [
+      {
+        key: "user",
+        header: "User",
+        accessor: (u) => u.displayName ?? u.username ?? u.email ?? "",
+        render: (u) => {
+          const primary = u.displayName || u.username || u.email || "—";
+          const secondary = u.username ?? u.email ?? null;
+          // Single line. The secondary identifier is appended inline ONLY when
+          // it adds information — most signups have displayName === username,
+          // and rendering both unconditionally doubled every row's height to
+          // show the same string twice.
+          const showSecondary = secondary !== null && secondary !== primary;
+          return (
+            <span className="flex items-baseline gap-1.5 whitespace-nowrap">
+              <span className="font-medium">{primary}</span>
+              {showSecondary && (
+                <span className="text-xs text-muted-foreground">
+                  {secondary}
+                </span>
+              )}
+            </span>
+          );
+        },
+      },
+      {
+        key: "role",
+        header: "Role",
+        accessor: (u) => u.role,
+        render: (u) => <RoleBadge role={u.role} />,
+      },
+      {
+        key: "plan",
+        header: "Plan",
+        accessor: (u) => u.plan ?? "free",
+        render: (u) => <PlanBadge plan={u.plan ?? "free"} />,
+      },
+      {
+        key: "verified",
+        header: "Verified",
+        accessor: (u) => (u.emailVerified ? 1 : 0),
+        render: (u) =>
+          u.emailVerified ? (
+            <CheckCircle className="h-4 w-4 text-emerald-500" />
+          ) : (
+            <XCircle className="h-4 w-4 text-muted-foreground" />
+          ),
+      },
+      {
+        key: "mfa",
+        header: "MFA",
+        accessor: (u) => (u.mfaEnabled ? 1 : 0),
+        render: (u) =>
+          u.mfaEnabled ? (
+            <Shield className="h-4 w-4 text-emerald-500" />
+          ) : (
+            <span className="text-muted-foreground">—</span>
+          ),
+      },
+      {
+        key: "txns",
+        header: "Txns",
+        align: "right",
+        accessor: (u) => u.transactionCount ?? 0,
+        render: (u) => (
+          <span className="font-mono text-sm">
+            {(u.transactionCount ?? 0).toLocaleString()}
+          </span>
+        ),
+      },
+      {
+        key: "lastActive",
+        header: "Last active",
+        accessor: (u) => u.lastActiveAt as string | null,
+        render: (u) => {
+          // FINLYNQ-166 — dormant (null OR >DORMANT_DAYS) renders muted.
+          const dormant = isDormant(u.lastActiveAt);
+          return (
+            <span
+              className={`text-sm ${dormant ? "text-muted-foreground" : "text-foreground"}`}
+              title={
+                u.lastActiveAt === null
+                  ? "No authenticated activity recorded"
+                  : dormant
+                    ? `Dormant: inactive over ${DORMANT_DAYS} days`
+                    : undefined
+              }
+            >
+              {u.lastActiveAt === null
+                ? "Never"
+                : new Date(u.lastActiveAt as string).toLocaleDateString()}
+            </span>
+          );
+        },
+      },
+      {
+        key: "span",
+        header: "Active span",
+        align: "right",
+        accessor: (u) => u.activeSpanDays,
+        render: (u) => (
+          <span
+            className="font-mono text-sm"
+            title={
+              u.lastActiveAt === null
+                ? "Never active — counted as 0 days"
+                : `${u.activeSpanDays} day(s) between signing up and last recorded activity`
+            }
+          >
+            {u.activeSpanDays}
+          </span>
+        ),
+      },
+      {
+        key: "joined",
+        header: "Joined",
+        accessor: (u) => u.createdAt,
+        render: (u) => (
+          <span className="text-sm text-muted-foreground">
+            {new Date(u.createdAt).toLocaleDateString()}
+          </span>
+        ),
+      },
+      {
+        key: "actions",
+        header: "Actions",
+        sortable: false,
+        align: "right",
+        accessor: () => null,
+        render: (u) => (
+          <span className="space-x-2 whitespace-nowrap">
+            <button
+              className="text-xs px-2 py-1 rounded border hover:bg-muted transition-colors disabled:opacity-50"
+              disabled={updatingUser === u.id}
+              onClick={() => handleRoleToggle(u.id, u.role)}
+            >
+              {u.role === "admin" ? "Revoke Admin" : "Make Admin"}
+            </button>
+            <select
+              className="text-xs px-2 py-1 rounded border bg-background"
+              value={u.plan ?? "free"}
+              disabled={updatingUser === u.id}
+              onChange={(e) => handlePlanChange(u.id, e.target.value)}
+            >
+              <option value="free">Free</option>
+              <option value="pro">Pro</option>
+              <option value="premium">Premium</option>
+            </select>
+          </span>
+        ),
+      },
+    ],
+    // handleRoleToggle / handlePlanChange are stable closures over setState only.
+    [updatingUser]
+  );
 
   // FINLYNQ-167 — admin revoke of a grant (kills access + refresh). Reuses the
   // FINLYNQ-154 revoke path via the admin-scoped route; drops the row from the
@@ -581,153 +736,65 @@ export default function AdminPage() {
             </TabsTrigger>
           </TabsList>
 
-          <TabsContent value="users" className="mt-4">
+          <TabsContent value="users" className="mt-4 space-y-3">
+            {/* Active-span filter. Server-side, so it narrows the WHOLE table
+                and the count/pager below follow it — not just the loaded page. */}
+            <div className="flex items-center gap-2">
+              <label
+                htmlFor="span-bucket"
+                className="text-sm text-muted-foreground"
+              >
+                Active span
+              </label>
+              <select
+                id="span-bucket"
+                className="h-8 rounded-md border bg-background px-2 text-sm"
+                value={spanBucket}
+                onChange={(e) => handleSpanBucketChange(e.target.value)}
+              >
+                <option value="">All</option>
+                {SPAN_BUCKETS.map((b) => (
+                  <option key={b.id} value={b.id}>
+                    {b.label}
+                  </option>
+                ))}
+              </select>
+              {spanBucket && (
+                <button
+                  type="button"
+                  className="text-xs px-2 py-1 rounded border hover:bg-muted transition-colors"
+                  onClick={() => handleSpanBucketChange("")}
+                >
+                  Clear
+                </button>
+              )}
+            </div>
+
             <Card>
               <CardContent className="p-0">
-                <Table>
-                  <TableHeader>
-                    <TableRow>
-                      {(
-                        [
-                          { col: "user" as SortColumn, label: "User", align: "" },
-                          { col: "role" as SortColumn, label: "Role", align: "" },
-                          { col: "plan" as SortColumn, label: "Plan", align: "" },
-                          { col: "verified" as SortColumn, label: "Verified", align: "" },
-                          { col: "mfa" as SortColumn, label: "MFA", align: "" },
-                          { col: "txns" as SortColumn, label: "Txns", align: "text-right" },
-                          { col: "lastActive" as SortColumn, label: "Last active", align: "" },
-                          { col: "joined" as SortColumn, label: "Joined", align: "" },
-                        ] as const
-                      ).map(({ col, label, align }) => (
-                        <TableHead key={col} className={align}>
-                          <button
-                            type="button"
-                            onClick={() => handleSort(col)}
-                            className="inline-flex items-center gap-0.5 hover:text-foreground transition-colors select-none cursor-pointer"
-                            aria-sort={
-                              sort?.column === col
-                                ? sort.direction === "asc"
-                                  ? "ascending"
-                                  : "descending"
-                                : "none"
-                            }
-                          >
-                            {label}
-                            <SortIcon column={col} sort={sort} />
-                          </button>
-                        </TableHead>
-                      ))}
-                      <TableHead className="text-right">Actions</TableHead>
-                    </TableRow>
-                  </TableHeader>
-                  <TableBody>
-                    {sortedUsers.map((user) => (
-                      <TableRow key={user.id}>
-                        <TableCell>
-                          <div>
-                            <p className="font-medium">
-                              {user.displayName || user.username || "—"}
-                            </p>
-                            <p className="text-sm text-muted-foreground">
-                              {user.username ?? user.email ?? "—"}
-                            </p>
-                          </div>
-                        </TableCell>
-                        <TableCell>
-                          <RoleBadge role={user.role} />
-                        </TableCell>
-                        <TableCell>
-                          <PlanBadge plan={user.plan ?? "free"} />
-                        </TableCell>
-                        <TableCell>
-                          {user.emailVerified ? (
-                            <CheckCircle className="h-4 w-4 text-emerald-500" />
-                          ) : (
-                            <XCircle className="h-4 w-4 text-muted-foreground" />
-                          )}
-                        </TableCell>
-                        <TableCell>
-                          {user.mfaEnabled ? (
-                            <Shield className="h-4 w-4 text-emerald-500" />
-                          ) : (
-                            <span className="text-muted-foreground">—</span>
-                          )}
-                        </TableCell>
-                        <TableCell className="text-right font-mono text-sm">
-                          {(user.transactionCount ?? 0).toLocaleString()}
-                        </TableCell>
-                        <TableCell className="text-sm">
-                          {(() => {
-                            // FINLYNQ-166 — dormant (null OR >DORMANT_DAYS) renders muted.
-                            const dormant = isDormant(user.lastActiveAt);
-                            return (
-                              <span
-                                className={
-                                  dormant
-                                    ? "text-muted-foreground"
-                                    : "text-foreground"
-                                }
-                                title={
-                                  user.lastActiveAt === null
-                                    ? "No authenticated activity recorded"
-                                    : dormant
-                                      ? `Dormant: inactive over ${DORMANT_DAYS} days`
-                                      : undefined
-                                }
-                              >
-                                {user.lastActiveAt === null
-                                  ? "Never"
-                                  : new Date(
-                                      user.lastActiveAt as string
-                                    ).toLocaleDateString()}
-                              </span>
-                            );
-                          })()}
-                        </TableCell>
-                        <TableCell className="text-sm text-muted-foreground">
-                          {new Date(user.createdAt).toLocaleDateString()}
-                        </TableCell>
-                        <TableCell className="text-right space-x-2">
-                          <button
-                            className="text-xs px-2 py-1 rounded border hover:bg-muted transition-colors disabled:opacity-50"
-                            disabled={updatingUser === user.id}
-                            onClick={() =>
-                              handleRoleToggle(user.id, user.role)
-                            }
-                          >
-                            {user.role === "admin"
-                              ? "Revoke Admin"
-                              : "Make Admin"}
-                          </button>
-                          <select
-                            className="text-xs px-2 py-1 rounded border bg-background"
-                            value={user.plan ?? "free"}
-                            disabled={updatingUser === user.id}
-                            onChange={(e) =>
-                              handlePlanChange(user.id, e.target.value)
-                            }
-                          >
-                            <option value="free">Free</option>
-                            <option value="pro">Pro</option>
-                            <option value="premium">Premium</option>
-                          </select>
-                        </TableCell>
-                      </TableRow>
-                    ))}
-                    {users.length === 0 && (
-                      <TableRow>
-                        <TableCell
-                          colSpan={9}
-                          className="text-center py-8 text-muted-foreground"
-                        >
-                          No users found.
-                        </TableCell>
-                      </TableRow>
-                    )}
-                  </TableBody>
-                </Table>
+                <DataTable
+                  columns={userColumns}
+                  rows={users}
+                  rowKey={(u) => u.id}
+                  manualSort
+                  sort={sort}
+                  onSortChange={handleSortChange}
+                  emptyState={
+                    <p className="text-center py-8 text-sm text-muted-foreground">
+                      No users found.
+                    </p>
+                  }
+                />
               </CardContent>
             </Card>
+
+            <Pagination
+              page={page}
+              limit={USERS_PAGE_SIZE}
+              total={total}
+              onPageChange={setPage}
+              label="users"
+            />
           </TabsContent>
 
           <TabsContent value="activity" className="mt-4 space-y-4">
