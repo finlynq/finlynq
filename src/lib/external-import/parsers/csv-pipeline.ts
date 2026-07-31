@@ -60,10 +60,10 @@ export interface CsvPipelineRequest {
   dateFormatOverride?: DateFormatOverride | null;
   /**
    * FINLYNQ — default currency stamped on rows whose source has no Currency
-   * column (or an empty cell). When unset, callers that resolve a saved
-   * template fall back to the template's own `defaultCurrency`; otherwise the
-   * parser keeps its "CAD" last-resort. Distinct from `anchorCurrency` (which
-   * only labels balance anchors).
+   * column (or an empty cell). Resolution order (GH #328): the file's own
+   * Currency cell → this knob → the saved template's `defaultCurrency` →
+   * `anchorCurrency` (the bound account's currency) → REFUSE with
+   * `kind: "needs-currency"`. There is no silent "CAD" guess on this path.
    */
   defaultCurrency?: string | null;
   /**
@@ -78,6 +78,14 @@ export interface CsvPipelineRequest {
    * 2026-05-24 — currency stamped on extracted balance anchors. Falls
    * back to "CAD" when unset. The upload route passes the bound account's
    * currency so anchors land in the bank-side display unit.
+   *
+   * GH #328 (2026-07-31): because this IS the bound account's currency, it
+   * also backstops the ROW currency for files with no Currency column —
+   * ranked below an explicit `defaultCurrency` / template default, and it is
+   * the LAST thing consulted (there is no hardcoded "CAD" below it any more).
+   * Without this, an account-bound import stamped every row CAD and the
+   * account-currency fallback downstream in stage-statement-file never fired
+   * (shadowed by the already-non-null "CAD").
    */
   anchorCurrency?: string | null;
   /**
@@ -140,7 +148,35 @@ export type CsvPipelineResult =
   | {
       kind: "template-not-found";
       templateId: number;
+    }
+  | {
+      /**
+       * GH #328 — the file carries no usable currency for at least one parsed
+       * row AND nothing was left to fall back on (no request `defaultCurrency`,
+       * no template default, no `anchorCurrency` from a bound account). We
+       * REFUSE rather than stamping a guess: a silently-wrong currency is a
+       * whole-FX-spread valuation error that surfaces months later.
+       *
+       * Only reachable on an account-UNBOUND import — an accountId always
+       * supplies `anchorCurrency`.
+       */
+      kind: "needs-currency";
+      headers: string[];
+      sampleRows: Record<string, string>[];
+      /** Auto-detected mapping (may be null) so a re-detect caller can still
+       *  render its column-mapping dialog instead of dead-ending. */
+      suggestedMapping: ColumnMapping | null;
+      /** Data rows in the file (header excluded). */
+      rowCount: number;
     };
+
+/**
+ * User-facing refusal for `kind: "needs-currency"`. Single source of truth so
+ * the web preview route, the staging-upload route and the MCP
+ * `manage_statement_import(op:upload)` error all say the same actionable thing.
+ */
+export const NEEDS_CURRENCY_MESSAGE =
+  "This file doesn't specify a currency. Add or map a Currency column, or set a default currency for this import.";
 
 /**
  * Run the full four-step CSV parser fallback chain.
@@ -154,6 +190,12 @@ export type CsvPipelineResult =
  * If the canonical-header pass produces zero valid rows AND no saved
  * template matches, the caller gets `needs-mapping` so the UI can prompt
  * the user for a column-mapping dialog.
+ *
+ * GH #328 — ANY of the four parsed paths (1 / 2 / 3 / 3.5) returns
+ * `needs-currency` instead of committing when a row's currency could not be
+ * resolved from the file and every fallback (`defaultCurrency` → template
+ * default → `anchorCurrency`) was absent. The `confirmAutoMapping` gates
+ * return BEFORE that check — they don't commit rows either way.
  */
 export async function parseCsvWithFallback(
   req: CsvPipelineRequest,
@@ -200,7 +242,8 @@ export async function parseCsvWithFallback(
     // destructured locals are 0/null-defaulted) so "not passed" ≠ "passed as 0".
     const effSkipH = req.skipHeaderRows ?? tpl.skipHeaderRows ?? 0;
     const effSkipF = req.skipFooterRows ?? tpl.skipFooterRows ?? 0;
-    const effCurrency = req.defaultCurrency ?? tpl.defaultCurrency ?? null;
+    const effCurrency =
+      req.defaultCurrency ?? tpl.defaultCurrency ?? anchorCurrency ?? null;
     const effDateFmt = req.dateFormatOverride ?? tpl.dateFormatOverride ?? null;
     const tplText = trimCsvRows(req.text, effSkipH, effSkipF);
     const tplHeaders = extractCsvHeaders(tplText);
@@ -211,6 +254,10 @@ export async function parseCsvWithFallback(
       effDateFmt,
       effCurrency,
     );
+    // GH #328 — nothing left to consult and at least one row needed it.
+    if (effCurrency === null && mapped.currencyFallbackUsed) {
+      return needsCurrencyResult(tplText, tplHeaders);
+    }
     const filled = applyDefaultAccount(mapped.rows, defaultAccountName);
     const anchors = extractBalanceAnchors(
       tplText,
@@ -245,7 +292,8 @@ export async function parseCsvWithFallback(
   // Merchant, Memo, Narrative) gets picked up. Files that genuinely
   // have no payee at all (e.g. Quicken raw exports) still succeed at
   // step 2 because auto-detect returns null for them.
-  const canonical = csvToRawTransactions(text, dateFormatOverride, defaultCurrency);
+  const canonicalCurrency = defaultCurrency ?? anchorCurrency ?? null;
+  const canonical = csvToRawTransactions(text, dateFormatOverride, canonicalCurrency);
   if (canonical.rows.length > 0) {
     const auto = autoDetectColumnMapping(headers);
     const allPayeesEmpty = canonical.rows.every(
@@ -269,6 +317,10 @@ export async function parseCsvWithFallback(
           sampleRows: parseCSV(text).slice(0, 5),
           rowCount: estimateRowCount(text),
         };
+      }
+      // GH #328 — fail loud rather than stamping a CAD guess on every row.
+      if (canonicalCurrency === null && canonical.currencyFallbackUsed) {
+        return needsCurrencyResult(text, headers);
       }
       const filled = applyDefaultAccount(canonical.rows, defaultAccountName);
       // Canonical path has no explicit ColumnMapping; reuse auto-detect to
@@ -305,7 +357,8 @@ export async function parseCsvWithFallback(
     // `headers`/`findBestTemplate` are computed on the request-skip-trimmed
     // text, so re-trimming post-match could shift which rows parse. Currency
     // and date format have no such ordering hazard.
-    const effCurrency = req.defaultCurrency ?? best.template.defaultCurrency ?? null;
+    const effCurrency =
+      req.defaultCurrency ?? best.template.defaultCurrency ?? anchorCurrency ?? null;
     const effDateFmt = req.dateFormatOverride ?? best.template.dateFormatOverride ?? null;
     const mapped = parseWithMapping(
       text,
@@ -327,6 +380,10 @@ export async function parseCsvWithFallback(
           sampleRows: parseCSV(text).slice(0, 5),
           rowCount: estimateRowCount(text),
         };
+      }
+      // GH #328 — template carried no defaultCurrency and no account binding.
+      if (effCurrency === null && mapped.currencyFallbackUsed) {
+        return needsCurrencyResult(text, headers);
       }
       const filled = applyDefaultAccount(mapped.rows, defaultAccountName);
       const anchors = extractBalanceAnchors(
@@ -370,7 +427,7 @@ export async function parseCsvWithFallback(
       directAuto,
       null,
       dateFormatOverride,
-      defaultCurrency,
+      canonicalCurrency,
     );
     if (mapped.rows.length > 0) {
       // §B confirm gate: this is exactly the guess that's most worth
@@ -385,6 +442,10 @@ export async function parseCsvWithFallback(
           sampleRows: parseCSV(text).slice(0, 5),
           rowCount: estimateRowCount(text),
         };
+      }
+      // GH #328 — auto-detected mapping, but no currency anywhere to stamp.
+      if (canonicalCurrency === null && mapped.currencyFallbackUsed) {
+        return needsCurrencyResult(text, headers);
       }
       const filled = applyDefaultAccount(mapped.rows, defaultAccountName);
       const anchors = extractBalanceAnchors(
@@ -412,6 +473,24 @@ export async function parseCsvWithFallback(
     headers,
     sampleRows,
     suggestedMapping,
+  };
+}
+
+/**
+ * GH #328 — build the `needs-currency` refusal. Called from every parsed entry
+ * point once the effective row-currency fallback is null AND the parse reported
+ * that at least one row actually needed it.
+ */
+function needsCurrencyResult(
+  text: string,
+  headers: string[],
+): CsvPipelineResult {
+  return {
+    kind: "needs-currency",
+    headers,
+    sampleRows: parseCSV(text).slice(0, 5),
+    suggestedMapping: autoDetectColumnMapping(headers),
+    rowCount: estimateRowCount(text),
   };
 }
 
@@ -458,7 +537,7 @@ function parseWithMapping(
   defaultAccount: string | null,
   dateFormatOverride?: DateFormatOverride | null,
   defaultCurrency?: string | null,
-): { rows: RawTransaction[]; errors: ParseError[] } {
+): { rows: RawTransaction[]; errors: ParseError[]; currencyFallbackUsed: boolean } {
   const result = csvToRawTransactionsWithMapping(
     text,
     mapping as unknown as Record<string, string>,

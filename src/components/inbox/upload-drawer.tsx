@@ -529,7 +529,15 @@ export function UploadDrawer({
       fd.append("skipFooterRows", String(skipFooterRows));
       const res = await fetch("/api/import/preview", { method: "POST", body: fd });
       const data = await res.json();
-      if (!res.ok) throw new Error(data.error ?? `HTTP ${res.status}`);
+      // GH #328 — this re-detect is deliberately account-UNBOUND (it only wants
+      // fresh headers for the trimmed file), so a currency-less CSV now comes
+      // back 422 `csv-needs-currency`. That body still carries everything the
+      // dialog needs, and the dialog's own "Default currency (rows missing one)"
+      // field is exactly where the user resolves it — so consume it as a
+      // successful re-detect rather than surfacing an error here.
+      if (!res.ok && data?.type !== "csv-needs-currency") {
+        throw new Error(data.error ?? `HTTP ${res.status}`);
+      }
       const headers: string[] = Array.isArray(data.headers) ? data.headers : [];
       const sampleRows: Record<string, string>[] = Array.isArray(data.sampleRows)
         ? data.sampleRows

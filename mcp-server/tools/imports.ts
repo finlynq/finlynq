@@ -204,6 +204,12 @@ export function registerImportsTools(server: McpServer, ctx: PgToolContext) {
       // Parse / ownership / size failure. Surface a descriptive error +
       // detectedFormat so the caller knows it was an unrecognised format vs a
       // bound-account problem. No staged import was created.
+      //
+      // GH #328 — this also carries the `needs-currency` refusal verbatim (the
+      // shared NEEDS_CURRENCY_MESSAGE lands in `body.error`), so an AI caller
+      // gets the same actionable wording as the web UI. Unreachable in practice:
+      // `accountId` is REQUIRED on this op, so the bound account's currency is
+      // always available as the pipeline's last fallback.
       const msg =
         typeof result.body?.error === "string"
           ? (result.body.error as string)

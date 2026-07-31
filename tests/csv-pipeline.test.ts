@@ -21,6 +21,7 @@ type TemplateRow = {
   fileHeaders: string[];
   columnMapping: Record<string, string>;
   defaultAccount: string | null;
+  defaultCurrency?: string | null;
   isDefault: boolean;
   createdAt: string;
   updatedAt: string;
@@ -97,6 +98,7 @@ vi.mock("@/lib/import-templates", async () => {
       fileHeaders: row.fileHeaders,
       columnMapping: row.columnMapping,
       defaultAccount: row.defaultAccount,
+      defaultCurrency: row.defaultCurrency ?? null,
       isDefault: row.isDefault,
       createdAt: row.createdAt,
       updatedAt: row.updatedAt,
@@ -118,7 +120,7 @@ describe("parseCsvWithFallback — step 2 (canonical headers)", () => {
     const csv = `Date,Account,Amount,Payee
 2024-01-15,Checking,-12.50,Coffee
 2024-01-16,Checking,100.00,Salary`;
-    const r = await parseCsvWithFallback({ text: csv, userId: "u1" });
+    const r = await parseCsvWithFallback({ text: csv, userId: "u1", anchorCurrency: "CAD" });
     expect(r.kind).toBe("parsed");
     if (r.kind !== "parsed") return;
     expect(r.rows).toHaveLength(2);
@@ -130,7 +132,7 @@ describe("parseCsvWithFallback — step 2 (canonical headers)", () => {
   it("strips UTF-8 BOM and still parses canonical headers", async () => {
     const csv = `﻿Date,Account,Amount,Payee
 2024-01-15,Checking,-12.50,Coffee`;
-    const r = await parseCsvWithFallback({ text: csv, userId: "u1" });
+    const r = await parseCsvWithFallback({ text: csv, userId: "u1", anchorCurrency: "CAD" });
     expect(r.kind).toBe("parsed");
     if (r.kind !== "parsed") return;
     expect(r.rows).toHaveLength(1);
@@ -139,7 +141,7 @@ describe("parseCsvWithFallback — step 2 (canonical headers)", () => {
   it("preserves quoted fields containing commas", async () => {
     const csv = `Date,Account,Amount,Payee
 2024-01-15,Checking,-12.50,"Coffee, Bagels & More"`;
-    const r = await parseCsvWithFallback({ text: csv, userId: "u1" });
+    const r = await parseCsvWithFallback({ text: csv, userId: "u1", anchorCurrency: "CAD" });
     expect(r.kind).toBe("parsed");
     if (r.kind !== "parsed") return;
     expect(r.rows[0].payee).toBe("Coffee, Bagels & More");
@@ -151,6 +153,7 @@ describe("parseCsvWithFallback — step 2 (canonical headers)", () => {
     const r = await parseCsvWithFallback({
       text: csv,
       userId: "u1",
+      anchorCurrency: "CAD",
       defaultAccountName: "TD Checking",
     });
     expect(r.kind).toBe("parsed");
@@ -164,6 +167,7 @@ describe("parseCsvWithFallback — step 2 (canonical headers)", () => {
     const r = await parseCsvWithFallback({
       text: csv,
       userId: "u1",
+      anchorCurrency: "CAD",
       defaultAccountName: "TD Checking",
     });
     expect(r.kind).toBe("parsed");
@@ -193,7 +197,7 @@ describe("parseCsvWithFallback — step 3 (auto-matched template)", () => {
       createdAt: "",
       updatedAt: "",
     });
-    const r = await parseCsvWithFallback({ text: csv, userId: "u1" });
+    const r = await parseCsvWithFallback({ text: csv, userId: "u1", anchorCurrency: "CAD" });
     expect(r.kind).toBe("parsed");
     if (r.kind !== "parsed") return;
     expect(r.appliedTemplateId).toBe(1);
@@ -218,7 +222,7 @@ describe("parseCsvWithFallback — step 3 (auto-matched template)", () => {
       createdAt: "",
       updatedAt: "",
     });
-    const r = await parseCsvWithFallback({ text: csv, userId: "u1" });
+    const r = await parseCsvWithFallback({ text: csv, userId: "u1", anchorCurrency: "CAD" });
     // u1 has no templates; the other user's template is cross-tenant
     // and ignored. Per the 2026-05-27 Phase 4 fix, step 3.5 now applies
     // auto-detect (Description→payee, Debit→amount) directly so the
@@ -240,7 +244,7 @@ describe("parseCsvWithFallback — step 3.5 (auto-detect direct apply, 2026-05-2
     const csv = `Date,Description,Amount
 2026-05-25,Bank interest payment,18.42
 2026-05-26,Unknown payee XYZ,-12.34`;
-    const r = await parseCsvWithFallback({ text: csv, userId: "u1" });
+    const r = await parseCsvWithFallback({ text: csv, userId: "u1", anchorCurrency: "CAD" });
     expect(r.kind).toBe("parsed");
     if (r.kind !== "parsed") return;
     expect(r.rows).toHaveLength(2);
@@ -256,7 +260,7 @@ describe("parseCsvWithFallback — step 3.5 (auto-detect direct apply, 2026-05-2
     // field; only Payee drives the matcher.
     const csv = `Date,Description,Amount,Payee
 2026-05-25,Random memo,18.42,Bank of America`;
-    const r = await parseCsvWithFallback({ text: csv, userId: "u1" });
+    const r = await parseCsvWithFallback({ text: csv, userId: "u1", anchorCurrency: "CAD" });
     expect(r.kind).toBe("parsed");
     if (r.kind !== "parsed") return;
     expect(r.rows[0].payee).toBe("Bank of America");
@@ -268,7 +272,7 @@ describe("parseCsvWithFallback — step 3.5 (auto-detect direct apply, 2026-05-2
     // payees.
     const csv = `Date,Account,Amount,Payee
 2024-01-15,Checking,-12.50,Coffee`;
-    const r = await parseCsvWithFallback({ text: csv, userId: "u1" });
+    const r = await parseCsvWithFallback({ text: csv, userId: "u1", anchorCurrency: "CAD" });
     expect(r.kind).toBe("parsed");
     if (r.kind !== "parsed") return;
     expect(r.rows[0].payee).toBe("Coffee");
@@ -285,7 +289,7 @@ describe("parseCsvWithFallback — step 4 (needs-mapping)", () => {
     const csv = `Posting Date,Description,Debit,Credit
 2024-01-15,Coffee,12.50,
 2024-01-16,Salary,,100.00`;
-    const r = await parseCsvWithFallback({ text: csv, userId: "u1" });
+    const r = await parseCsvWithFallback({ text: csv, userId: "u1", anchorCurrency: "CAD" });
     expect(r.kind).toBe("parsed");
     if (r.kind !== "parsed") return;
     expect(r.appliedTemplateId).toBeUndefined();
@@ -296,7 +300,7 @@ describe("parseCsvWithFallback — step 4 (needs-mapping)", () => {
     const csv = `Posting Date,Memo,Withdrawal,Deposit
 2024-01-15,Coffee,12.50,
 2024-01-16,Salary,,100.00`;
-    const r = await parseCsvWithFallback({ text: csv, userId: "u1" });
+    const r = await parseCsvWithFallback({ text: csv, userId: "u1", anchorCurrency: "CAD" });
     expect(r.kind).toBe("needs-mapping");
     if (r.kind !== "needs-mapping") return;
     expect(r.suggestedMapping).toBeNull();
@@ -322,7 +326,12 @@ describe("parseCsvWithFallback — step 1 (explicit templateId)", () => {
       createdAt: "",
       updatedAt: "",
     });
-    const r = await parseCsvWithFallback({ text: csv, userId: "u1", templateId: 7 });
+    const r = await parseCsvWithFallback({
+      text: csv,
+      userId: "u1",
+      anchorCurrency: "CAD",
+      templateId: 7,
+    });
     expect(r.kind).toBe("parsed");
     if (r.kind !== "parsed") return;
     expect(r.appliedTemplateId).toBe(7);
@@ -341,7 +350,7 @@ describe("parseCsvWithFallback — confirmAutoMapping gate (§B, 2026-06-04)", (
   it("default (false) keeps canonical headers silent — kind 'parsed'", async () => {
     const csv = `Date,Account,Amount,Payee
 2024-01-15,Checking,-12.50,Coffee`;
-    const r = await parseCsvWithFallback({ text: csv, userId: "u1" });
+    const r = await parseCsvWithFallback({ text: csv, userId: "u1", anchorCurrency: "CAD" });
     expect(r.kind).toBe("parsed");
   });
 
@@ -432,11 +441,212 @@ describe("parseCsvWithFallback — confirmAutoMapping gate (§B, 2026-06-04)", (
     const r = await parseCsvWithFallback({
       text: csv,
       userId: "u1",
+      anchorCurrency: "CAD",
       templateId: 9,
       confirmAutoMapping: true,
     });
     // Step 1 (explicit template) runs before any confirm gate.
     expect(r.kind).toBe("parsed");
+  });
+});
+
+describe("parseCsvWithFallback — row currency resolution (GH #328)", () => {
+  // Resolution order: file's own Currency cell > explicit defaultCurrency >
+  // saved template's defaultCurrency > anchorCurrency (bound account) > REFUSE.
+  const noCcyCanonical = `Date,Account,Amount,Payee
+2024-01-15,Checking,-12.50,Coffee
+2024-01-16,Checking,100.00,Salary`;
+
+  it("(a) inherits the bound account's currency when the file has no Currency column", async () => {
+    // The #328 repro: an account-bound CSV import used to stamp every row CAD
+    // even though the bound account was USD.
+    const r = await parseCsvWithFallback({
+      text: noCcyCanonical,
+      userId: "u1",
+      anchorCurrency: "USD",
+    });
+    expect(r.kind).toBe("parsed");
+    if (r.kind !== "parsed") return;
+    expect(r.rows).toHaveLength(2);
+    expect(r.rows.map((x) => x.currency)).toEqual(["USD", "USD"]);
+  });
+
+  it("(b) an explicit defaultCurrency beats the bound account's currency", async () => {
+    const r = await parseCsvWithFallback({
+      text: noCcyCanonical,
+      userId: "u1",
+      defaultCurrency: "EUR",
+      anchorCurrency: "USD",
+    });
+    expect(r.kind).toBe("parsed");
+    if (r.kind !== "parsed") return;
+    expect(r.rows.every((x) => x.currency === "EUR")).toBe(true);
+  });
+
+  it("(c) a template's own defaultCurrency beats anchorCurrency", async () => {
+    const csv = `Transaction Date,Description,Debit
+2024-01-15,Coffee,12.50`;
+    store.importTemplates.push({
+      id: 3,
+      userId: "u1",
+      name: "GBP bank",
+      fileHeaders: ["Transaction Date", "Description", "Debit"],
+      columnMapping: { date: "Transaction Date", amount: "Debit", payee: "Description" },
+      defaultAccount: null,
+      defaultCurrency: "GBP",
+      isDefault: false,
+      createdAt: "",
+      updatedAt: "",
+    });
+    const r = await parseCsvWithFallback({
+      text: csv,
+      userId: "u1",
+      templateId: 3,
+      anchorCurrency: "USD",
+    });
+    expect(r.kind).toBe("parsed");
+    if (r.kind !== "parsed") return;
+    expect(r.rows[0].currency).toBe("GBP");
+  });
+
+  it("(c') a template with NO defaultCurrency falls through to anchorCurrency", async () => {
+    const csv = `Transaction Date,Description,Debit
+2024-01-15,Coffee,12.50`;
+    store.importTemplates.push({
+      id: 4,
+      userId: "u1",
+      name: "No-currency template",
+      fileHeaders: ["Transaction Date", "Description", "Debit"],
+      columnMapping: { date: "Transaction Date", amount: "Debit", payee: "Description" },
+      defaultAccount: null,
+      isDefault: false,
+      createdAt: "",
+      updatedAt: "",
+    });
+    const r = await parseCsvWithFallback({
+      text: csv,
+      userId: "u1",
+      templateId: 4,
+      anchorCurrency: "USD",
+    });
+    expect(r.kind).toBe("parsed");
+    if (r.kind !== "parsed") return;
+    expect(r.rows[0].currency).toBe("USD");
+  });
+
+  it("(d) a file WITH a Currency column keeps its per-row values", async () => {
+    const csv = `Date,Account,Amount,Payee,Currency
+2024-01-15,Checking,-12.50,Coffee,JPY
+2024-01-16,Checking,100.00,Salary,MXN`;
+    const r = await parseCsvWithFallback({
+      text: csv,
+      userId: "u1",
+      defaultCurrency: "EUR",
+      anchorCurrency: "USD",
+    });
+    expect(r.kind).toBe("parsed");
+    if (r.kind !== "parsed") return;
+    expect(r.rows.map((x) => x.currency)).toEqual(["JPY", "MXN"]);
+  });
+
+  it("(e) empty Currency cells take the fallback; the populated ones don't", async () => {
+    const csv = `Date,Account,Amount,Payee,Currency
+2024-01-15,Checking,-12.50,Coffee,JPY
+2024-01-16,Checking,100.00,Salary,`;
+    const r = await parseCsvWithFallback({
+      text: csv,
+      userId: "u1",
+      anchorCurrency: "USD",
+    });
+    expect(r.kind).toBe("parsed");
+    if (r.kind !== "parsed") return;
+    expect(r.rows.map((x) => x.currency)).toEqual(["JPY", "USD"]);
+  });
+
+  it("(e') a partially-empty Currency column with NO fallback → needs-currency", async () => {
+    const csv = `Date,Account,Amount,Payee,Currency
+2024-01-15,Checking,-12.50,Coffee,JPY
+2024-01-16,Checking,100.00,Salary,`;
+    const r = await parseCsvWithFallback({ text: csv, userId: "u1" });
+    expect(r.kind).toBe("needs-currency");
+  });
+
+  it("(f) canonical path: no column, no default, no anchor → needs-currency", async () => {
+    const r = await parseCsvWithFallback({ text: noCcyCanonical, userId: "u1" });
+    expect(r.kind).toBe("needs-currency");
+    if (r.kind !== "needs-currency") return;
+    // The body still carries everything a column-mapping dialog needs.
+    expect(r.headers).toContain("Amount");
+    expect(r.sampleRows.length).toBeGreaterThan(0);
+    expect(r.rowCount).toBe(2);
+  });
+
+  it("(f') auto-detect-direct path: no column, no default, no anchor → needs-currency", async () => {
+    // Non-canonical headers with a payee synonym → step 3.5 drives the parse.
+    const csv = `Transaction Date,Description,Amount
+2024-01-15,Coffee,-12.50`;
+    const r = await parseCsvWithFallback({ text: csv, userId: "u1" });
+    expect(r.kind).toBe("needs-currency");
+  });
+
+  it("(f'') explicit-template path: no column, no default, no anchor → needs-currency", async () => {
+    const csv = `Transaction Date,Description,Debit
+2024-01-15,Coffee,12.50`;
+    store.importTemplates.push({
+      id: 5,
+      userId: "u1",
+      name: "No-currency template",
+      fileHeaders: ["Transaction Date", "Description", "Debit"],
+      columnMapping: { date: "Transaction Date", amount: "Debit", payee: "Description" },
+      defaultAccount: null,
+      isDefault: false,
+      createdAt: "",
+      updatedAt: "",
+    });
+    const r = await parseCsvWithFallback({ text: csv, userId: "u1", templateId: 5 });
+    expect(r.kind).toBe("needs-currency");
+  });
+
+  it("(f''') auto-MATCHED-template path: no column, no default, no anchor → needs-currency", async () => {
+    const csv = `Transaction Date,Description,Debit,Credit
+2024-01-15,Coffee,12.50,`;
+    store.importTemplates.push({
+      id: 6,
+      userId: "u1",
+      name: "TD Checking",
+      fileHeaders: ["Transaction Date", "Description", "Debit", "Credit"],
+      columnMapping: { date: "Transaction Date", amount: "Debit", payee: "Description" },
+      defaultAccount: "TD Checking",
+      isDefault: false,
+      createdAt: "",
+      updatedAt: "",
+    });
+    const r = await parseCsvWithFallback({ text: csv, userId: "u1" });
+    expect(r.kind).toBe("needs-currency");
+  });
+
+  it("(g) rows that genuinely say CAD parse fine with NO fallback available", async () => {
+    // Proves the detection is provenance-based, not a post-hoc scan for the
+    // literal string "CAD" — these rows carry a real, file-sourced currency.
+    const csv = `Date,Account,Amount,Payee,Currency
+2024-01-15,Checking,-12.50,Coffee,CAD
+2024-01-16,Checking,100.00,Salary,CAD`;
+    const r = await parseCsvWithFallback({ text: csv, userId: "u1" });
+    expect(r.kind).toBe("parsed");
+    if (r.kind !== "parsed") return;
+    expect(r.rows.map((x) => x.currency)).toEqual(["CAD", "CAD"]);
+  });
+
+  it("the confirmAutoMapping gate still wins over the currency refusal", async () => {
+    // The confirm gate returns BEFORE any rows are committed, so a
+    // currency-less file in an account in 'confirm' mode gets the mapping
+    // dialog (which carries the default-currency knob) rather than the refusal.
+    const r = await parseCsvWithFallback({
+      text: noCcyCanonical,
+      userId: "u1",
+      confirmAutoMapping: true,
+    });
+    expect(r.kind).toBe("auto-detected");
   });
 });
 
