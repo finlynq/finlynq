@@ -15,6 +15,7 @@ import { logApiError } from "@/lib/validate";
 import { decryptNamedRows, decryptName } from "@/lib/crypto/encrypted-columns";
 import { safeName } from "@/lib/safe-name";
 import { rankBreakdown, type BreakdownMember } from "@/lib/chart-breakdown";
+import { buildSpendingByCategory } from "@/lib/dashboard/spending-by-category";
 import { withOp } from "@/lib/diagnostics/op-context";
 
 export function GET(request: NextRequest) {
@@ -167,26 +168,20 @@ async function handleGet(request: NextRequest) {
     );
 
     const spendSlices = await getSpendingByCategoryWithReporting(userId, startDate, endDate);
-    const spendMap = new Map<string | number, {
-      categoryId: number | null;
-      categoryNameCt: string | null;
-      categoryGroup: string | null;
-      categoryType: string | null;
-      total: number;
-    }>();
-    for (const r of spendSlices) {
-      const key = r.categoryId ?? `null:${r.categoryGroup}`;
-      const cur = spendMap.get(key) ?? {
+    // Convert each slice to display currency, then group + decrypt the category
+    // NAME (the card reads a plaintext `categoryName`; shipping only the
+    // encrypted `categoryNameCt` made every slice fall back to "Uncategorized").
+    // A cold DEK degrades to "Category #<id>", never a false "Uncategorized".
+    const spendingByCategory = buildSpendingByCategory(
+      spendSlices.map((r) => ({
         categoryId: r.categoryId,
         categoryNameCt: r.categoryNameCt,
         categoryGroup: r.categoryGroup,
         categoryType: r.categoryType,
-        total: 0,
-      };
-      cur.total += convertGroup(r);
-      spendMap.set(key, cur);
-    }
-    const spendingByCategory = Array.from(spendMap.values())
+        total: convertGroup(r),
+      })),
+      (nameCt) => decryptName(nameCt, dek, null),
+    )
       .map((r) => ({ ...r, total: Math.round(r.total * 100) / 100 }))
       .sort((a, b) => a.total - b.total);
 

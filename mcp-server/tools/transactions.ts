@@ -67,6 +67,12 @@ import {
   reverseLotsForDeleteHook,
 } from "../../src/lib/portfolio/lots/write-hooks";
 import {
+  deleteTransactionsCascade,
+  planTransactionDelete,
+  portfolioEditBlockedMessage,
+} from "../../src/lib/transactions/delete-cascade";
+import { stampSnapshotDirtyForTxIds } from "../../src/lib/transactions/snapshot-dirty-for-tx";
+import {
   scanForPossibleDuplicates,
   dateBoundsForScan,
   type CommittedInsert,
@@ -1148,6 +1154,10 @@ export function registerTransactionsTools(server: McpServer, ctx: PgToolContext)
          WHERE t.user_id = ${userId} AND t.id = ${id}
       `);
       if (!existing.length) return err(`Transaction #${id} not found`);
+      // MCP-M1 — stamp the PRE-edit position now, before any UPDATE moves the
+      // row's date or account. The post-edit stamp happens after the writes;
+      // `LEAST` coalescing in both marker tables makes the pair idempotent.
+      await stampSnapshotDirtyForTxIds(userId, [id]);
       const accountCurrency = String(existing[0].account_currency ?? "CAD");
       const txAccountId = existing[0].account_id != null ? Number(existing[0].account_id) : undefined;
       const existingAmount = existing[0].amount != null ? Number(existing[0].amount) : null;
@@ -1335,6 +1345,12 @@ export function registerTransactionsTools(server: McpServer, ctx: PgToolContext)
       if (!fieldsUpdated.length) return err("No fields to update");
 
       invalidateUserTxCache(userId);
+      // MCP-M1 (2026-07-30) — the web PUT stamps the snapshot-dirty markers
+      // for the PRE-edit position (captured above, before the UPDATEs) and the
+      // POST-edit one, so a date/account move dirties BOTH ends. The MCP
+      // update path stamped neither, leaving the Net Worth chart showing
+      // pre-edit history. `LEAST` coalescing makes the double stamp free.
+      await stampSnapshotDirtyForTxIds(userId, [id]);
       // Issue #28: re-read the audit timestamp so the AI assistant can
       // verify the write landed and pin the freshness.
       const after = await q(db, sql`SELECT updated_at FROM transactions WHERE id = ${id} AND user_id = ${userId} LIMIT 1`);
@@ -1375,8 +1391,9 @@ export function registerTransactionsTools(server: McpServer, ctx: PgToolContext)
   async function opTxDelete(argsObj: {
     id: number;
     expected?: { payee?: string; amount?: number };
+    confirm_cascade?: boolean;
   }): Promise<ToolResult> {
-      const { id, expected } = argsObj;
+      const { id, expected, confirm_cascade } = argsObj;
       const existing = await q(db, sql`SELECT id, payee, amount, date FROM transactions WHERE user_id = ${userId} AND id = ${id}`);
       if (!existing.length) return err(`Transaction #${id} not found`);
       const t = existing[0];
@@ -1384,13 +1401,26 @@ export function registerTransactionsTools(server: McpServer, ctx: PgToolContext)
       // Echo gate — refuse on a payee/amount mismatch (hallucinated-id guard).
       const mismatch = checkExpectedEcho(expected, { payee: plainPayee as string, amount: Number(t.amount) }, `transaction #${id}`);
       if (mismatch) return err(mismatch);
-      // Portfolio lot tracking — reverse BEFORE the DELETE so closure rows
-      // are still in place for the lookup. CASCADE on holding_lots.open_tx_id
-      // catches anything reverseLotsForDeleteHook missed.
-      await reverseLotsForDeleteHook(userId, id);
-      await db.execute(sql`DELETE FROM transactions WHERE id = ${id} AND user_id = ${userId}`);
-      invalidateUserTxCache(userId);
-      return text({ success: true, data: { message: `Deleted transaction #${id}: "${plainPayee}" ${t.amount} on ${t.date}` } });
+
+      // Shared chokepoint (2026-07-30). This used to be a bare single-row
+      // DELETE, which orphaned the other leg of every transfer / trade pair.
+      // Plan first so the two-step confirmation covers what will ACTUALLY be
+      // deleted: when the cascade pulls in siblings the caller never named, we
+      // refuse and disclose them unless `confirm_cascade` was passed.
+      const plan = await planTransactionDelete(userId, [id], db);
+      if (plan.siblingIds.length > 0 && !confirm_cascade) {
+        return err(
+          `Transaction #${id} is one leg of a linked pair. Deleting it also deletes ` +
+          `${plan.siblingIds.length} sibling row(s): #${plan.siblingIds.join(", #")} ` +
+          `(total ${plan.ids.length} rows). Re-run with confirm_cascade: true to proceed.`,
+        );
+      }
+      const outcome = await deleteTransactionsCascade(userId, [id], { plan, executor: db });
+      if (!outcome.ok) return err(outcome.message);
+      const extra = outcome.deletedIds.length > 1
+        ? ` (cascaded to ${outcome.deletedIds.length} linked rows: #${outcome.deletedIds.join(", #")})`
+        : "";
+      return text({ success: true, data: { message: `Deleted transaction #${id}: "${plainPayee}" ${t.amount} on ${t.date}${extra}`, deletedIds: outcome.deletedIds, cascaded: outcome.cascaded } });
   }
 
   // ── consolidated tool: manage_transactions ────
@@ -1463,6 +1493,7 @@ export function registerTransactionsTools(server: McpServer, ctx: PgToolContext)
           payee: z.string().optional().describe("The payee you believe this transaction has (case-insensitive)."),
           amount: z.number().optional().describe("The amount you believe this transaction has (±0.01)."),
         }).optional().describe("Optional row-content echo. If present and it doesn't match the stored row, the delete is refused."),
+        confirm_cascade: z.boolean().optional().describe("Acknowledge that this row is one leg of a linked pair (transfer / trade / swap) and that ALL its siblings will be deleted with it. Without it a linked row is refused, and the refusal names every sibling id."),
       }),
     ]),
     async (input) => {
@@ -2553,6 +2584,10 @@ export function registerTransactionsTools(server: McpServer, ctx: PgToolContext)
    */
   async function commitBulkUpdate(ids: number[], resolved: ResolvedChanges): Promise<number> {
     if (ids.length === 0) return 0;
+    // MCP-M1 (2026-07-30) — stamp the PRE-update position so an account/date
+    // move dirties the day the rows LEFT; the post-update stamp is at the end
+    // of this function. Web PUT does the same pair.
+    await stampSnapshotDirtyForTxIds(userId, ids);
     // Defense-in-depth (low finding, SECURITY_REVIEW 2026-05-06): use a
     // parameterized `ANY(ARRAY[...]::int[])` predicate rather than a hand-built
     // CSV. Number() coercion above keeps the input safe today; this swap
@@ -2616,6 +2651,8 @@ export function registerTransactionsTools(server: McpServer, ctx: PgToolContext)
         }
       }
     }
+    // Post-update stamp — the row's NEW (account, date) position.
+    await stampSnapshotDirtyForTxIds(userId, ids);
     return ids.length;
   }
 
@@ -2731,8 +2768,27 @@ export function registerTransactionsTools(server: McpServer, ctx: PgToolContext)
           };
         });
         const sample = rows.map((r) => decryptTxRowFields(dek, r as Record<string, unknown>));
+        // Disclose the link-sibling cascade (2026-07-30). The filter can match
+        // ONE leg of a transfer / trade pair; the delete removes both, so the
+        // confirmation must cover the expanded set, not the matched set.
+        const plan = await planTransactionDelete(userId, ids, db);
         const token = signPreviewToken(userId, "bulk_delete", { ids });
-        return text({ success: true, data: { affectedCount: ids.length, sample, confirmationToken: token } });
+        return text({
+          success: true,
+          data: {
+            affectedCount: ids.length,
+            sample,
+            cascadedIds: plan.siblingIds,
+            totalToDelete: plan.ids.length,
+            ...(plan.siblingIds.length > 0
+              ? { cascadeNote: `${plan.siblingIds.length} additional linked row(s) will be deleted with these (transfer / trade / swap siblings): #${plan.siblingIds.join(", #")}` }
+              : {}),
+            ...(plan.blockingClosureTxIds.length > 0
+              ? { blockingClosureTxIds: plan.blockingClosureTxIds, blockedNote: portfolioEditBlockedMessage(plan.blockingClosureTxIds.length) }
+              : {}),
+            confirmationToken: token,
+          },
+        });
       } catch (e) {
         return err(String(e instanceof Error ? e.message : e));
       }
@@ -2754,11 +2810,20 @@ export function registerTransactionsTools(server: McpServer, ctx: PgToolContext)
         const check = verifyPreviewToken(confirmation_token, userId, "bulk_delete", { ids });
         if (!check.valid) return err(renderTokenError(check, "preview_bulk_delete"));
         if (ids.length === 0) return text({ success: true, data: { deleted: 0 } });
-        // Defense-in-depth: parameterized ANY(ARRAY[...]::int[]) instead of CSV.
-        const idsExpr = sql.join(ids.map((id) => sql`${Number(id)}`), sql`, `);
-        await db.execute(sql`DELETE FROM transactions WHERE id = ANY(ARRAY[${idsExpr}]::int[]) AND user_id = ${userId}`);
-        invalidateUserTxCache(userId);
-        return text({ success: true, data: { deleted: ids.length } });
+        // Shared chokepoint (2026-07-30) — was a bare `DELETE ... WHERE id =
+        // ANY(...)`: no link-sibling cascade, no lot reversal, no dirty
+        // markers. `preview_bulk_delete` discloses the expanded set that this
+        // will remove.
+        const outcome = await deleteTransactionsCascade(userId, ids, { executor: db });
+        if (!outcome.ok) return err(outcome.message);
+        return text({
+          success: true,
+          data: {
+            deleted: outcome.deletedIds.length,
+            deletedIds: outcome.deletedIds,
+            cascaded: outcome.cascaded,
+          },
+        });
       } catch (e) {
         return err(String(e instanceof Error ? e.message : e));
       }

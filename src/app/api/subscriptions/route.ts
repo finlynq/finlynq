@@ -3,6 +3,7 @@ import { db, schema } from "@/db";
 import { eq, and, sql } from "drizzle-orm";
 import { detectRecurringTransactions } from "@/lib/recurring-detector";
 import { requireAuth } from "@/lib/auth/require-auth";
+import { requireEncryption } from "@/lib/auth/require-encryption";
 import { requireDevMode } from "@/lib/require-dev-mode";
 import { z } from "zod";
 import { validateBody, safeErrorMessage, logApiError } from "@/lib/validate";
@@ -88,9 +89,12 @@ export async function GET(request: NextRequest) {
 }
 
 export async function POST(request: NextRequest) {
-  const auth = await requireAuth(request); if (!auth.authenticated) return auth.response;
+  // requireEncryption, not requireAuth: buildNameFields(null) returns {} and
+  // encryptOptional(null, note) stores the note as PLAINTEXT — a DEK-less
+  // write persisted a permanently nameless row (review 2026-07-30 #7).
+  const auth = await requireEncryption(request); if (!auth.ok) return auth.response;
+  const { userId, dek } = auth;
   const devGuard = await requireDevMode(request); if (devGuard) return devGuard;
-  const { userId } = auth.context;
   try {
     const body = await request.json();
 
@@ -118,7 +122,7 @@ export async function POST(request: NextRequest) {
         .all();
       // Payee is encrypted at rest — decrypt before running the recurring
       // detector (which needs plaintext to group by payee).
-      const txns = decryptTxRows(auth.context.dek, rawTxns);
+      const txns = decryptTxRows(dek, rawTxns);
 
       const detected = detectRecurringTransactions(
         txns.map((t) => ({
@@ -181,7 +185,7 @@ export async function POST(request: NextRequest) {
     }
     if (!currency) currency = await getDisplayCurrency(userId);
 
-    const enc = buildNameFields(auth.context.dek, { name: d.name });
+    const enc = buildNameFields(dek, { name: d.name });
     // Stream D Phase 4 — plaintext name dropped.
     const sub = await db
       .insert(schema.subscriptions)
@@ -195,7 +199,7 @@ export async function POST(request: NextRequest) {
         nextDate: d.nextDate || null,
         status: d.status ?? "active",
         cancelReminderDate: d.cancelReminderDate || null,
-        notes: encryptOptional(auth.context.dek, d.notes || null),
+        notes: encryptOptional(dek, d.notes || null),
         ...enc,
       })
       .returning()
@@ -212,7 +216,10 @@ export async function POST(request: NextRequest) {
 }
 
 export async function PUT(request: NextRequest) {
-  const auth = await requireAuth(request); if (!auth.authenticated) return auth.response;
+  // requireEncryption — with a null DEK the rename silently no-ops and the note
+  // lands in plaintext (review 2026-07-30 #7).
+  const auth = await requireEncryption(request); if (!auth.ok) return auth.response;
+  const { userId, dek } = auth;
   const devGuard = await requireDevMode(request); if (devGuard) return devGuard;
   try {
     const body = await request.json();
@@ -240,20 +247,20 @@ export async function PUT(request: NextRequest) {
       refs.accountIds = [updatedAccountId];
     }
     if (refs.categoryIds || refs.accountIds) {
-      await verifyOwnership(auth.context.userId, refs);
+      await verifyOwnership(userId, refs);
     }
     const enc = typeof rawName === "string"
-      ? buildNameFields(auth.context.dek, { name: rawName })
+      ? buildNameFields(dek, { name: rawName })
       : {};
     // Encrypt the free-text `notes` when present (2026-06-01 plaintext-gap closure).
     const rawNotes = (data as Record<string, unknown>).notes;
     if (typeof rawNotes === "string") {
-      (data as Record<string, unknown>).notes = encryptOptional(auth.context.dek, rawNotes);
+      (data as Record<string, unknown>).notes = encryptOptional(dek, rawNotes);
     }
     const sub = await db
       .update(schema.subscriptions)
       .set({ ...data, ...enc })
-      .where(and(eq(schema.subscriptions.id, id), eq(schema.subscriptions.userId, auth.context.userId)))
+      .where(and(eq(schema.subscriptions.id, id), eq(schema.subscriptions.userId, userId)))
       .returning()
       .get();
     return NextResponse.json(sub);
@@ -261,7 +268,7 @@ export async function PUT(request: NextRequest) {
     if (error instanceof OwnershipError) {
       return NextResponse.json({ error: "Not found" }, { status: 404 });
     }
-    await logApiError("PUT", "/api/subscriptions", error, auth.context.userId);
+    await logApiError("PUT", "/api/subscriptions", error, userId);
     return NextResponse.json({ error: safeErrorMessage(error, "Failed") }, { status: 500 });
   }
 }

@@ -22,6 +22,11 @@
  * header switches to that column, ascending. (Matches the existing securities /
  * admin / holdings tables — none of which had a 3rd "reset" click.)
  *
+ * Sort/filter are CLIENT-side by default, which suits the small row counts most
+ * consumers have. A table that pages server-side must pass `manualSort` (see the
+ * prop docs) so the component stops re-ordering the fetched page on top of the
+ * server's ORDER BY — the admin users table is the reference consumer.
+ *
  * Null-safe comparators (load-bearing — decrypted name fields can be null; see
  * CLAUDE.md "String methods on decrypted-name fields must defend against null"):
  * string accessors compare via `(a ?? "").localeCompare(b ?? "")`; numeric
@@ -40,6 +45,12 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { cn } from "@/lib/utils";
+import { ColumnFilterPopover } from "@/components/ui/column-filter";
+import type {
+  FilterOption,
+  TableColFilter,
+  TableFilterType,
+} from "@/lib/table-filters";
 
 export type SortDir = "asc" | "desc";
 
@@ -61,6 +72,17 @@ export interface DataTableColumn<T> {
    * Default/false = no filter. Opt-in per column.
    */
   filter?: "text" | "select" | false;
+  /**
+   * SERVER-side per-column filter, rendered as a header popover (the same one
+   * the transactions table uses). Distinct from `filter` above, which is the
+   * client-side filter row: use `filterType` whenever the table pages
+   * server-side, and pair it with the controlled `columnFilters` /
+   * `onColumnFilterChange` props. The column's `key` is the `columnId` sent to
+   * the server.
+   */
+  filterType?: TableFilterType;
+  /** Choices for `filterType: "enum"`. */
+  filterOptions?: FilterOption[];
   /** When true, the column appears in the show/hide control. */
   hideable?: boolean;
   /** Start hidden (only meaningful with `hideable`). */
@@ -83,6 +105,28 @@ export interface DataTableProps<T> {
   // ── Controlled sort (optional). Uncontrolled by default. ──
   sort?: { key: string; dir: SortDir } | null;
   onSortChange?: (sort: { key: string; dir: SortDir } | null) => void;
+
+  /**
+   * Server-side sort/filter mode. When true the component renders `rows` in the
+   * exact order given and applies NO client-side sort or filter — headers still
+   * render, still show the sort indicator, and still fire `onSortChange` so the
+   * owner can refetch.
+   *
+   * Required for any table that pages server-side. Without it the internal sort
+   * re-orders the fetched page on top of the server's ORDER BY, which is wrong
+   * twice over: it can only order the rows already fetched (page 1 of N sorted
+   * in isolation), and its comparator is `localeCompare`, which disagrees with
+   * Postgres collation on case and punctuation. Combine with the `sort` /
+   * `onSortChange` controlled props.
+   */
+  manualSort?: boolean;
+
+  /**
+   * Active server-side per-column filters (controlled). Pair with
+   * `onColumnFilterChange` and per-column `filterType`.
+   */
+  columnFilters?: TableColFilter[];
+  onColumnFilterChange?: (columnId: string, next: TableColFilter | null) => void;
 }
 
 function defaultCellValue(v: string | number | null): React.ReactNode {
@@ -115,6 +159,9 @@ export function DataTable<T>({
   className,
   sort: controlledSort,
   onSortChange,
+  manualSort = false,
+  columnFilters,
+  onColumnFilterChange,
 }: DataTableProps<T>) {
   // ── Sort state (uncontrolled unless `sort`/`onSortChange` provided). ──
   const [internalSort, setInternalSort] = React.useState<{
@@ -181,6 +228,10 @@ export function DataTable<T>({
 
   // ── Derived rows: filter → sort. ──
   const processedRows = React.useMemo(() => {
+    // Server-side mode: the rows arrive already filtered, sorted and paged.
+    // Touching them here would re-order one page in isolation — see `manualSort`.
+    if (manualSort) return rows;
+
     let out = rows;
 
     // Filter (client-side over accessor).
@@ -209,7 +260,7 @@ export function DataTable<T>({
       }
     }
     return out;
-  }, [rows, columns, filters, sort]);
+  }, [rows, columns, filters, sort, manualSort]);
 
   if (rows.length === 0 && emptyState) {
     return <>{emptyState}</>;
@@ -257,29 +308,47 @@ export function DataTable<T>({
                     col.className,
                   )}
                 >
-                  {sortable ? (
-                    <button
-                      type="button"
-                      onClick={() => handleHeaderClick(col)}
-                      className={cn(
-                        "inline-flex items-center gap-0.5 select-none transition-colors hover:text-foreground",
-                        col.align === "right" && "flex-row-reverse",
-                      )}
-                    >
-                      {col.header}
-                      {active ? (
-                        sort.dir === "asc" ? (
-                          <ChevronUp className="h-3.5 w-3.5" />
+                  <span
+                    className={cn(
+                      "inline-flex items-center gap-0.5",
+                      col.align === "right" && "flex-row-reverse",
+                    )}
+                  >
+                    {sortable ? (
+                      <button
+                        type="button"
+                        onClick={() => handleHeaderClick(col)}
+                        className={cn(
+                          "inline-flex items-center gap-0.5 select-none transition-colors hover:text-foreground",
+                          col.align === "right" && "flex-row-reverse",
+                        )}
+                      >
+                        {col.header}
+                        {active ? (
+                          sort.dir === "asc" ? (
+                            <ChevronUp className="h-3.5 w-3.5" />
+                          ) : (
+                            <ChevronDown className="h-3.5 w-3.5" />
+                          )
                         ) : (
-                          <ChevronDown className="h-3.5 w-3.5" />
-                        )
-                      ) : (
-                        <ChevronsUpDown className="h-3.5 w-3.5 opacity-40" />
-                      )}
-                    </button>
-                  ) : (
-                    col.header
-                  )}
+                          <ChevronsUpDown className="h-3.5 w-3.5 opacity-40" />
+                        )}
+                      </button>
+                    ) : (
+                      col.header
+                    )}
+                    {col.filterType && onColumnFilterChange && (
+                      <ColumnFilterPopover
+                        columnId={col.key}
+                        filterType={col.filterType}
+                        options={col.filterOptions}
+                        activeFilter={(columnFilters ?? []).find(
+                          (f) => f.columnId === col.key,
+                        )}
+                        onChange={(next) => onColumnFilterChange(col.key, next)}
+                      />
+                    )}
+                  </span>
                 </TableHead>
               );
             })}

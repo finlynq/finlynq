@@ -37,7 +37,7 @@
  */
 
 import { db, schema } from "@/db";
-import { and, eq, asc, inArray, ne } from "drizzle-orm";
+import { and, eq, asc, inArray } from "drizzle-orm";
 import { decryptStaged } from "@/lib/crypto/staging-envelope";
 import { tryDecryptField } from "@/lib/crypto/envelope";
 import {
@@ -54,6 +54,43 @@ import {
   ANCHOR_SOURCES,
   type AnchorSource,
 } from "@/lib/bank-ledger-balance";
+import {
+  finishStatementIfFullyInLedger,
+  sweepPendingStatementsForAccount,
+} from "@/lib/import/statement-resolution";
+
+/**
+ * The "is this statement finished?" rule lives in `statement-resolution.ts` and
+ * is decided against the LIVE ledger, not the frozen ingest stamps — see that
+ * module's header for why. Re-exported here because this file is the historical
+ * home of `importFullyResolved` and its callers/tests import it from here.
+ */
+export {
+  importFullyResolved,
+  type ResolutionRow,
+} from "@/lib/import/statement-resolution";
+
+/**
+ * Close the staged import when the ledger already contains all of it, and file
+ * it into the Processed bucket (status + zero-row batch, one transaction).
+ *
+ * Called from BOTH exits of `sendStagedRowsToBankLedger` — after a promote pass
+ * AND on the nothing-eligible early return. That second callsite is load-bearing:
+ * a duplicates-only re-sync with no balance anchor selects ZERO rows to promote,
+ * so it bails at the `allSelected.length === 0` guard long before the
+ * post-promote check. Verified on dev — two identical 3-row duplicates-only
+ * imports, one carrying a statement balance and one not: the anchored one
+ * reached the post-promote check and closed, the anchor-less one parked in
+ * pending forever. A SimpleFIN sync always carries a balance snapshot, which is
+ * why the feed path looked fixed while a plain re-upload was not.
+ */
+async function markImportResolvedIfDone(
+  userId: string,
+  stagedImportId: string,
+  dek: Buffer | null,
+): Promise<void> {
+  await finishStatementIfFullyInLedger(userId, stagedImportId, dek);
+}
 
 export type SendToBankLedgerFailCode = "not_found";
 
@@ -215,6 +252,14 @@ export async function sendStagedRowsToBankLedger(
     staged.boundAccountId != null && dedupedAnchors.length > 0;
 
   if (allSelected.length === 0 && !anchorsOnlyApprove) {
+    // Nothing eligible to promote — which is the STEADY STATE of a dupe-only
+    // re-sync, not an error: every row is `skipped_duplicate` and deliberately
+    // excluded above. Resolve the import here too, or it parks in
+    // /import/pending forever (the post-promote check below is unreachable
+    // from this exit). The predicate still guards the genuine empty-selection
+    // case — an explicit `rowIds: []` over rows that DO need action leaves the
+    // import pending, exactly as before.
+    await markImportResolvedIfDone(userId, id, dek);
     return { ok: false, code: "not_found", message: "No rows selected" };
   }
 
@@ -458,22 +503,43 @@ export async function sendStagedRowsToBankLedger(
       .set({ rowStatus: "approved" })
       .where(inArray(schema.stagedTransactions.id, Array.from(materializedRowIds)));
   }
-  // If no rows still need action (every row is now 'approved'), mark the
-  // import approved so it leaves the pending list.
-  const remaining = await db
-    .select({ id: schema.stagedTransactions.id })
-    .from(schema.stagedTransactions)
-    .where(and(
-      eq(schema.stagedTransactions.stagedImportId, id),
-      ne(schema.stagedTransactions.rowStatus, "approved"),
-    ))
-    .limit(1)
-    .all();
-  if (remaining.length === 0) {
-    await db
-      .update(schema.stagedImports)
-      .set({ status: "approved" })
-      .where(eq(schema.stagedImports.id, id));
+  // If no row still needs user action, mark the import approved so it leaves
+  // the pending list. `skipped_duplicate` rows are resolved by construction
+  // (deliberately never promoted), so they must NOT keep the import pending —
+  // otherwise a dupe-heavy re-sync parks in /import/pending forever even
+  // though every genuinely-new row already imported (`importFullyResolved`).
+  await markImportResolvedIfDone(userId, id, dek);
+
+  // ─── Sibling sweep ───────────────────────────────────────────────────────
+  // Rows just landed in the ledger, which can retroactively finish OTHER
+  // pending statements for this account: two statements staged before either
+  // was promoted both stamp the same transaction `new`, and the second one's
+  // stamp never updates. Re-probing the ledger is the only way to see it.
+  //
+  // Runs on the success path only, after the promote writes above have
+  // committed. Returns after one query when the account has nothing else
+  // pending, which is the common case.
+  //
+  // NON-RECURSIVE: the sweep marks statements finished directly and never
+  // re-enters this function. Finishing loads nothing into the ledger, so a
+  // statement closed by the sweep cannot create work for a further pass.
+  if (staged.boundAccountId != null) {
+    try {
+      await sweepPendingStatementsForAccount(
+        userId,
+        staged.boundAccountId,
+        dek,
+        id,
+      );
+    } catch (err) {
+      // Non-fatal: the rows this call promoted are already committed. A failed
+      // sweep just leaves siblings pending until the next processed statement.
+      console.error("[send-to-bank-ledger] sibling sweep failed", {
+        userId,
+        stagedImportId: id,
+        err,
+      });
+    }
   }
 
   const firstAnchor = dedupedAnchors[0] ?? null;

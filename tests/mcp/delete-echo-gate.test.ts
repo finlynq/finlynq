@@ -41,7 +41,9 @@ function makeFixtureDb(matcher: (sqlText: string) => Record<string, unknown>[] |
   const queries: { text: string }[] = [];
   const db = {
     execute: async (q: unknown) => {
-      const text = serializeSqlTemplate(q);
+      // Collapse whitespace — the shared delete chokepoint writes multi-line
+      // `sql` templates, and these fixtures match on substrings.
+      const text = serializeSqlTemplate(q).replace(/\s+/g, " ").trim();
       queries.push({ text });
       const rows = matcher(text);
       return { rows: rows ?? [], rowCount: rows?.length ?? 0 };
@@ -96,7 +98,10 @@ describe("checkExpectedEcho (pure)", () => {
 describe("delete_transaction — echo gate (FINLYNQ-264 Phase 2)", () => {
   const dek = randomBytes(32);
   const fixture = (sqlText: string): Record<string, unknown>[] | undefined => {
-    if (/FROM transactions WHERE user_id/i.test(sqlText) && /AND id = /i.test(sqlText)) {
+    // The echo-gate lookup AND the shared chokepoint's owner-scope / sibling /
+    // dirty-date reads all select from `transactions` by id — one row answers
+    // them all (no link ids ⇒ the cascade expands to just this row).
+    if (/^SELECT .*FROM transactions WHERE user_id = \?/i.test(sqlText) && /AND id = /i.test(sqlText)) {
       return [{ id: 812, payee: encryptField(dek, "Rent"), amount: -1200, date: "2026-01-02" }];
     }
     return [];

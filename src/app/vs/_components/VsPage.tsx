@@ -1,7 +1,7 @@
 import Link from "next/link";
-import type { ReactNode } from "react";
+import { isValidElement, type ReactNode } from "react";
 import { AnalyticsConsent } from "@/components/analytics-consent";
-import { JsonLd, breadcrumbSchema } from "@/components/seo/json-ld";
+import { JsonLd, breadcrumbSchema, faqSchema } from "@/components/seo/json-ld";
 
 /**
  * Shared layout for `/vs/<competitor>` comparison pages.
@@ -70,6 +70,21 @@ export type VsPageContent = {
   lastUpdated: string;
 };
 
+/**
+ * Flatten a ReactNode tree to plain text for schema.org (FAQPage answers
+ * cannot carry markup). Derived from the SAME `faq` content the page renders,
+ * so the JSON-LD can never drift from the visible answers.
+ */
+function nodeText(node: ReactNode): string {
+  if (node == null || typeof node === "boolean") return "";
+  if (typeof node === "string" || typeof node === "number") return String(node);
+  if (Array.isArray(node)) return node.map(nodeText).join("");
+  if (isValidElement(node)) {
+    return nodeText((node.props as { children?: ReactNode }).children);
+  }
+  return "";
+}
+
 export function VsPage({ content }: { content: VsPageContent }) {
   const {
     competitorName,
@@ -96,6 +111,13 @@ export function VsPage({ content }: { content: VsPageContent }) {
           { name: `Finlynq vs ${competitorName}`, path: `/vs/${slug}` },
         ])}
       />
+      {faq.length > 0 && (
+        <JsonLd
+          data={faqSchema(
+            faq.map(({ q, a }) => ({ q, a: nodeText(a).trim() })),
+          )}
+        />
+      )}
       <div className="mx-auto max-w-3xl px-6 py-16">
         <header className="mb-12 border-b border-border pb-8">
           <Link

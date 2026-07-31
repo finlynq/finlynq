@@ -111,15 +111,19 @@ describe("subscriptions notes encryption (notes column variant)", () => {
     expect(written.notes).not.toBe("shared family plan");
   });
 
-  it("POST under a cold DEK stores plaintext passthrough", async () => {
+  // Review 2026-07-30 finding #7 — this used to assert a plaintext passthrough:
+  // with a cold DEK the route wrote the notes UNENCRYPTED and, worse,
+  // buildNameFields(null) returned {} so the subscription persisted with NULL
+  // name_ct/name_lookup and was permanently nameless. The route now uses
+  // requireEncryption, so the write is REFUSED with 423 instead.
+  it("POST under a cold DEK is refused with 423 — nothing is written", async () => {
     (requireAuth as Mock).mockResolvedValue({ authenticated: true, context: mockAuthContext({ dek: null }) });
     const req = createMockRequest("http://localhost:3000/api/subscriptions", {
       method: "POST",
       body: { name: "Netflix", amount: -15.99, notes: "shared family plan" },
     });
     const res = await subPOST(req);
-    expect(res.status).toBe(201);
-    const written = valuesSpy.mock.calls[0][0] as { notes: string };
-    expect(written.notes).toBe("shared family plan");
+    expect(res.status).toBe(423);
+    expect(valuesSpy).not.toHaveBeenCalled();
   });
 });

@@ -10,6 +10,8 @@ import { eq, and, gte, lte, sql } from "drizzle-orm";
 import { decryptName } from "@/lib/crypto/encrypted-columns";
 import { getDisplayCurrency, getRateMap, convertWithRateMap } from "@/lib/fx-service";
 import { todayISO } from "@/lib/utils/date";
+import { buildTxDrillUrl } from "@/lib/transactions/drill-url";
+import { formatCurrency } from "@/lib/currency";
 
 const { accounts, categories, transactions, budgets, goals, subscriptions } = schema;
 
@@ -23,6 +25,18 @@ export type SpotlightItem = {
   description: string;
   actionUrl: string;
   amount?: number;
+  /**
+   * Currency of `amount` AND of every figure inside `description`, so the card
+   * never has to guess (it used to hardcode "CAD", rendering `C$304.47` beside
+   * a `$704.47` from the same row on a USD account).
+   *
+   * Always the user's display currency: every builder converts before emitting.
+   * FINLYNQ-123 — flow figures (budget spend, anomalies, bills) and
+   * point-in-time figures (balances, goal progress) are both converted, and a
+   * native `SUM(amount)` across mixed currencies is never presented under one
+   * label.
+   */
+  currency: string;
 };
 
 const SEVERITY_ORDER: Record<SpotlightSeverity, number> = { critical: 0, warning: 1, info: 2 };
@@ -41,7 +55,17 @@ function daysFromNow(dateStr: string): number {
 }
 
 // 1. Overspent budgets
-async function getOverspentBudgets(userId: string, dek: Buffer | null): Promise<SpotlightItem[]> {
+//
+// FINLYNQ-123 — spend is grouped BY CURRENCY and each slice converted before
+// summing. It used to be one `SUM(transactions.amount)` across every currency
+// the category was billed in, compared against a budget in a possibly different
+// currency and then printed with a bare "$" — a meaningless number under a
+// confident label. Mirrors the conversion `/api/budgets` already does.
+async function getOverspentBudgets(
+  userId: string,
+  dek: Buffer | null,
+  fx: RateCtx,
+): Promise<SpotlightItem[]> {
   const month = currentMonth();
   const [y, m] = month.split("-").map(Number);
   const startDate = `${month}-01`;
@@ -52,36 +76,72 @@ async function getOverspentBudgets(userId: string, dek: Buffer | null): Promise<
       budgetId: budgets.id,
       categoryNameCt: categories.nameCt,
       budgetAmount: budgets.amount,
+      budgetCurrency: budgets.currency,
+      txCurrency: transactions.currency,
       spent: sql<number>`COALESCE(ABS(SUM(CASE WHEN ${transactions.date} >= ${startDate} AND ${transactions.date} <= ${endDate} THEN ${transactions.amount} ELSE 0 END)), 0)`,
     })
     .from(budgets)
     .leftJoin(categories, eq(budgets.categoryId, categories.id))
     .leftJoin(transactions, eq(transactions.categoryId, budgets.categoryId))
     .where(and(eq(budgets.month, month), eq(budgets.userId, userId)))
-    .groupBy(budgets.id, categories.nameCt, budgets.amount)
+    .groupBy(
+      budgets.id,
+      categories.nameCt,
+      budgets.amount,
+      budgets.currency,
+      transactions.currency,
+    )
     .all();
 
-  const items: SpotlightItem[] = [];
+  // Fold the per-currency slices back into one budget row, in display currency.
+  type Agg = { nameCt: string | null; budgetAmount: number; spent: number };
+  const byBudget = new Map<number, Agg>();
   for (const row of rows) {
-    if (row.budgetAmount > 0 && row.spent > row.budgetAmount) {
-      const pctOver = Math.round(((row.spent - row.budgetAmount) / row.budgetAmount) * 100);
-      const categoryName = decryptName(row.categoryNameCt, dek, null);
+    const agg = byBudget.get(row.budgetId) ?? {
+      nameCt: row.categoryNameCt,
+      budgetAmount: convertWithRateMap(
+        row.budgetAmount,
+        row.budgetCurrency ?? fx.displayCurrency,
+        fx.rateMap,
+      ),
+      spent: 0,
+    };
+    agg.spent += Math.abs(
+      convertWithRateMap(row.spent, row.txCurrency ?? fx.displayCurrency, fx.rateMap),
+    );
+    byBudget.set(row.budgetId, agg);
+  }
+
+  const items: SpotlightItem[] = [];
+  for (const [budgetId, agg] of byBudget) {
+    if (agg.budgetAmount > 0 && agg.spent > agg.budgetAmount) {
+      const pctOver = Math.round(((agg.spent - agg.budgetAmount) / agg.budgetAmount) * 100);
+      const categoryName = decryptName(agg.nameCt, dek, null);
       items.push({
-        id: `overspent-${row.budgetId}`,
+        id: `overspent-${budgetId}`,
         type: "overspent_budget",
         severity: pctOver > 20 ? "critical" : "warning",
         title: `${categoryName ?? "Unknown"} over budget`,
-        description: `Spent $${row.spent.toFixed(2)} of $${row.budgetAmount.toFixed(2)} budget (${pctOver}% over)`,
+        description: `Spent ${formatCurrency(agg.spent, fx.displayCurrency)} of ${formatCurrency(agg.budgetAmount, fx.displayCurrency)} budget (${pctOver}% over)`,
         actionUrl: "/budgets",
-        amount: row.spent - row.budgetAmount,
+        amount: agg.spent - agg.budgetAmount,
+        currency: fx.displayCurrency,
       });
     }
   }
   return items;
 }
 
-// 2. Upcoming large bills (>$100 in next 7 days)
-async function getUpcomingLargeBills(userId: string, dek: Buffer | null): Promise<SpotlightItem[]> {
+// 2. Upcoming large bills (>100 display-currency units in next 7 days)
+//
+// The threshold is applied to the CONVERTED amount, matching getLowBalances —
+// otherwise a ¥5,000 subscription (~$33) trips a "large bill" alert while a
+// £90 one (~$115) does not.
+async function getUpcomingLargeBills(
+  userId: string,
+  dek: Buffer | null,
+  fx: RateCtx,
+): Promise<SpotlightItem[]> {
   const todayStr = todayISO();
   const weekAhead = new Date(new Date(todayStr + "T00:00:00").getTime() + 7 * 86400000)
     .toISOString()
@@ -102,7 +162,10 @@ async function getUpcomingLargeBills(userId: string, dek: Buffer | null): Promis
 
   const items: SpotlightItem[] = [];
   for (const sub of subs) {
-    if (Math.abs(sub.amount) >= 100) {
+    const amount = Math.abs(
+      convertWithRateMap(sub.amount, sub.currency ?? fx.displayCurrency, fx.rateMap),
+    );
+    if (amount >= 100) {
       const days = daysFromNow(sub.nextDate!);
       const subName = decryptName(sub.nameCt, dek, null) ?? "Subscription";
       items.push({
@@ -110,9 +173,10 @@ async function getUpcomingLargeBills(userId: string, dek: Buffer | null): Promis
         type: "large_bill",
         severity: "warning",
         title: `${subName} due${days <= 1 ? " tomorrow" : ` in ${days} days`}`,
-        description: `$${Math.abs(sub.amount).toFixed(2)} ${sub.frequency} payment`,
+        description: `${formatCurrency(amount, fx.displayCurrency)} ${sub.frequency} payment`,
         actionUrl: "/transactions",
-        amount: Math.abs(sub.amount),
+        amount,
+        currency: fx.displayCurrency,
       });
     }
   }
@@ -120,12 +184,17 @@ async function getUpcomingLargeBills(userId: string, dek: Buffer | null): Promis
 }
 
 // 3. Goal deadlines approaching (<30 days, <80% funded)
-async function getGoalDeadlines(userId: string, dek: Buffer | null): Promise<SpotlightItem[]> {
+async function getGoalDeadlines(
+  userId: string,
+  dek: Buffer | null,
+  fx: RateCtx,
+): Promise<SpotlightItem[]> {
   const goalRows = await db
     .select({
       id: goals.id,
       nameCt: goals.nameCt,
       targetAmount: goals.targetAmount,
+      currency: goals.currency,
       deadline: goals.deadline,
       accountId: goals.accountId,
     })
@@ -139,17 +208,36 @@ async function getGoalDeadlines(userId: string, dek: Buffer | null): Promise<Spo
     const days = daysFromNow(goal.deadline);
     if (days < 0 || days > 30) continue;
 
+    // Goal progress is a POINT-IN-TIME figure, so both legs convert at the
+    // current rate (FINLYNQ-123). The balance is summed per account currency,
+    // then converted, so a goal tracking a foreign-currency account no longer
+    // compares a native balance against a converted target.
     let current = 0;
     if (goal.accountId) {
-      const bal = await db
-        .select({ total: sql<number>`COALESCE(SUM(${transactions.amount}), 0)` })
+      const balRows = await db
+        .select({
+          currency: transactions.currency,
+          total: sql<number>`COALESCE(SUM(${transactions.amount}), 0)`,
+        })
         .from(transactions)
         .where(and(eq(transactions.accountId, goal.accountId), eq(transactions.userId, userId)))
-        .get();
-      current = Math.abs(bal?.total ?? 0);
+        .groupBy(transactions.currency)
+        .all();
+      current = Math.abs(
+        balRows.reduce(
+          (sum, r) =>
+            sum + convertWithRateMap(r.total, r.currency ?? fx.displayCurrency, fx.rateMap),
+          0,
+        ),
+      );
     }
 
-    const pct = goal.targetAmount > 0 ? (current / goal.targetAmount) * 100 : 0;
+    const target = convertWithRateMap(
+      goal.targetAmount,
+      goal.currency ?? fx.displayCurrency,
+      fx.rateMap,
+    );
+    const pct = target > 0 ? (current / target) * 100 : 0;
     if (pct < 80) {
       const goalName = decryptName(goal.nameCt, dek, null) ?? "Goal";
       items.push({
@@ -157,9 +245,10 @@ async function getGoalDeadlines(userId: string, dek: Buffer | null): Promise<Spo
         type: "goal_deadline",
         severity: days <= 7 ? "critical" : "warning",
         title: `"${goalName}" deadline in ${days} days`,
-        description: `${Math.round(pct)}% funded — need $${(goal.targetAmount - current).toFixed(2)} more`,
+        description: `${Math.round(pct)}% funded — need ${formatCurrency(target - current, fx.displayCurrency)} more`,
         actionUrl: "/goals",
-        amount: goal.targetAmount - current,
+        amount: target - current,
+        currency: fx.displayCurrency,
       });
     }
   }
@@ -167,7 +256,16 @@ async function getGoalDeadlines(userId: string, dek: Buffer | null): Promise<Spo
 }
 
 // 4. Spending anomalies (>30% vs 3-month avg)
-async function getSpendingAnomalies(userId: string, dek: Buffer | null): Promise<SpotlightItem[]> {
+//
+// Both windows group BY CURRENCY and convert each slice before comparing
+// (FINLYNQ-123). Without it, a category billed in two currencies compared a
+// native sum against a native average — and a shift in the currency MIX alone
+// could manufacture or mask a "spike".
+async function getSpendingAnomalies(
+  userId: string,
+  dek: Buffer | null,
+  fx: RateCtx,
+): Promise<SpotlightItem[]> {
   const month = currentMonth();
   const [y, m] = month.split("-").map(Number);
   const startDate = `${month}-01`;
@@ -182,6 +280,7 @@ async function getSpendingAnomalies(userId: string, dek: Buffer | null): Promise
     .select({
       categoryId: categories.id,
       categoryNameCt: categories.nameCt,
+      currency: transactions.currency,
       total: sql<number>`ABS(SUM(${transactions.amount}))`,
     })
     .from(transactions)
@@ -194,12 +293,13 @@ async function getSpendingAnomalies(userId: string, dek: Buffer | null): Promise
         eq(categories.type, "E")
       )
     )
-    .groupBy(categories.id, categories.nameCt)
+    .groupBy(categories.id, categories.nameCt, transactions.currency)
     .all();
 
   const prevSpend = await db
     .select({
       categoryId: categories.id,
+      currency: transactions.currency,
       avgTotal: sql<number>`ABS(SUM(${transactions.amount})) / 3.0`,
     })
     .from(transactions)
@@ -212,26 +312,43 @@ async function getSpendingAnomalies(userId: string, dek: Buffer | null): Promise
         eq(categories.type, "E")
       )
     )
-    .groupBy(categories.id)
+    .groupBy(categories.id, transactions.currency)
     .all();
 
-  const prevMap = new Map(prevSpend.map((r) => [r.categoryId, r.avgTotal]));
+  const convert = (amount: number, currency: string | null) =>
+    convertWithRateMap(amount, currency ?? fx.displayCurrency, fx.rateMap);
+
+  // Fold each category's per-currency slices into one display-currency figure.
+  const currentMap = new Map<number | null, { nameCt: string | null; total: number }>();
+  for (const r of currentSpend) {
+    const agg = currentMap.get(r.categoryId) ?? { nameCt: r.categoryNameCt, total: 0 };
+    agg.total += Math.abs(convert(r.total, r.currency));
+    currentMap.set(r.categoryId, agg);
+  }
+  const prevMap = new Map<number | null, number>();
+  for (const r of prevSpend) {
+    prevMap.set(
+      r.categoryId,
+      (prevMap.get(r.categoryId) ?? 0) + Math.abs(convert(r.avgTotal, r.currency)),
+    );
+  }
 
   const items: SpotlightItem[] = [];
-  for (const row of currentSpend) {
-    const avg = prevMap.get(row.categoryId) ?? 0;
+  for (const [categoryId, agg] of currentMap) {
+    const avg = prevMap.get(categoryId) ?? 0;
     if (avg <= 0) continue;
-    const pctAbove = ((row.total - avg) / avg) * 100;
+    const pctAbove = ((agg.total - avg) / avg) * 100;
     if (pctAbove > 30) {
-      const categoryName = decryptName(row.categoryNameCt, dek, null);
+      const categoryName = decryptName(agg.nameCt, dek, null);
       items.push({
-        id: `anomaly-${row.categoryId}`,
+        id: `anomaly-${categoryId}`,
         type: "spending_anomaly",
         severity: pctAbove > 50 ? "warning" : "info",
         title: `${categoryName ?? "Unknown"} spending spike`,
-        description: `$${row.total.toFixed(2)} this month vs $${avg.toFixed(2)} avg (+${Math.round(pctAbove)}%)`,
+        description: `${formatCurrency(agg.total, fx.displayCurrency)} this month vs ${formatCurrency(avg, fx.displayCurrency)} avg (+${Math.round(pctAbove)}%)`,
         actionUrl: "/transactions",
-        amount: row.total - avg,
+        amount: agg.total - avg,
+        currency: fx.displayCurrency,
       });
     }
   }
@@ -239,7 +356,28 @@ async function getSpendingAnomalies(userId: string, dek: Buffer | null): Promise
 }
 
 // 5. Uncategorized transactions
-async function getUncategorizedTransactions(userId: string): Promise<SpotlightItem[]> {
+//
+// Counts ONLY rows the user can actually act on. Two populations carry a NULL
+// category by design and must be excluded, or the alert asks for work that is
+// impossible to do and can never be cleared:
+//
+//   • Portfolio operations — trades are REQUIRED to keep `categoryId: null`
+//     (see the investment auto-categorization invariant; only dividends and
+//     portfolio income/expense get a category). A trade and its paired cash leg
+//     are two rows, so one purchase used to read as "2 uncategorized".
+//   • Transfer legs — plain cash transfers resolve to the canonical "Transfer"
+//     category, but brokerage deposit/withdrawal legs and older imported pairs
+//     do not. Any row carrying one of the three link ids is part of a pair
+//     whose categorisation is decided by the pair, not by the user.
+//
+// Measured on pf_dev (a prod clone) across all 1,122 NULL-category rows: 265
+// portfolio-linked and ~56 transfer-linked, leaving 801 genuinely uncategorised.
+// For the current month on both active accounts the count was 100% excluded
+// rows — the alert was pure false positive.
+async function getUncategorizedTransactions(
+  userId: string,
+  fx: RateCtx,
+): Promise<SpotlightItem[]> {
   const month = currentMonth();
   const [y, m] = month.split("-").map(Number);
   const startDate = `${month}-01`;
@@ -253,7 +391,11 @@ async function getUncategorizedTransactions(userId: string): Promise<SpotlightIt
         eq(transactions.userId, userId),
         gte(transactions.date, startDate),
         lte(transactions.date, endDate),
-        sql`${transactions.categoryId} IS NULL`
+        sql`${transactions.categoryId} IS NULL`,
+        sql`${transactions.portfolioHoldingId} IS NULL`,
+        sql`${transactions.linkId} IS NULL`,
+        sql`${transactions.tradeLinkId} IS NULL`,
+        sql`${transactions.swapLinkId} IS NULL`,
       )
     )
     .get();
@@ -267,7 +409,15 @@ async function getUncategorizedTransactions(userId: string): Promise<SpotlightIt
         severity: count > 10 ? "warning" : "info",
         title: `${count} uncategorized transaction${count > 1 ? "s" : ""}`,
         description: "Categorize them for better budget tracking",
-        actionUrl: "/transactions",
+        // Scope the drill-through to the month the count covers, via the
+        // single-source helper (FINLYNQ-130) rather than a hand-rolled query
+        // string. The transactions filter chain has no "uncategorized"
+        // predicate today (`categoryId` is parsed as an int), so this lands on
+        // the right period but not the exact rows — better than the bare
+        // `/transactions` it replaces, which dropped the user into an
+        // unfiltered list with no way to find them.
+        actionUrl: buildTxDrillUrl({ startDate, endDate }),
+        currency: fx.displayCurrency,
       },
     ];
   }
@@ -307,9 +457,10 @@ async function getLowBalances(userId: string, dek: Buffer | null, fx: RateCtx): 
         type: "low_balance",
         severity: balance < 100 ? "critical" : "warning",
         title: `${accountName || "Account"} balance is low`,
-        description: `Current balance: $${balance.toFixed(2)}`,
+        description: `Current balance: ${formatCurrency(balance, fx.displayCurrency)}`,
         actionUrl: "/accounts",
         amount: balance,
+        currency: fx.displayCurrency,
       });
     }
   }
@@ -317,7 +468,15 @@ async function getLowBalances(userId: string, dek: Buffer | null, fx: RateCtx): 
 }
 
 // 7. Subscription renewals (next 7 days)
-async function getUpcomingSubscriptions(userId: string, dek: Buffer | null): Promise<SpotlightItem[]> {
+//
+// The <100 cutoff is the complement of getUpcomingLargeBills' >=100, so both
+// must test the CONVERTED amount or a subscription can fall in both buckets
+// (or neither) depending on its native currency.
+async function getUpcomingSubscriptions(
+  userId: string,
+  dek: Buffer | null,
+  fx: RateCtx,
+): Promise<SpotlightItem[]> {
   const todayStr = todayISO();
   const weekAhead = new Date(new Date(todayStr + "T00:00:00").getTime() + 7 * 86400000)
     .toISOString()
@@ -337,8 +496,14 @@ async function getUpcomingSubscriptions(userId: string, dek: Buffer | null): Pro
     .all();
 
   return subs
-    .filter((s) => Math.abs(s.amount) < 100)
-    .map((s) => {
+    .map((s) => ({
+      sub: s,
+      amount: Math.abs(
+        convertWithRateMap(s.amount, s.currency ?? fx.displayCurrency, fx.rateMap),
+      ),
+    }))
+    .filter(({ amount }) => amount < 100)
+    .map(({ sub: s, amount }) => {
       const days = daysFromNow(s.nextDate!);
       const subName = decryptName(s.nameCt, dek, null) ?? "Subscription";
       return {
@@ -346,16 +511,19 @@ async function getUpcomingSubscriptions(userId: string, dek: Buffer | null): Pro
         type: "subscription_renewal",
         severity: "info" as SpotlightSeverity,
         title: `${subName} renewing${days <= 1 ? " tomorrow" : ` in ${days} days`}`,
-        description: `$${Math.abs(s.amount).toFixed(2)} ${s.frequency}`,
+        description: `${formatCurrency(amount, fx.displayCurrency)} ${s.frequency}`,
         actionUrl: "/transactions",
-        amount: Math.abs(s.amount),
+        amount,
+        currency: fx.displayCurrency,
       };
     });
 }
 
 export async function getSpotlightItems(userId: string, dek: Buffer | null = null): Promise<SpotlightItem[]> {
-  // FINLYNQ-123 — resolve the display currency + current-rate map once for the
-  // point-in-time low-balance threshold check.
+  // FINLYNQ-123 — resolve the display currency + current-rate map ONCE and hand
+  // it to every builder. Each converts its own figures before emitting, so an
+  // item's `amount` and every number inside its `description` are already in
+  // `displayCurrency` and the card never has to guess (it used to assume CAD).
   const displayCurrency = await getDisplayCurrency(userId);
   const rateMap = await getRateMap(displayCurrency, userId);
   const fx: RateCtx = { displayCurrency, rateMap };
@@ -369,13 +537,13 @@ export async function getSpotlightItems(userId: string, dek: Buffer | null = nul
     lowBalances,
     upcomingSubs,
   ] = await Promise.all([
-    getOverspentBudgets(userId, dek),
-    getUpcomingLargeBills(userId, dek),
-    getGoalDeadlines(userId, dek),
-    getSpendingAnomalies(userId, dek),
-    getUncategorizedTransactions(userId),
+    getOverspentBudgets(userId, dek, fx),
+    getUpcomingLargeBills(userId, dek, fx),
+    getGoalDeadlines(userId, dek, fx),
+    getSpendingAnomalies(userId, dek, fx),
+    getUncategorizedTransactions(userId, fx),
     getLowBalances(userId, dek, fx),
-    getUpcomingSubscriptions(userId, dek),
+    getUpcomingSubscriptions(userId, dek, fx),
   ]);
 
   const items: SpotlightItem[] = [

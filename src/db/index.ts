@@ -1,3 +1,4 @@
+import { AsyncLocalStorage } from "node:async_hooks";
 import * as pgSchema from "./schema-pg";
 import type { DatabaseAdapter, DbDialect, DrizzleDb } from "./adapter";
 import { PostgresAdapter } from "./adapters/postgres";
@@ -8,6 +9,7 @@ const g = globalThis as typeof globalThis & {
   __pfDrizzle?: DrizzleDb | null;
   __pfAdapter?: DatabaseAdapter | null;
   __pfDialect?: DbDialect;
+  __pfTxScope?: AsyncLocalStorage<DrizzleDb>;
 };
 
 /** Get or create the active database adapter */
@@ -65,18 +67,97 @@ function wrapPgBuilder(obj: any): any {
   });
 }
 
+// ─── Ambient transaction scope ───────────────────────────────────────────────
+//
+// Multi-row financial writes (portfolio operations.ts, the transaction
+// delete-cascade chokepoint, edit-as-replace) must be all-or-nothing, but the
+// code that performs them — `operations.ts`, `lots/write-hooks.ts`,
+// `snapshots/dirty.ts`, `queries.ts` — reaches for the module-level `db`
+// proxy, not a threaded `tx` handle. Threading an executor parameter through
+// those ~900 lines (and every one of their other callers: import pipeline,
+// bank materialize, backfill) is a far larger and riskier change than the
+// atomicity fix itself.
+//
+// Instead the proxy consults an AsyncLocalStorage slot: inside
+// `withDbTransaction(fn)` every `db.*` access in that async context resolves
+// to the transaction handle, so the existing code becomes transactional
+// without changing a single callsite. Outside it — i.e. everywhere that
+// hasn't opted in — the store is empty and behavior is byte-identical.
+//
+// Rules for anything running inside `withDbTransaction`:
+//   - No network I/O (it would hold a pool client open). operations.ts and
+//     write-hooks.ts contain none — verified 2026-07-30.
+//   - No fire-and-forget writes: a detached promise that queries after the
+//     block resolves would use a released client. Await everything.
+//   - Nesting is safe — an inner call JOINS the outer transaction rather than
+//     opening a second one (no nested BEGIN, no savepoint churn).
+//
+// The store lives on `globalThis`, for the SAME reason the adapter, the
+// Drizzle instance and the MCP tx cache do — and here it is load-bearing, not
+// just an HMR nicety. Turbopack emits this module into MORE THAN ONE server
+// chunk (measured on the dev build 2026-07-30: two distinct copies of the
+// proxy). A module-scoped AsyncLocalStorage would give each copy its own
+// scope, so an outer `withDbTransaction` running in copy A would open a real
+// transaction while a `db.*` call reached through copy B saw an empty store
+// and went to the pool instead — silently NON-transactional, which is worse
+// than having no transaction because it reads as fixed. Which modules share a
+// chunk is a build-layout detail that changes whenever routes do, so this must
+// not depend on it. One instance keyed on globalThis is what makes "the
+// ambient transaction" ambient across chunk boundaries.
+const txScope: AsyncLocalStorage<DrizzleDb> =
+  (g.__pfTxScope ??= new AsyncLocalStorage<DrizzleDb>());
+
+/**
+ * Run `fn` with every `db.*` access in its async context bound to a single
+ * Postgres transaction. Commits when `fn` resolves, ROLLS BACK when it throws
+ * (the throw propagates unchanged).
+ *
+ * Degrades to a plain `fn()` call — no transaction — when there is no
+ * initialized adapter or the adapter's db exposes no `transaction()` (unit
+ * tests that mock `@/db`). That keeps a missing transaction from turning into
+ * a crash in environments that never had one to begin with.
+ */
+export async function withDbTransaction<T>(fn: () => Promise<T>): Promise<T> {
+  // Already inside one → join it. Opening a nested transaction here would
+  // create a savepoint whose rollback semantics differ from the caller's
+  // expectation ("the whole operation is atomic").
+  if (txScope.getStore()) return fn();
+
+  const adapter = g.__pfAdapter;
+  if (!adapter) return fn();
+  let adapterDb: DrizzleDb;
+  try {
+    adapterDb = adapter.getDb();
+  } catch {
+    return fn();
+  }
+  const runner = (adapterDb as { transaction?: unknown }).transaction;
+  if (typeof runner !== "function") return fn();
+
+  return adapterDb.transaction(async (tx) =>
+    txScope.run(tx as unknown as DrizzleDb, fn),
+  ) as Promise<T>;
+}
+
+/** True while the caller is inside a `withDbTransaction` block. */
+export function inDbTransaction(): boolean {
+  return txScope.getStore() != null;
+}
+
 /**
  * Lazy Proxy — all existing `import { db } from "@/db"` calls continue to work.
  *
- * The proxy delegates to the PostgreSQL adapter.
+ * The proxy delegates to the PostgreSQL adapter, or to the ambient transaction
+ * handle when one is active (see `withDbTransaction`).
  */
 export const db = new Proxy({} as DrizzleDb, {
   get(_target, prop, receiver) {
+    const ambientTx = txScope.getStore();
     const adapter = g.__pfAdapter;
-    if (!adapter) {
+    if (!ambientTx && !adapter) {
       throw new Error("Database adapter not initialized. Call setAdapter() first.");
     }
-    const adapterDb = adapter.getDb();
+    const adapterDb = ambientTx ?? adapter!.getDb();
     const value = Reflect.get(adapterDb, prop, receiver);
     if (typeof value === "function") {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any

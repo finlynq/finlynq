@@ -11,6 +11,16 @@
  *   update_note         — set note for all ids[]
  *   update_payee        — set payee for all ids[]
  *   update_tags         — set tags for all ids[]
+ *
+ * `delete` runs through the shared `deleteTransactionsCascade` chokepoint
+ * (2026-07-30) — it used to be a bare `DELETE WHERE id IN (…)`, which orphaned
+ * the other leg of every transfer / trade pair, left lot closures pointing at
+ * deleted opens, and never stamped a snapshot-dirty marker.
+ *
+ * `update_account` and `update_date` REFUSE portfolio-op rows for the same
+ * class of reason: re-pointing one leg of a linked pair at a different account
+ * (or moving only one leg's date) silently breaks the paired-legs invariant,
+ * and the single-row PUT already guards this. Use /portfolio/new?op=&editId=.
  */
 
 import { NextRequest, NextResponse } from "next/server";
@@ -20,9 +30,10 @@ import { requireEncryption } from "@/lib/auth/require-encryption";
 import { encryptField } from "@/lib/crypto/envelope";
 import { invalidateUser as invalidateUserTxCache } from "@/lib/mcp/user-tx-cache";
 import { db, schema } from "@/db";
-import { and, eq, inArray, sql } from "drizzle-orm";
-import { validateBody, safeErrorMessage } from "@/lib/validate";
+import { and, eq, inArray, isNotNull, or, sql } from "drizzle-orm";
+import { validateBody, safeErrorMessage, logApiError } from "@/lib/validate";
 import { verifyOwnership, OwnershipError } from "@/lib/verify-ownership";
+import { deleteTransactionsCascade } from "@/lib/transactions/delete-cascade";
 
 const { transactions } = schema;
 
@@ -111,14 +122,72 @@ export async function POST(request: NextRequest) {
       await verifyOwnership(userId, { accountIds: [parsed.data.accountId] });
     }
 
+    // Re-pointing a linked / portfolio-op row's ACCOUNT or DATE in bulk moves
+    // one leg without its sibling: the pair stops summing to zero across the
+    // two accounts, and a date move desynchronizes lot ordering. The single-row
+    // surfaces route these edits through /portfolio/new?op=&editId=, which
+    // rewrites the whole pair. Refuse here rather than silently corrupting.
+    if (action === "update_account" || action === "update_date") {
+      const linked = await db
+        .select({ id: transactions.id })
+        .from(transactions)
+        .where(
+          and(
+            eq(transactions.userId, userId),
+            inArray(transactions.id, ids),
+            or(
+              isNotNull(transactions.portfolioHoldingId),
+              isNotNull(transactions.tradeLinkId),
+              isNotNull(transactions.linkId),
+              isNotNull(transactions.swapLinkId),
+            ),
+          ),
+        );
+      if (linked.length > 0) {
+        const blockedIds = linked.map((r) => r.id);
+        return NextResponse.json(
+          {
+            error:
+              `${blockedIds.length} of the selected transaction(s) belong to a transfer, trade or ` +
+              `portfolio operation. Changing only one leg's ${action === "update_account" ? "account" : "date"} ` +
+              `would break the paired rows — edit them individually instead.`,
+            code: "portfolio_bulk_edit_refused",
+            blockedIds,
+          },
+          { status: 409 },
+        );
+      }
+    }
+
     // All operations are scoped to the user's own transactions
     switch (action) {
-      case "delete":
-        await db
-          .delete(transactions)
-          .where(and(inArray(transactions.id, ids), eq(transactions.userId, userId)))
-          ;
-        break;
+      case "delete": {
+        // Shared chokepoint — link-sibling cascade, portfolio edit-guard, lot
+        // reversal, one-statement delete, snapshot-dirty markers, tx-cache
+        // invalidation. The whole cascade runs in one DB transaction.
+        const outcome = await deleteTransactionsCascade(userId, ids);
+        if (!outcome.ok) {
+          if (outcome.reason === "not_found") {
+            return NextResponse.json({ error: "Not found" }, { status: 404 });
+          }
+          return NextResponse.json(
+            {
+              error: outcome.message,
+              code: "portfolio_edit_blocked",
+              blockingClosureTxIds: outcome.blockingClosureTxIds,
+            },
+            { status: 409 },
+          );
+        }
+        // `affected` counts what was actually removed (cascade included), not
+        // what the caller listed.
+        return NextResponse.json({
+          success: true,
+          affected: outcome.deletedIds.length,
+          deletedIds: outcome.deletedIds,
+          cascaded: outcome.cascaded,
+        });
+      }
 
       case "update_category":
         await db
@@ -175,6 +244,7 @@ export async function POST(request: NextRequest) {
     if (error instanceof OwnershipError) {
       return NextResponse.json({ error: "Not found" }, { status: 404 });
     }
+    await logApiError("POST", "/api/transactions/bulk", error, userId);
     return NextResponse.json(
       { error: safeErrorMessage(error, "Bulk operation failed") },
       { status: 500 }

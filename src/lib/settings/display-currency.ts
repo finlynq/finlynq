@@ -15,6 +15,7 @@ import { and, eq } from "drizzle-orm";
 import type { DrizzleDb } from "@/db";
 import { schema } from "@/db";
 import { recomputeReportingAmounts } from "@/lib/fx/reporting-amount";
+import { markAllSnapshotsStale } from "@/lib/portfolio/snapshots/invalidate";
 
 type TxClient = Parameters<Parameters<DrizzleDb["transaction"]>[0]>[0];
 type DbOrTx = DrizzleDb | TxClient;
@@ -65,6 +66,15 @@ export async function setDisplayCurrency(
     void recomputeReportingAmounts(userId, currency).catch((err) => {
       console.error("[display-currency] reporting recompute failed:", err);
     });
+    // Stored portfolio_snapshots are denominated in the reporting currency AT
+    // BUILD TIME, so a change strands the Performance / Net Worth history in
+    // the OLD currency until a rebuild. Trip the existing staleness machinery
+    // (cash watermark delete + investment dirty stamp — the FINLYNQ-303
+    // migration's approach, as code) so the chart-load self-heals rebuild in
+    // the new currency. Awaited: three quick queries, and the helper swallows
+    // its own errors + uses the global `db`, so it can neither fail this write
+    // nor deadlock a caller's transaction.
+    await markAllSnapshotsStale(userId);
   }
 
   return { changed };

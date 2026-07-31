@@ -7,17 +7,51 @@
 
 import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
-import { db, getDialect } from "@/db";
-import * as pgSchema from "@/db/schema-pg";
-import { count, inArray } from "drizzle-orm";
+import { getDialect } from "@/db";
 import { requireAdmin } from "@/lib/auth/require-admin";
 import {
-  listUsers,
-  getUserCount,
+  listUsersPage,
+  isUserSortKey,
   getUserById,
   updateUserRole,
   updateUserPlan,
 } from "@/lib/auth/queries";
+import { parseTableFilters, type TableColFilter } from "@/lib/table-filters";
+
+/**
+ * Server-side re-validation of the per-column filters. `parseTableFilters` only
+ * proves the payload is JSON — this proves it is a filter. Mirrors the union in
+ * @/lib/table-filters; keep the two in step.
+ */
+const colFiltersSchema: z.ZodType<TableColFilter[]> = z.array(
+  z.discriminatedUnion("type", [
+    z.object({
+      type: z.literal("date"),
+      columnId: z.string().min(1),
+      from: z.string().optional(),
+      to: z.string().optional(),
+    }),
+    z.object({
+      type: z.literal("text"),
+      columnId: z.string().min(1),
+      value: z.string(),
+    }),
+    z.object({
+      type: z.literal("numeric"),
+      columnId: z.string().min(1),
+      op: z.enum(["eq", "gt", "lt", "between"]),
+      value: z.number().finite(),
+      value2: z.number().finite().optional(),
+    }),
+    z.object({
+      type: z.literal("enum"),
+      columnId: z.string().min(1),
+      // A zero-length enum would mean "match none" and blank the table; the
+      // client drops those before serializing, and this rejects any that slip.
+      values: z.array(z.string()).min(1),
+    }),
+  ])
+);
 import { validateBody } from "@/lib/validate";
 import { logAdminAction, clientIp } from "@/lib/admin-audit";
 import { getDEK } from "@/lib/crypto/dek-cache";
@@ -36,36 +70,69 @@ export async function GET(request: NextRequest) {
   if (!auth.authenticated) return auth.response;
 
   const url = new URL(request.url);
-  const limit = Math.min(Number(url.searchParams.get("limit")) || 50, 100);
+  const limit = Math.min(Math.max(Number(url.searchParams.get("limit")) || 50, 1), 200);
   const offset = Math.max(Number(url.searchParams.get("offset")) || 0, 0);
 
-  const users = await listUsers({ limit, offset });
-  const total = await getUserCount();
-
-  // Transaction count per user — single GROUP BY query scoped to the page's
-  // user ids, joined into the response in JS. Avoids an N+1 over users.
-  const userIds = users.map((u) => u.id);
-  const txCounts: Record<string, number> = {};
-  if (userIds.length > 0) {
-    const rows = await db
-      .select({
-        userId: pgSchema.transactions.userId,
-        total: count(),
-      })
-      .from(pgSchema.transactions)
-      .where(inArray(pgSchema.transactions.userId, userIds))
-      .groupBy(pgSchema.transactions.userId);
-    for (const r of rows) {
-      txCounts[r.userId as string] = Number(r.total ?? 0);
-    }
+  // Sort / filter are validated STRICTLY: an unrecognized value is a 400, never
+  // a silent fallback to the default. Quietly serving a differently-ordered or
+  // unfiltered list that the UI then labels as sorted/filtered is the same
+  // class of lie as the old unfiltered COUNT.
+  const sortParam = url.searchParams.get("sort");
+  if (sortParam !== null && !isUserSortKey(sortParam)) {
+    return NextResponse.json(
+      { error: `Unknown sort column: ${sortParam}` },
+      { status: 400 }
+    );
   }
 
-  const usersWithCounts = users.map((u) => ({
-    ...u,
-    transactionCount: txCounts[u.id] ?? 0,
-  }));
+  const sortDirParam = url.searchParams.get("sortDir");
+  if (sortDirParam !== null && sortDirParam !== "asc" && sortDirParam !== "desc") {
+    return NextResponse.json(
+      { error: `Invalid sortDir: ${sortDirParam}` },
+      { status: 400 }
+    );
+  }
 
-  return NextResponse.json({ users: usersWithCounts, total, limit, offset });
+  // Per-column filters arrive as a JSON array (see @/lib/table-filters). A
+  // present-but-unparseable payload is a 400: serving an UNFILTERED page that
+  // the UI still renders as filtered is the same lie as an unfiltered count.
+  const rawFilters = url.searchParams.get("filters");
+  const parsedFilters = parseTableFilters(rawFilters);
+  if (parsedFilters === null) {
+    return NextResponse.json(
+      { error: "Malformed filters parameter." },
+      { status: 400 }
+    );
+  }
+
+  const filtersResult = colFiltersSchema.safeParse(parsedFilters);
+  if (!filtersResult.success) {
+    return NextResponse.json(
+      { error: "Invalid filter shape." },
+      { status: 400 }
+    );
+  }
+
+  // One code path yields both the page and its matching total — see
+  // listUsersPage. The transaction count is part of the query now (it has to be,
+  // for `sort=txns` to order across the whole set rather than one page).
+  const { rows, total } = await listUsersPage({
+    limit,
+    offset,
+    sort: sortParam,
+    sortDir: sortDirParam,
+    filters: filtersResult.data,
+  });
+
+  return NextResponse.json({
+    users: rows,
+    total,
+    limit,
+    offset,
+    sort: sortParam,
+    sortDir: sortDirParam,
+    filters: filtersResult.data,
+  });
 }
 
 const updateSchema = z.object({

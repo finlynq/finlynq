@@ -3,21 +3,21 @@ import { VsPage, type VsPageContent } from "../_components/VsPage";
 import { MCP_TOOL_COUNTS } from "@/lib/mcp/tool-counts";
 
 export const metadata: Metadata = {
-  title: "Finlynq vs Era: open-source vs closed AI personal finance",
-  description: `Finlynq vs Era: open-source AGPL v3, self-hostable, with ${MCP_TOOL_COUNTS.http} MCP tools and envelope encryption, vs Era's closed hosted SaaS with operator-held keys.`,
+  title: "Era Context review: Era vs Finlynq, the open-source alternative",
+  description: `An honest Era app review from a competitor: what Era Context does well, where it's closed, and how the open-source Finlynq (${MCP_TOOL_COUNTS.http} MCP tools, per-user encryption) compares.`,
   alternates: {
     canonical: "/vs/era",
   },
   openGraph: {
-    title: "Finlynq vs Era: open-source vs closed AI personal finance",
-    description: `Two MCP-first personal finance apps, compared. Finlynq: AGPL v3, self-hostable, ${MCP_TOOL_COUNTS.http} MCP tools, per-user envelope encryption. Era: closed SaaS, hosted-only, 27 MCP tools, operator-held keys.`,
+    title: "Era Context review: Era vs Finlynq, the open-source alternative",
+    description: `Two MCP-first personal finance apps, compared. Era: closed SaaS, hosted-only, 27 MCP tools, operator-held keys. Finlynq: AGPL v3, self-hostable, ${MCP_TOOL_COUNTS.http} MCP tools, per-user envelope encryption.`,
     url: "/vs/era",
     siteName: "Finlynq",
     type: "article",
   },
   twitter: {
     card: "summary_large_image",
-    title: "Finlynq vs Era: open-source vs closed AI personal finance",
+    title: "Era Context review: Era vs Finlynq, the open-source alternative",
     description: `Open-source self-hostable PFM with ${MCP_TOOL_COUNTS.http} MCP tools and per-user envelope encryption, compared with Era.`,
   },
 };
@@ -192,7 +192,8 @@ const content: VsPageContent = {
     },
     {
       label: "Anthropic Connectors Directory",
-      finlynq: "Submitted 2026-05-09; awaiting review",
+      finlynq:
+        "Not listed. Submitted 2026-05-09 but never reviewed; connect directly instead via the MCP guide.",
       competitor:
         "Press-announced 2026-05-06; visible in directory's Financial services category from 2026-05-11",
     },
@@ -267,6 +268,23 @@ const content: VsPageContent = {
       ),
     },
     {
+      q: "Is Era Context safe?",
+      a: (
+        <>
+          By conventional SaaS standards, yes: Era Context uses OAuth 2.1 with
+          scoped permissions, and bank credentials are delegated to a SOC 2
+          Type II aggregator rather than stored by Era. The honest caveat is
+          that it is closed source, so you cannot audit what the MCP tools
+          actually send to your AI assistant, and Era&apos;s operators hold the
+          encryption keys to your data. Whether that counts as safe depends on
+          how much you trust the operator. Finlynq&apos;s answer to the same
+          question is structural: the code is public, and per-user envelope
+          encryption means the operator cannot read your data even if it
+          wanted to.
+        </>
+      ),
+    },
+    {
       q: "Will Finlynq ever offer regulated investment advisory like Era's Thesis?",
       a: (
         <>
@@ -311,7 +329,7 @@ const content: VsPageContent = {
       note: "connect Claude, Cursor, Windsurf and more",
     },
   ],
-  lastUpdated: "2026-07-01",
+  lastUpdated: "2026-07-29",
 };
 
 export default function VsEraPage() {

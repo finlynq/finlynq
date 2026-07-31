@@ -1,7 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
-import { db, schema } from "@/db";
+import { db, schema, withDbTransaction } from "@/db";
 import { eq, and, inArray } from "drizzle-orm";
 import { requireAuth } from "@/lib/auth/require-auth";
+import { requireEncryption } from "@/lib/auth/require-encryption";
 import { z } from "zod";
 import { validateBody, safeErrorMessage, AppError } from "@/lib/validate";
 import { buildNameFields, decryptNamedRows, encryptOptional, decryptOptional } from "@/lib/crypto/encrypted-columns";
@@ -191,7 +192,11 @@ export async function GET(request: NextRequest) {
 }
 
 export async function POST(request: NextRequest) {
-  const auth = await requireAuth(request); if (!auth.authenticated) return auth.response;
+  // requireEncryption, not requireAuth: buildNameFields(null) returns {} and
+  // encryptOptional(null, note) stores the note as PLAINTEXT — a DEK-less
+  // write persisted a permanently nameless row (review 2026-07-30 #7).
+  const auth = await requireEncryption(request); if (!auth.ok) return auth.response;
+  const { userId, dek } = auth;
   try {
     const body = await request.json();
     const parsed = validateBody(body, postSchema);
@@ -199,36 +204,42 @@ export async function POST(request: NextRequest) {
     const d = parsed.data;
     const accountIds = resolveAccountIds(d) ?? [];
     try {
-      await verifyAccountOwnership(auth.context.userId, accountIds);
+      await verifyAccountOwnership(userId, accountIds);
     } catch (e) {
       return NextResponse.json({ error: safeErrorMessage(e, "Invalid account") }, { status: 400 });
     }
-    const enc = buildNameFields(auth.context.dek, { name: d.name });
+    const enc = buildNameFields(dek, { name: d.name });
     // Stream D Phase 4 — plaintext `name` column dropped; only encrypted
     // siblings persist. Issue #130: dual-write `goals.account_id` (first id
     // only, legacy fallback) and the `goal_accounts` join.
-    const inserted = await db.insert(schema.goals).values({
-      userId: auth.context.userId,
-      type: d.type,
-      targetAmount: d.targetAmount,
-      ...(d.currency ? { currency: d.currency.toUpperCase() } : {}),
-      deadline: d.deadline || null,
-      accountId: accountIds[0] ?? null,
-      priority: d.priority ?? 1,
-      status: d.status ?? "active",
-      note: encryptOptional(auth.context.dek, d.note) ?? "",
-      ...enc,
-    }).returning({ id: schema.goals.id });
-    const newId = inserted[0]?.id;
-    if (newId && accountIds.length > 0) {
-      await db.insert(schema.goalAccounts).values(
-        accountIds.map((accountId) => ({
-          userId: auth.context.userId,
-          goalId: newId,
-          accountId,
-        })),
-      );
-    }
+    // The goal row and its `goal_accounts` links are ONE fact — a goal that
+    // committed without its links tracks zero accounts and reports $0 progress
+    // (review API-M2). `withDbTransaction` binds both writes to one connection.
+    const newId = await withDbTransaction(async () => {
+      const inserted = await db.insert(schema.goals).values({
+        userId,
+        type: d.type,
+        targetAmount: d.targetAmount,
+        ...(d.currency ? { currency: d.currency.toUpperCase() } : {}),
+        deadline: d.deadline || null,
+        accountId: accountIds[0] ?? null,
+        priority: d.priority ?? 1,
+        status: d.status ?? "active",
+        note: encryptOptional(dek, d.note) ?? "",
+        ...enc,
+      }).returning({ id: schema.goals.id });
+      const id = inserted[0]?.id;
+      if (id && accountIds.length > 0) {
+        await db.insert(schema.goalAccounts).values(
+          accountIds.map((accountId) => ({
+            userId,
+            goalId: id,
+            accountId,
+          })),
+        );
+      }
+      return id;
+    });
     // Re-read the row so the response carries the canonical shape.
     const goal = newId
       ? (await db.select().from(schema.goals).where(eq(schema.goals.id, newId)))[0]
@@ -240,7 +251,10 @@ export async function POST(request: NextRequest) {
 }
 
 export async function PUT(request: NextRequest) {
-  const auth = await requireAuth(request); if (!auth.authenticated) return auth.response;
+  // requireEncryption — with a null DEK the rename silently no-ops and the note
+  // lands in plaintext (review 2026-07-30 #7).
+  const auth = await requireEncryption(request); if (!auth.ok) return auth.response;
+  const { userId, dek } = auth;
   try {
     const body = await request.json();
     const parsed = validateBody(body, putSchema);
@@ -249,7 +263,7 @@ export async function PUT(request: NextRequest) {
     void _legacyAccountId; void _newAccountIds;
     const toEncrypt: Record<string, string | null | undefined> = {};
     if (name !== undefined) toEncrypt.name = name;
-    const enc = buildNameFields(auth.context.dek, toEncrypt);
+    const enc = buildNameFields(dek, toEncrypt);
     if (data.currency) data.currency = data.currency.toUpperCase();
 
     // Did the caller intend to change account links? Only touch the join
@@ -257,7 +271,7 @@ export async function PUT(request: NextRequest) {
     const replaceAccountIds = resolveAccountIds(parsed.data);
     if (replaceAccountIds !== null) {
       try {
-        await verifyAccountOwnership(auth.context.userId, replaceAccountIds);
+        await verifyAccountOwnership(userId, replaceAccountIds);
       } catch (e) {
         return NextResponse.json({ error: safeErrorMessage(e, "Invalid account") }, { status: 400 });
       }
@@ -269,33 +283,34 @@ export async function PUT(request: NextRequest) {
     const updatePayload: Record<string, unknown> = { ...data, ...enc };
     // Encrypt the free-text note when present (2026-06-01 plaintext-gap closure).
     if (data.note !== undefined) {
-      updatePayload.note = encryptOptional(auth.context.dek, data.note);
+      updatePayload.note = encryptOptional(dek, data.note);
     }
     if (replaceAccountIds !== null) {
       updatePayload.accountId = replaceAccountIds[0] ?? null;
     }
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const goalRows = await db.update(schema.goals).set(updatePayload as any).where(and(eq(schema.goals.id, id), eq(schema.goals.userId, auth.context.userId))).returning();
-    const goal = goalRows[0];
-
-    // Replace the join (DELETE existing + INSERT new) only when the caller
-    // supplied a fresh account list. Atomic-enough on PostgreSQL — the
-    // surrounding request is serialized; a partial state would only show
-    // briefly under concurrent edits to the same goal.
-    if (replaceAccountIds !== null) {
-      await db
-        .delete(schema.goalAccounts)
-        .where(and(eq(schema.goalAccounts.goalId, id), eq(schema.goalAccounts.userId, auth.context.userId)));
-      if (replaceAccountIds.length > 0) {
-        await db.insert(schema.goalAccounts).values(
-          replaceAccountIds.map((accountId) => ({
-            userId: auth.context.userId,
-            goalId: id,
-            accountId,
-          })),
-        );
+    // The row UPDATE and the join replacement (DELETE existing + INSERT new,
+    // only when the caller supplied a fresh account list) go in ONE
+    // transaction — a failure between them used to leave the goal tracking
+    // ZERO accounts, i.e. permanently reporting $0 progress (review API-M2).
+    const goal = await withDbTransaction(async () => {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const goalRows = await db.update(schema.goals).set(updatePayload as any).where(and(eq(schema.goals.id, id), eq(schema.goals.userId, userId))).returning();
+      if (replaceAccountIds !== null) {
+        await db
+          .delete(schema.goalAccounts)
+          .where(and(eq(schema.goalAccounts.goalId, id), eq(schema.goalAccounts.userId, userId)));
+        if (replaceAccountIds.length > 0) {
+          await db.insert(schema.goalAccounts).values(
+            replaceAccountIds.map((accountId) => ({
+              userId,
+              goalId: id,
+              accountId,
+            })),
+          );
+        }
       }
-    }
+      return goalRows[0];
+    });
 
     return NextResponse.json(goal);
   } catch (error: unknown) {

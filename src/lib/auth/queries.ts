@@ -11,6 +11,7 @@ import type { DrizzleDb } from "@/db";
 import * as pgSchema from "@/db/schema-pg";
 import { eq, count, sql, inArray, and, isNull } from "drizzle-orm";
 import { normalizeDbRows } from "@/lib/db-utils";
+import type { TableColFilter } from "@/lib/table-filters";
 import crypto from "crypto";
 
 /** Returns the PostgreSQL schema tables */
@@ -390,6 +391,303 @@ export async function listUsers(options: { limit?: number; offset?: number } = {
 export async function getUserCount() {
   const rows = await db.select({ total: count() }).from(getSchema().users);
   return rows[0]?.total ?? 0;
+}
+
+// ─── Admin users table: server-side pagination + sort + filter ───────────────
+//
+// The admin users screen pages, sorts and filters SERVER-side. `listUsers`
+// above stays as-is for callers that just want a bounded dump (e.g. the stats
+// route); everything the admin table needs goes through `listUsersPage`, which
+// returns the page AND its matching total from ONE code path so the two can
+// never disagree. Paging with a filtered list but an unfiltered COUNT is
+// exactly the "50 of 53" class of bug this replaced.
+
+/**
+ * Active span, in whole days, as SQL — the elapsed time from signup to last
+ * recorded activity. Mirrors `spanDays` in `@/lib/auth/activity-span`; the two
+ * MUST agree or a server-side filter would contradict the number rendered in
+ * the row.
+ *
+ * Three load-bearing details:
+ *  - `created_at` is a **text** column (ISO strings) while `last_active_at` is
+ *    `timestamptz`, so the subtraction needs an explicit cast. Verified against
+ *    pf_dev: 0 of 27 rows fail the ISO shape, so the cast cannot throw.
+ *  - NULL `last_active_at` (never authenticated) COALESCEs to 0, so those users
+ *    always render and always match a bucket instead of vanishing.
+ *  - GREATEST(…, 0) clamps clock skew / backdated rows to 0 rather than
+ *    surfacing a negative span.
+ *
+ * References `users` as `u` — every query below aliases it that way.
+ *
+ * Built LAZILY (a function, not a module-level const). Calling `sql` at module
+ * scope makes importing this file — and anything that transitively imports it,
+ * e.g. require-admin.ts — fail outright under a test that mocks `drizzle-orm`
+ * without re-exporting `sql`.
+ */
+function activeSpanSql() {
+  return sql`COALESCE(GREATEST(0, FLOOR(EXTRACT(EPOCH FROM (u.last_active_at - u.created_at::timestamptz)) / 86400)), 0)::int`;
+}
+
+/**
+ * Whitelist of sortable columns. The ONLY way a sort key reaches the query: the
+ * client sends a key, it is checked against this list, and an unknown key is
+ * rejected by the route. No user-supplied string is ever interpolated into SQL.
+ *
+ * Kept as plain data (no `sql` calls) so `isUserSortKey` — which the route needs
+ * for validation — stays evaluable without a live drizzle module.
+ */
+const USER_SORT_KEY_LIST = [
+  "user",
+  "role",
+  "plan",
+  "verified",
+  "mfa",
+  "txns",
+  "lastActive",
+  "joined",
+  "span",
+] as const;
+
+export type UserSortKey = (typeof USER_SORT_KEY_LIST)[number];
+
+export const USER_SORT_KEYS: readonly UserSortKey[] = USER_SORT_KEY_LIST;
+
+export function isUserSortKey(value: unknown): value is UserSortKey {
+  return (
+    typeof value === "string" &&
+    (USER_SORT_KEY_LIST as readonly string[]).includes(value)
+  );
+}
+
+/**
+ * The SQL expression a sort key orders by. Exhaustive over `UserSortKey` — the
+ * switch has no default, so adding a key without an expression is a type error.
+ *
+ * `lastActive` coalesces NULL to the epoch so never-active users sort as the
+ * least-recently-active — matching `compareLastActive` in `@/lib/auth/dormancy`
+ * (Postgres would otherwise sort NULLs last on ASC, flipping them to the top).
+ */
+function userSortSql(key: UserSortKey) {
+  switch (key) {
+    case "user":
+      return sql`lower(COALESCE(NULLIF(u.display_name, ''), NULLIF(u.username, ''), NULLIF(u.email, ''), ''))`;
+    case "role":
+      return sql`u.role`;
+    case "plan":
+      return sql`u.plan`;
+    case "verified":
+      return sql`u.email_verified`;
+    case "mfa":
+      return sql`u.mfa_enabled`;
+    case "txns":
+      return sql`COALESCE(tx.total, 0)`;
+    case "lastActive":
+      return sql`COALESCE(u.last_active_at, 'epoch'::timestamptz)`;
+    case "joined":
+      return sql`u.created_at::timestamptz`;
+    case "span":
+      return activeSpanSql();
+  }
+}
+
+/** Default ordering when the caller names none: newest signups first. */
+const DEFAULT_USER_SORT: UserSortKey = "joined";
+
+/**
+ * Per-column filter → SQL predicate. Columns absent from this map are not
+ * filterable and are IGNORED rather than erroring, so a stale saved filter for
+ * a removed column degrades to "no filter" instead of a hard failure.
+ *
+ * Text search spans the three identity columns the User cell can render, so
+ * filtering "User" finds a row by display name, username OR email — matching
+ * what the cell actually shows.
+ */
+function userFilterSql(f: TableColFilter) {
+  switch (f.columnId) {
+    case "user": {
+      if (f.type !== "text") return null;
+      const needle = `%${f.value.trim().toLowerCase()}%`;
+      return sql`(lower(COALESCE(u.display_name, '')) LIKE ${needle} OR lower(COALESCE(u.username, '')) LIKE ${needle} OR lower(COALESCE(u.email, '')) LIKE ${needle})`;
+    }
+    case "role":
+      return f.type === "enum" ? sql`u.role IN ${f.values}` : null;
+    case "plan":
+      return f.type === "enum" ? sql`u.plan IN ${f.values}` : null;
+    case "verified":
+      return f.type === "enum"
+        ? sql`u.email_verified IN ${f.values.map((v) => (v === "1" ? 1 : 0))}`
+        : null;
+    case "mfa":
+      return f.type === "enum"
+        ? sql`u.mfa_enabled IN ${f.values.map((v) => (v === "1" ? 1 : 0))}`
+        : null;
+    case "txns":
+      return f.type === "numeric"
+        ? numericPredicate(sql`COALESCE(tx.total, 0)`, f)
+        : null;
+    case "span":
+      return f.type === "numeric" ? numericPredicate(activeSpanSql(), f) : null;
+    case "lastActive":
+      return f.type === "date" ? datePredicate(sql`u.last_active_at`, f) : null;
+    case "joined":
+      return f.type === "date"
+        ? datePredicate(sql`u.created_at::timestamptz`, f)
+        : null;
+    default:
+      return null;
+  }
+}
+
+function numericPredicate(
+  expr: ReturnType<typeof sql>,
+  f: Extract<TableColFilter, { type: "numeric" }>,
+) {
+  if (!Number.isFinite(f.value)) return null;
+  switch (f.op) {
+    case "eq":
+      return sql`${expr} = ${f.value}`;
+    case "gt":
+      return sql`${expr} > ${f.value}`;
+    case "lt":
+      return sql`${expr} < ${f.value}`;
+    case "between":
+      return f.value2 != null && Number.isFinite(f.value2)
+        ? sql`${expr} BETWEEN ${f.value} AND ${f.value2}`
+        : sql`${expr} >= ${f.value}`;
+  }
+}
+
+/**
+ * `to` is compared with `< to + 1 day` so an inclusive end date actually
+ * includes that whole day — a bare `<= '2026-07-31'` casts to midnight and
+ * silently excludes everything that happened during the day the user picked.
+ */
+function datePredicate(
+  expr: ReturnType<typeof sql>,
+  f: Extract<TableColFilter, { type: "date" }>,
+) {
+  const parts = [];
+  if (f.from) parts.push(sql`${expr} >= ${f.from}::timestamptz`);
+  if (f.to) parts.push(sql`${expr} < (${f.to}::timestamptz + interval '1 day')`);
+  if (parts.length === 0) return null;
+  return parts.length === 1
+    ? parts[0]
+    : sql`(${parts[0]} AND ${parts[1]})`;
+}
+
+export interface ListUsersPageOptions {
+  limit: number;
+  offset: number;
+  sort?: UserSortKey | null;
+  sortDir?: "asc" | "desc" | null;
+  /** Per-column filters (see @/lib/table-filters). Unknown columns ignored. */
+  filters?: TableColFilter[];
+}
+
+export interface AdminUserRow {
+  id: string;
+  username: string | null;
+  email: string | null;
+  displayName: string | null;
+  role: string;
+  emailVerified: number | boolean;
+  mfaEnabled: number | boolean;
+  onboardingComplete: number | boolean;
+  plan: string;
+  planExpiresAt: string | null;
+  loginCount: number;
+  lastLoginAt: string | null;
+  lastActiveAt: string | Date | null;
+  createdAt: string;
+  updatedAt: string;
+  transactionCount: number;
+  activeSpanDays: number;
+}
+
+/**
+ * One page of the admin users table, plus the total number of rows matching the
+ * SAME filter.
+ *
+ * The transaction count is a LEFT JOIN rather than the previous per-page GROUP
+ * BY joined in JS, because sorting by it has to happen in SQL — a JS join can
+ * only order the rows already fetched, which is the bug this whole change is
+ * about.
+ *
+ * Ordering always appends `u.id` as a tiebreaker. Without a deterministic total
+ * order, LIMIT/OFFSET over a column with duplicate values (role, plan, a span
+ * of 0 — the majority of rows) lets Postgres return a row on two different
+ * pages, or none at all.
+ */
+export async function listUsersPage(
+  options: ListUsersPageOptions,
+): Promise<{ rows: AdminUserRow[]; total: number }> {
+  const { limit, offset, sort, sortDir, filters = [] } = options;
+
+  // Filter fragment, built ONCE and reused by both the page query and the
+  // count query so they cannot drift apart.
+  const predicates = filters
+    .map((f) => userFilterSql(f))
+    .filter((p): p is NonNullable<typeof p> => p != null);
+  const whereSql =
+    predicates.length === 0
+      ? sql``
+      : sql`WHERE ${sql.join(predicates, sql` AND `)}`;
+
+  const sortKey: UserSortKey = isUserSortKey(sort) ? sort : DEFAULT_USER_SORT;
+  const dirSql = sortDir === "asc" ? sql`ASC` : sql`DESC`;
+
+  const pageResult = await db.execute(sql`
+    WITH tx AS (
+      SELECT user_id, COUNT(*)::int AS total
+      FROM transactions
+      GROUP BY user_id
+    )
+    SELECT
+      u.id,
+      u.username,
+      u.email,
+      u.display_name          AS "displayName",
+      u.role,
+      u.email_verified        AS "emailVerified",
+      u.mfa_enabled           AS "mfaEnabled",
+      u.onboarding_complete   AS "onboardingComplete",
+      u.plan,
+      u.plan_expires_at       AS "planExpiresAt",
+      u.login_count           AS "loginCount",
+      u.last_login_at         AS "lastLoginAt",
+      u.last_active_at        AS "lastActiveAt",
+      u.created_at            AS "createdAt",
+      u.updated_at            AS "updatedAt",
+      COALESCE(tx.total, 0)   AS "transactionCount",
+      ${activeSpanSql()}      AS "activeSpanDays"
+    FROM users u
+    LEFT JOIN tx ON tx.user_id = u.id
+    ${whereSql}
+    ORDER BY ${userSortSql(sortKey)} ${dirSql}, u.id ASC
+    LIMIT ${limit} OFFSET ${offset}
+  `);
+
+  // The count carries the SAME tx join as the page query — `txns` is a
+  // filterable column, so `tx.total` can appear in `whereSql` and a bare
+  // `FROM users u` would fail to resolve it. Joining unconditionally keeps one
+  // WHERE fragment valid in both statements, which is the property that stops
+  // the total from drifting away from the rows.
+  const countResult = await db.execute(sql`
+    WITH tx AS (
+      SELECT user_id, COUNT(*)::int AS total
+      FROM transactions
+      GROUP BY user_id
+    )
+    SELECT COUNT(*)::int AS total
+    FROM users u
+    LEFT JOIN tx ON tx.user_id = u.id
+    ${whereSql}
+  `);
+
+  const rows = normalizeDbRows<AdminUserRow>(pageResult);
+  const total = normalizeDbRows<{ total: number }>(countResult)[0]?.total ?? 0;
+
+  return { rows, total: Number(total) };
 }
 
 /**

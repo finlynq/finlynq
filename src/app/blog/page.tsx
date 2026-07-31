@@ -32,6 +32,13 @@ type Post = {
 
 const POSTS: Post[] = [
   {
+    slug: "mcp-servers-for-personal-finance",
+    title: "MCP servers for personal finance: which apps have one",
+    blurb:
+      "Monarch, YNAB, Actual, Firefly III, Era, and Finlynq: who actually ships an MCP server, who relies on community wrappers, and what each one asks you to hand over before your AI can see your money. Plus a short checklist for connecting any assistant to your finances safely.",
+    date: "2026-07-29",
+  },
+  {
     slug: "finlynq-mobile-app",
     title: "Finlynq is now on iOS and Android",
     blurb:

@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { getTransactions, getTransactionCount, createTransaction, updateTransaction, deleteTransaction, getAccountById, type TxSortFilter } from "@/lib/queries";
+import { getTransactions, getTransactionCount, createTransaction, updateTransaction, getAccountById, type TxSortFilter } from "@/lib/queries";
 import { requireAuth } from "@/lib/auth/require-auth";
 import { requireEncryption } from "@/lib/auth/require-encryption";
 import { getDEK } from "@/lib/crypto/dek-cache";
@@ -21,13 +21,13 @@ import {
 import { canEditPortfolioRow } from "@/lib/portfolio/operations";
 import type { TxRowForLots } from "@/lib/portfolio/lots/types";
 import { db, schema } from "@/db";
-import { and, eq, inArray, or } from "drizzle-orm";
+import { and, eq, or } from "drizzle-orm";
 import { markSnapshotsDirty } from "@/lib/portfolio/snapshots/dirty";
 import { markCashSnapshotsDirty } from "@/lib/portfolio/snapshots/cash-dirty";
 import { z } from "zod";
 import { validateBody, safeErrorMessage, logApiError } from "@/lib/validate";
 import { isSortableColumnId } from "@/lib/transactions/columns";
-import { expandLinkSiblings } from "@/lib/transactions/link-siblings";
+import { deleteTransactionsCascade } from "@/lib/transactions/delete-cascade";
 import { isTransactionSource, type TransactionSource } from "@/lib/tx-source";
 import { verifyOwnership, OwnershipError } from "@/lib/verify-ownership";
 import { securitiesReadEnabledForUser } from "@/lib/securities/flag";
@@ -864,189 +864,41 @@ export async function DELETE(request: NextRequest) {
   // instead of the hard `portfolio_edit_blocked` 409.
   const confirmReallocation = params.get("confirmReallocation") === "1";
 
-  // Phase 2 portfolio-ops refactor (2026-05-25): paired rows from
-  // operations.ts share a `trade_link_id` (buy/sell cash leg pairs) or
-  // `link_id` (in-kind transfers, FX conversions). Deleting one leg without
-  // the sibling leaves an orphan that breaks account-level invariants
-  // (cash sleeve sum drifts, lot bookkeeping desyncs). Compute the full
-  // "delete set" up front — the target + every sibling sharing either
-  // link — then run the edit-guard + delete loop over the entire set.
-  // Sibling expansion is single-sourced in `expandLinkSiblings`
-  // (FINLYNQ-222) and shared with the bank-side delete cascade.
-  const target = await db
-    .select({ id: schema.transactions.id })
-    .from(schema.transactions)
-    .where(
-      and(
-        eq(schema.transactions.id, id),
-        eq(schema.transactions.userId, userId),
-      ),
-    )
-    .get();
-  if (!target) {
-    return NextResponse.json({ error: "Transaction not found" }, { status: 404 });
-  }
-  const allIds = await expandLinkSiblings(userId, [id]);
-
-  // Snapshot freshness — if any row in the delete set touches an investment
-  // holding, capture the earliest affected date BEFORE the rows are gone so we
-  // can mark snapshots dirty after the commit. Best-effort.
-  let snapshotDirtyFrom: string | null = null;
-  // Per-cash-account earliest deleted date → stamp the cash dirty marker so the
-  // chart-load self-heal rebuilds only the affected account(s) from that date.
-  const cashDirtyByAccount = new Map<number, string>();
+  // Thin wrapper (2026-07-30): expansion, edit-guard, lot reversal, the
+  // single-statement delete, the dirty markers and the tx-cache invalidation
+  // all live in `deleteTransactionsCascade` so the bulk / MCP / stdio delete
+  // paths get identical semantics. Only the HTTP shaping stays here.
   try {
-    const delRows = await db
-      .select({
-        date: schema.transactions.date,
-        accountId: schema.transactions.accountId,
-        portfolioHoldingId: schema.transactions.portfolioHoldingId,
-      })
-      .from(schema.transactions)
-      .where(and(eq(schema.transactions.userId, userId), inArray(schema.transactions.id, allIds)));
-    for (const r of delRows) {
-      if (r.portfolioHoldingId != null) {
-        if (snapshotDirtyFrom == null || r.date < snapshotDirtyFrom) snapshotDirtyFrom = r.date;
-      } else if (r.accountId != null) {
-        const cur = cashDirtyByAccount.get(r.accountId);
-        if (cur == null || r.date < cur) cashDirtyByAccount.set(r.accountId, r.date);
+    const outcome = await deleteTransactionsCascade(userId, [id], {
+      confirmReallocation,
+      requireAllSeeds: true,
+    });
+    if (!outcome.ok) {
+      if (outcome.reason === "not_found") {
+        return NextResponse.json({ error: "Transaction not found" }, { status: 404 });
       }
-    }
-  } catch {
-    /* best-effort — never block the delete */
-  }
-
-  // Portfolio edit-guard — applies to EVERY id in the delete set. The user
-  // can't delete a buy that has been sold (the sell's closures lock the buy
-  // in place); they have to delete the sell first. We check each row in the
-  // set and aggregate any blocking ids so the UI can surface a single
-  // actionable list.
-  const deleteIdSet = new Set<number>(allIds);
-  const blockingSet = new Set<number>();
-  for (const txId of allIds) {
-    const guard = await canEditPortfolioRow(userId, txId);
-    if (!guard.allowed && guard.blockingClosureTxIds) {
-      for (const b of guard.blockingClosureTxIds) {
-        // Exclude ids already in the delete set — the user is deleting
-        // them, so they're not "blocking" the operation.
-        if (!deleteIdSet.has(b)) blockingSet.add(b);
-      }
-    }
-  }
-  const blockingClosureTxIds = Array.from(blockingSet);
-  if (blockingClosureTxIds.length > 0 && !confirmReallocation) {
-    // FINLYNQ-176 — without the confirm flag, keep the 409 affordance so the
-    // client can fetch the reallocation preview before proceeding.
-    return NextResponse.json(
-      {
-        error:
-          `This transaction opens one or more lots that have been sold or transferred out. ` +
-          `Delete the ${blockingClosureTxIds.length} dependent transaction(s) first, then retry.`,
-        code: "portfolio_edit_blocked",
-        blockingClosureTxIds,
-      },
-      { status: 409 },
-    );
-  }
-
-  if (blockingClosureTxIds.length > 0) {
-    // FINLYNQ-176 reallocation path. Reverse the dependent closures' lot
-    // effects FIRST so they release the lots the deleted rows opened, then
-    // delete the tx rows, then re-close the dependents (FIFO + auto-short)
-    // against the remaining inventory. STRICT — any error throws → 500.
-    const { __setLotWriteHookStrictMode } = await import(
-      "@/lib/portfolio/lots/write-hooks"
-    );
-    __setLotWriteHookStrictMode(true);
-    try {
-      for (const depId of blockingClosureTxIds) {
-        await reverseLotsForDeleteHook(userId, depId);
-      }
-      for (const txId of allIds) {
-        await reverseLotsForDeleteHook(userId, txId);
-      }
-      for (const txId of allIds) {
-        await deleteTransaction(txId, userId);
-      }
-      // Re-close the (still-existing) dependent transactions against the
-      // post-delete inventory.
-      const ctx = await buildLotContext(userId, null);
-      const depRows = await db
-        .select({
-          id: schema.transactions.id,
-          userId: schema.transactions.userId,
-          date: schema.transactions.date,
-          amount: schema.transactions.amount,
-          currency: schema.transactions.currency,
-          enteredAmount: schema.transactions.enteredAmount,
-          enteredCurrency: schema.transactions.enteredCurrency,
-          quantity: schema.transactions.quantity,
-          accountId: schema.transactions.accountId,
-          categoryId: schema.transactions.categoryId,
-          portfolioHoldingId: schema.transactions.portfolioHoldingId,
-          tradeLinkId: schema.transactions.tradeLinkId,
-          source: schema.transactions.source,
-          kind: schema.transactions.kind,
-        })
-        .from(schema.transactions)
-        .where(and(eq(schema.transactions.userId, userId), inArray(schema.transactions.id, blockingClosureTxIds)));
-      depRows.sort((a, b) => a.date.localeCompare(b.date) || a.id - b.id);
-      for (const r of depRows) {
-        if (r.portfolioHoldingId == null || r.quantity == null) continue;
-        await applyLotEffectsForTx(
-          {
-            id: r.id,
-            userId: r.userId,
-            date: r.date,
-            amount: Number(r.amount ?? 0),
-            currency: r.currency ?? "USD",
-            enteredAmount: r.enteredAmount == null ? null : Number(r.enteredAmount),
-            enteredCurrency: r.enteredCurrency,
-            quantity: Number(r.quantity),
-            accountId: r.accountId,
-            categoryId: r.categoryId,
-            portfolioHoldingId: r.portfolioHoldingId,
-            tradeLinkId: r.tradeLinkId,
-            source: (r.source ?? "manual") as TransactionSource,
-            kind: r.kind,
-          },
-          ctx,
-        );
-      }
-    } finally {
-      __setLotWriteHookStrictMode(false);
-    }
-    invalidateUserTxCache(userId);
-    if (snapshotDirtyFrom) await markSnapshotsDirty(userId, snapshotDirtyFrom);
-    for (const [accId, date] of cashDirtyByAccount) {
-      await markCashSnapshotsDirty(userId, accId, date);
+      // FINLYNQ-176 — keep the 409 affordance so the client can fetch the
+      // reallocation preview before retrying with ?confirmReallocation=1.
+      return NextResponse.json(
+        {
+          error: outcome.message,
+          code: "portfolio_edit_blocked",
+          blockingClosureTxIds: outcome.blockingClosureTxIds,
+        },
+        { status: 409 },
+      );
     }
     return NextResponse.json({
       success: true,
-      deletedIds: allIds,
-      cascaded: allIds.length > 1,
-      reallocated: blockingClosureTxIds,
+      deletedIds: outcome.deletedIds,
+      cascaded: outcome.cascaded,
+      ...(outcome.reallocated.length > 0 ? { reallocated: outcome.reallocated } : {}),
     });
+  } catch (error: unknown) {
+    await logApiError("DELETE", "/api/transactions", error, userId);
+    return NextResponse.json(
+      { error: safeErrorMessage(error, "Failed to delete transaction") },
+      { status: 500 },
+    );
   }
-
-  // No dependent closures — the standard delete path.
-  // Reverse lots BEFORE deleting tx rows so reverseLotsForDeleteHook can
-  // see them. ON DELETE CASCADE on holding_lots.open_tx_id catches any
-  // strays as defense-in-depth.
-  for (const txId of allIds) {
-    await reverseLotsForDeleteHook(userId, txId);
-  }
-  for (const txId of allIds) {
-    await deleteTransaction(txId, userId);
-  }
-  invalidateUserTxCache(userId);
-  if (snapshotDirtyFrom) await markSnapshotsDirty(userId, snapshotDirtyFrom);
-  for (const [accId, date] of cashDirtyByAccount) {
-    await markCashSnapshotsDirty(userId, accId, date);
-  }
-  return NextResponse.json({
-    success: true,
-    deletedIds: allIds,
-    cascaded: allIds.length > 1,
-  });
 }

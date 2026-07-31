@@ -42,7 +42,8 @@
 
 import { randomUUID } from "crypto";
 import { and, eq, sql } from "drizzle-orm";
-import { db, schema } from "@/db";
+import { db, schema, withDbTransaction } from "@/db";
+import { normalizeDbRows } from "@/lib/db-utils";
 import { encryptField } from "@/lib/crypto/envelope";
 import {
   openLotForBuyHook,
@@ -192,7 +193,19 @@ export interface RecordBuyResult {
   lotId: number | null;
 }
 
-export async function recordBuy(input: RecordBuyInput): Promise<RecordBuyResult> {
+export async function recordBuy(
+  input: RecordBuyInput,
+): Promise<RecordBuyResult> {
+  // Atomicity (2026-07-30): both legs, the holding_accounts dual-write
+  // and the lot hooks commit or roll back together. `withDbTransaction`
+  // binds the ambient `db` proxy to one connection for this async
+  // context, so the impl below needs no `tx` parameter — see src/db/index.ts.
+  return withDbTransaction(() => recordBuyImpl(input));
+}
+
+async function recordBuyImpl(
+  input: RecordBuyInput,
+): Promise<RecordBuyResult> {
   if (input.qty <= 0) throw new Error(`recordBuy: qty must be > 0 (got ${input.qty})`);
   if (input.totalCost <= 0) throw new Error(`recordBuy: totalCost must be > 0 (got ${input.totalCost})`);
 
@@ -350,7 +363,19 @@ export interface RecordSellResult {
   closuresWritten: number;
 }
 
-export async function recordSell(input: RecordSellInput): Promise<RecordSellResult> {
+export async function recordSell(
+  input: RecordSellInput,
+): Promise<RecordSellResult> {
+  // Atomicity (2026-07-30): both legs, the holding_accounts dual-write
+  // and the lot hooks commit or roll back together. `withDbTransaction`
+  // binds the ambient `db` proxy to one connection for this async
+  // context, so the impl below needs no `tx` parameter — see src/db/index.ts.
+  return withDbTransaction(() => recordSellImpl(input));
+}
+
+async function recordSellImpl(
+  input: RecordSellInput,
+): Promise<RecordSellResult> {
   if (input.qty <= 0) throw new Error(`recordSell: qty must be > 0 (got ${input.qty})`);
   if (input.totalProceeds <= 0) throw new Error(`recordSell: totalProceeds must be > 0 (got ${input.totalProceeds})`);
 
@@ -506,7 +531,19 @@ export interface RecordSwapResult {
   swapLinkId: string;
 }
 
-export async function recordSwap(input: RecordSwapInput): Promise<RecordSwapResult> {
+export async function recordSwap(
+  input: RecordSwapInput,
+): Promise<RecordSwapResult> {
+  // Atomicity (2026-07-30): both legs, the holding_accounts dual-write
+  // and the lot hooks commit or roll back together. `withDbTransaction`
+  // binds the ambient `db` proxy to one connection for this async
+  // context, so the impl below needs no `tx` parameter — see src/db/index.ts.
+  return withDbTransaction(() => recordSwapImpl(input));
+}
+
+async function recordSwapImpl(
+  input: RecordSwapInput,
+): Promise<RecordSwapResult> {
   if (input.sourceHoldingId === input.destHoldingId) {
     throw new Error(`recordSwap: source and dest holdings must differ`);
   }
@@ -582,6 +619,16 @@ export interface RecordInKindTransferResult {
 }
 
 export async function recordInKindTransfer(
+  input: RecordInKindTransferInput,
+): Promise<RecordInKindTransferResult> {
+  // Atomicity (2026-07-30): both legs, the holding_accounts dual-write
+  // and the lot hooks commit or roll back together. `withDbTransaction`
+  // binds the ambient `db` proxy to one connection for this async
+  // context, so the impl below needs no `tx` parameter — see src/db/index.ts.
+  return withDbTransaction(() => recordInKindTransferImpl(input));
+}
+
+async function recordInKindTransferImpl(
   input: RecordInKindTransferInput,
 ): Promise<RecordInKindTransferResult> {
   if (input.sourceAccountId === input.destAccountId) {
@@ -708,6 +755,16 @@ export interface RecordPortfolioIncomeOrExpenseResult {
 export async function recordPortfolioIncomeOrExpense(
   input: RecordPortfolioIncomeOrExpenseInput,
 ): Promise<RecordPortfolioIncomeOrExpenseResult> {
+  // Atomicity (2026-07-30): both legs, the holding_accounts dual-write
+  // and the lot hooks commit or roll back together. `withDbTransaction`
+  // binds the ambient `db` proxy to one connection for this async
+  // context, so the impl below needs no `tx` parameter — see src/db/index.ts.
+  return withDbTransaction(() => recordPortfolioIncomeOrExpenseImpl(input));
+}
+
+async function recordPortfolioIncomeOrExpenseImpl(
+  input: RecordPortfolioIncomeOrExpenseInput,
+): Promise<RecordPortfolioIncomeOrExpenseResult> {
   if (input.amount === 0) {
     throw new Error(`recordPortfolioIncomeOrExpense: amount cannot be 0`);
   }
@@ -824,6 +881,16 @@ export interface RecordReinvestedIncomeInSharesResult {
 export async function recordReinvestedIncomeInShares(
   input: RecordReinvestedIncomeInSharesInput,
 ): Promise<RecordReinvestedIncomeInSharesResult> {
+  // Atomicity (2026-07-30): both legs, the holding_accounts dual-write
+  // and the lot hooks commit or roll back together. `withDbTransaction`
+  // binds the ambient `db` proxy to one connection for this async
+  // context, so the impl below needs no `tx` parameter — see src/db/index.ts.
+  return withDbTransaction(() => recordReinvestedIncomeInSharesImpl(input));
+}
+
+async function recordReinvestedIncomeInSharesImpl(
+  input: RecordReinvestedIncomeInSharesInput,
+): Promise<RecordReinvestedIncomeInSharesResult> {
   if (input.qty <= 0) {
     throw new Error(
       `recordReinvestedIncomeInShares: qty must be > 0 (got ${input.qty})`,
@@ -935,6 +1002,16 @@ export interface RecordFxConversionResult {
 }
 
 export async function recordFxConversion(
+  input: RecordFxConversionInput,
+): Promise<RecordFxConversionResult> {
+  // Atomicity (2026-07-30): both legs, the holding_accounts dual-write
+  // and the lot hooks commit or roll back together. `withDbTransaction`
+  // binds the ambient `db` proxy to one connection for this async
+  // context, so the impl below needs no `tx` parameter — see src/db/index.ts.
+  return withDbTransaction(() => recordFxConversionImpl(input));
+}
+
+async function recordFxConversionImpl(
   input: RecordFxConversionInput,
 ): Promise<RecordFxConversionResult> {
   if (input.fromAmount <= 0) throw new Error(`recordFxConversion: fromAmount must be > 0`);
@@ -1153,6 +1230,16 @@ export interface RecordBrokerageDepositResult {
 export async function recordBrokerageDeposit(
   input: RecordBrokerageDepositInput,
 ): Promise<RecordBrokerageDepositResult> {
+  // Atomicity (2026-07-30): both legs, the holding_accounts dual-write
+  // and the lot hooks commit or roll back together. `withDbTransaction`
+  // binds the ambient `db` proxy to one connection for this async
+  // context, so the impl below needs no `tx` parameter — see src/db/index.ts.
+  return withDbTransaction(() => recordBrokerageDepositImpl(input));
+}
+
+async function recordBrokerageDepositImpl(
+  input: RecordBrokerageDepositInput,
+): Promise<RecordBrokerageDepositResult> {
   if (input.amount <= 0) throw new Error(`recordBrokerageDeposit: amount must be > 0`);
   if (input.sourceAccountId === input.destAccountId) {
     throw new Error(`recordBrokerageDeposit: source and dest accounts must differ`);
@@ -1293,6 +1380,16 @@ export interface RecordBrokerageWithdrawalResult {
 }
 
 export async function recordBrokerageWithdrawal(
+  input: RecordBrokerageWithdrawalInput,
+): Promise<RecordBrokerageWithdrawalResult> {
+  // Atomicity (2026-07-30): both legs, the holding_accounts dual-write
+  // and the lot hooks commit or roll back together. `withDbTransaction`
+  // binds the ambient `db` proxy to one connection for this async
+  // context, so the impl below needs no `tx` parameter — see src/db/index.ts.
+  return withDbTransaction(() => recordBrokerageWithdrawalImpl(input));
+}
+
+async function recordBrokerageWithdrawalImpl(
   input: RecordBrokerageWithdrawalInput,
 ): Promise<RecordBrokerageWithdrawalResult> {
   if (input.amount <= 0) throw new Error(`recordBrokerageWithdrawal: amount must be > 0`);
@@ -2000,34 +2097,29 @@ export interface EditGuardResult {
 export async function canEditPortfolioRow(
   userId: string,
   txId: number,
+  // Raw `sql` + `execute` (rather than the query builder) so the MCP tool
+  // context's execute-only `DbLike` can run the same guard — the shared
+  // delete chokepoint threads its executor straight through.
+  executor: { execute: (query: ReturnType<typeof sql>) => Promise<unknown> } = db,
 ): Promise<EditGuardResult> {
   // Find all lots opened by this tx.
-  const lots = await db
-    .select({ id: schema.holdingLots.id })
-    .from(schema.holdingLots)
-    .where(
-      and(
-        eq(schema.holdingLots.userId, userId),
-        eq(schema.holdingLots.openTxId, txId),
-      ),
-    );
+  const lots = normalizeDbRows<{ id: number }>(
+    await executor.execute(
+      sql`SELECT id FROM holding_lots WHERE user_id = ${userId} AND open_tx_id = ${txId}`,
+    ),
+  );
   if (lots.length === 0) return { allowed: true };
 
-  const lotIds = lots.map((l) => l.id);
+  const lotIds = lots.map((l) => Number(l.id));
 
   // Any closure references one of these lots?
-  const closures = await db
-    .select({
-      closeTxId: schema.holdingLotClosures.closeTxId,
-      closeKind: schema.holdingLotClosures.closeKind,
-    })
-    .from(schema.holdingLotClosures)
-    .where(
-      and(
-        eq(schema.holdingLotClosures.userId, userId),
-        sql`${schema.holdingLotClosures.lotId} IN (${sql.join(lotIds.map((i) => sql`${i}`), sql`, `)})`,
-      ),
-    );
+  const closures = normalizeDbRows<{ close_tx_id: number }>(
+    await executor.execute(sql`
+      SELECT close_tx_id FROM holding_lot_closures
+       WHERE user_id = ${userId}
+         AND lot_id = ANY(ARRAY[${sql.join(lotIds.map((i) => sql`${i}`), sql`, `)}]::int[])
+    `),
+  );
 
   if (closures.length === 0) return { allowed: true };
 
@@ -2036,7 +2128,7 @@ export async function canEditPortfolioRow(
     reason:
       `This transaction opens a lot that has been sold or transferred out. ` +
       `Delete the ${closures.length} dependent transaction(s) first, then retry.`,
-    blockingClosureTxIds: closures.map((c) => c.closeTxId),
+    blockingClosureTxIds: closures.map((c) => Number(c.close_tx_id)),
   };
 }
 

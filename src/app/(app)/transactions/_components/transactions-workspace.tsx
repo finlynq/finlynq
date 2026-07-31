@@ -12,7 +12,8 @@ import { useDropdownOrder } from "@/components/dropdown-order-provider";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { OnboardingTips } from "@/components/onboarding-tips";
 import { Badge } from "@/components/ui/badge";
-import { Plus, ChevronLeft, ChevronRight, SlidersHorizontal, ChevronDown, Receipt, Search, X, AlertTriangle, ArrowRightLeft, Columns3, TrendingUp, Download } from "lucide-react";
+import { Plus, SlidersHorizontal, ChevronDown, Receipt, Search, X, AlertTriangle, ArrowRightLeft, Columns3, TrendingUp, Download } from "lucide-react";
+import { Pagination } from "@/components/ui/pagination";
 import { DropdownMenu, DropdownMenuTrigger, DropdownMenuContent, DropdownMenuGroup, DropdownMenuLabel, DropdownMenuCheckboxItem, DropdownMenuItem, DropdownMenuSeparator } from "@/components/ui/dropdown-menu";
 import { SplitDialog } from "./split-dialog";
 import { TransactionDialog, type TransactionDialogInitialState, type DialogLinkedSibling } from "@/components/transactions/transaction-dialog";
@@ -605,19 +606,9 @@ export function TransactionsWorkspace({
     (bulkAction === "update_note" && bulkNote === "" && bulkAction === "update_note") ||
     (bulkAction === "update_payee" && bulkPayee === "" && bulkAction === "update_payee");
 
-  const totalPages = Math.ceil(total / limit);
-
-  function getPageNumbers(): (number | "ellipsis")[] {
-    if (totalPages <= 7) return Array.from({ length: totalPages }, (_, i) => i);
-    const pages: (number | "ellipsis")[] = [0];
-    if (page > 2) pages.push("ellipsis");
-    for (let i = Math.max(1, page - 1); i <= Math.min(totalPages - 2, page + 1); i++) {
-      pages.push(i);
-    }
-    if (page < totalPages - 3) pages.push("ellipsis");
-    pages.push(totalPages - 1);
-    return pages;
-  }
+  // Pagination math + control now live in the shared <Pagination>
+  // (src/components/ui/pagination.tsx) — extracted from here verbatim so the
+  // admin users table could reuse it instead of forking a third copy.
 
   // Split allocated total for inline split editor
   return (
@@ -1070,28 +1061,7 @@ export function TransactionsWorkspace({
       </Card>
 
       {/* Pagination */}
-      <div className="flex items-center justify-between">
-        <p className="text-sm text-muted-foreground">
-          Showing {total === 0 ? 0 : page * limit + 1}–{Math.min((page + 1) * limit, total)} of {total}
-        </p>
-        <div className="flex items-center gap-1">
-          <Button variant="outline" size="sm" disabled={page === 0} onClick={() => setPage(page - 1)}>
-            <ChevronLeft className="h-4 w-4" />
-          </Button>
-          {getPageNumbers().map((p, idx) =>
-            p === "ellipsis" ? (
-              <span key={`ellipsis-${idx}`} className="px-2 text-sm text-muted-foreground">...</span>
-            ) : (
-              <Button key={p} variant={page === p ? "default" : "outline"} size="sm" className="h-8 w-8 p-0 text-sm" onClick={() => setPage(p)}>
-                {p + 1}
-              </Button>
-            )
-          )}
-          <Button variant="outline" size="sm" disabled={page >= totalPages - 1} onClick={() => setPage(page + 1)}>
-            <ChevronRight className="h-4 w-4" />
-          </Button>
-        </div>
-      </div>
+      <Pagination page={page} limit={limit} total={total} onPageChange={setPage} />
 
       {/* Single delete confirmation dialog */}
       <Dialog open={deleteConfirmId !== null} onOpenChange={(open) => {

@@ -7,7 +7,7 @@
 
 import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
-import { requireAuth } from "@/lib/auth/require-auth";
+import { requireEncryption } from "@/lib/auth/require-encryption";
 import { validateBody, safeErrorMessage } from "@/lib/validate";
 import { getCategories, createCategory, upsertBudget } from "@/lib/queries";
 import { buildNameFields, decryptName, nameLookup } from "@/lib/crypto/encrypted-columns";
@@ -19,9 +19,14 @@ const schema = z.object({
 });
 
 export async function POST(request: NextRequest) {
-  const auth = await requireAuth(request);
-  if (!auth.authenticated) return auth.response;
-  const { userId } = auth.context;
+  // requireEncryption, not requireAuth: this route CREATES a category when the
+  // named one doesn't exist, and buildNameFields(null) returns {} — a DEK-less
+  // seed persisted a permanently nameless category, then attached a budget to
+  // it (review 2026-07-30 #7). The name_lookup dedup below also needs the DEK
+  // to find an existing category at all, so without one it created duplicates.
+  const auth = await requireEncryption(request);
+  if (!auth.ok) return auth.response;
+  const { userId, dek } = auth;
 
   const parsed = validateBody(await request.json(), schema);
   if (parsed.error) return parsed.error;
@@ -33,10 +38,9 @@ export async function POST(request: NextRequest) {
     // dedup. Falls back to a per-row decrypt if no DEK (legacy rows that
     // never backfilled — should be rare post-cutover).
     const cats = await getCategories(userId);
-    const dek = auth.context.dek;
-    const lookupKey = dek ? nameLookup(dek, categoryName) : null;
+    const lookupKey = nameLookup(dek, categoryName);
     const existing = cats.find((c) => {
-      if (lookupKey && c.nameLookup) return c.nameLookup === lookupKey;
+      if (c.nameLookup) return c.nameLookup === lookupKey;
       const plain = decryptName(c.nameCt, dek, null);
       return (plain ?? "").toLowerCase() === categoryName.toLowerCase();
     });

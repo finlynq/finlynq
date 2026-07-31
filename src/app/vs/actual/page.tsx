@@ -3,12 +3,12 @@ import { VsPage, type VsPageContent } from "../_components/VsPage";
 import { MCP_TOOL_COUNTS } from "@/lib/mcp/tool-counts";
 
 export const metadata: Metadata = {
-  title: "Finlynq vs Actual Budget: open-source PFM with MCP",
+  title: "Actual Budget MCP & investments: Finlynq vs Actual",
   description:
-    "Finlynq vs Actual Budget: two open-source self-hostable PFMs. Actual is local-first budgeting; Finlynq adds investments and a first-party MCP server.",
+    "Does Actual Budget have an MCP server or investment tracking? Not built in. Finlynq is the open-source PFM with a first-party MCP server, investments, and multi-currency.",
   alternates: { canonical: "/vs/actual" },
   openGraph: {
-    title: "Finlynq vs Actual Budget: open-source PFM with MCP",
+    title: "Actual Budget MCP & investments: Finlynq vs Actual",
     description:
       "Two open-source self-hostable PFMs. Actual: local-first envelope budgeting (MIT). Finlynq: investments + multi-currency + direct bank connections + per-user encryption + a first-party MCP server.",
     url: "/vs/actual",
@@ -126,11 +126,11 @@ const content: VsPageContent = {
       a: "For a single device, Actual's opt-in E2EE is architecturally strong. But it's opt-in (the default stores plaintext on the sync server), whereas Finlynq's per-user envelope encryption is always on server-side, which is also what makes the MCP story work.",
     },
     {
-      q: "Does Actual have a first-party MCP or AI feature?",
-      a: "No. AI requests were closed unmerged and the roadmap is silent on AI. A capable community MCP exists (s-stefanov/actual-mcp), but it's third-party and not integrated into the app.",
+      q: "Does Actual Budget have an MCP server?",
+      a: "Not a first-party one. AI requests were closed unmerged and the roadmap is silent on AI. Capable community MCP servers exist (s-stefanov/actual-mcp among several), but they're third-party projects, not integrated into the app. Finlynq ships its MCP server first-party, in the same repo as the app.",
     },
     {
-      q: "Does Actual track investments?",
+      q: "Does Actual Budget track investments?",
       a: "No, it's budgeting only. If you want budgets and a portfolio in one app, that's a Finlynq advantage.",
     },
     {
@@ -160,7 +160,7 @@ const content: VsPageContent = {
       note: "AGPL v3 source",
     },
   ],
-  lastUpdated: "2026-07-01",
+  lastUpdated: "2026-07-29",
 };
 
 export default function VsActualPage() {

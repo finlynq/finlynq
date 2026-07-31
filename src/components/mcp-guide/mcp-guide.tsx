@@ -3,6 +3,7 @@
 import { useState, useEffect } from "react";
 import { CheckCircle2, XCircle, Copy, Check, Terminal, Zap, Bot, Globe, Plus, Shield, Upload, Wand2, Radar, Landmark, Globe2, Scissors, Scale, Lightbulb, Briefcase, LifeBuoy } from "lucide-react";
 import { AnalyticsConsent } from "@/components/analytics-consent";
+import { trackEvent } from "@/lib/analytics";
 
 type ClientTab =
   | "claude-web"
@@ -232,6 +233,7 @@ function CopyButton({ text }: { text: string }) {
     <button
       onClick={() => {
         navigator.clipboard.writeText(text);
+        trackEvent("mcp_guide_copy");
         setCopied(true);
         setTimeout(() => setCopied(false), 2000);
       }}

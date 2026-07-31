@@ -92,6 +92,7 @@ export const VS_META: Record<VsSlug, { name: string; blurb: string }> = {
 
 /** Published blog posts. Convert to a generated list once there is >1. */
 export const BLOG_SLUGS = [
+  "mcp-servers-for-personal-finance",
   "finlynq-mobile-app",
   "how-finlynq-encrypts-your-money",
 ] as const;

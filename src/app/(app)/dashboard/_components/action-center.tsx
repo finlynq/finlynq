@@ -115,7 +115,15 @@ export function ActionCenter() {
                           <p className="text-[13px] font-medium truncate">{item.title}</p>
                           {item.amount !== undefined && (
                             <span className="text-[11px] font-mono font-semibold text-muted-foreground tabular-nums">
-                              {formatCurrency(item.amount, "CAD")}
+                              {/* The server converts every figure and stamps the
+                                  currency on the item. Omitting it falls through
+                                  to formatCurrency's own USD default (FINLYNQ-183),
+                                  never the CAD this used to hardcode — which
+                                  rendered C$304.47 beside a $704.47 from the
+                                  SAME row on a USD account. Do NOT import
+                                  DEFAULT_DISPLAY_CURRENCY here: it lives in a
+                                  server-only module that pulls in `pg`. */}
+                              {formatCurrency(item.amount, item.currency)}
                             </span>
                           )}
                         </div>

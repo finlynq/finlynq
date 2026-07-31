@@ -70,6 +70,7 @@ import {
   type Holding as RuleEditorHolding,
 } from "@/components/rules/rule-editor-dialog";
 import { buildPayeeCategoryRule } from "@/lib/rules/build-payee-category-rule";
+import { parseSaveError } from "@/lib/save-error";
 import type { Condition, Action } from "@/lib/rules/schema";
 import { LotReallocationNotice } from "@/components/portfolio/lot-reallocation-notice";
 import type { LotReallocationPreview } from "@/lib/portfolio/lots/types";
@@ -326,6 +327,10 @@ export function TransactionDialog({
 
   // UI state
   const [submitError, setSubmitError] = useState<{ message: string; currency?: string } | null>(null);
+  // In-flight guard for the transaction save. Without it a double-click on
+  // "Create Transaction" fired two POSTs and booked the transaction twice
+  // (review 2026-07-30, finding #10).
+  const [saving, setSaving] = useState(false);
   // FINLYNQ-176 — when an edit is lot-locked, hold the reallocation preview so
   // the user can confirm proceeding (reallocate dependents) instead of failing.
   const [reallocPreview, setReallocPreview] = useState<LotReallocationPreview | null>(null);
@@ -705,6 +710,9 @@ export function TransactionDialog({
     confirmReallocation = false,
   ) {
     e.preventDefault();
+    // Double-submit guard — a second click while the POST is in flight would
+    // book the transaction twice (there is no idempotency key on the route).
+    if (saving) return;
     setSubmitError(null);
     setRuleNotice(null);
     if (!confirmReallocation) setReallocPreview(null);
@@ -744,123 +752,163 @@ export function TransactionDialog({
     // FINLYNQ-176 — on the confirm pass, opt into reallocating dependents.
     if (confirmReallocation && editId) body.confirmReallocation = true;
 
-    const res = await fetch("/api/transactions", {
-      method: editId ? "PUT" : "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body),
-    });
-
-    if (!res.ok) {
-      const data = await res.json().catch(() => ({}));
-      if (data?.code === "fx-currency-needs-override") {
-        setSubmitError({
-          message: `No FX rate for ${data.currency ?? form.currency}.`,
-          currency: data.currency ?? form.currency,
-        });
-      } else if (data?.code === "portfolio_edit_blocked" && editId) {
-        // The edited row opened a lot that's been sold/transferred out.
-        // FINLYNQ-176 — fetch the reallocation preview and let the user
-        // confirm proceeding instead of dead-ending.
-        setSubmitError({
-          message:
-            "This transaction opened a lot that has since been sold or transferred out. " +
-            "You can still save your edit — the dependent transactions will be re-matched to your other lots.",
-        });
-        setReallocPreview(null);
-        setReallocPending(true);
-        try {
-          const pRes = await fetch("/api/transactions/lot-replan-preview", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ op: "edit", id: editId }),
-          });
-          if (pRes.ok) {
-            const pData = await pRes.json().catch(() => null);
-            if (pData?.preview) setReallocPreview(pData.preview as LotReallocationPreview);
-          }
-        } finally {
-          setReallocPending(false);
-        }
-      } else {
-        setSubmitError({ message: data?.error ?? `Save failed (${res.status})` });
-      }
-      return;
-    }
-    // A successful (re)save clears any pending reallocation prompt.
-    setReallocPreview(null);
-
-    let savedTxId = editId;
-    if (!savedTxId && res.ok) {
-      const created = await res.json();
-      savedTxId = created.id;
-    }
-
-    if (showSplits && splitRows.filter((r) => r.amount).length >= 2 && savedTxId) {
-      const sign = parseFloat(form.amount) < 0 ? -1 : 1;
-      await fetch("/api/transactions/splits", {
-        method: "POST",
+    // Everything past this point touches the network. A thrown fetch (offline,
+    // DNS, aborted connection) used to escape handleSubmit entirely, leaving
+    // the user staring at an unchanged dialog with no indication the save
+    // failed. The dialog now stays OPEN with input preserved and an error
+    // shown, per the form-validation convention.
+    setSaving(true);
+    try {
+      const res = await fetch("/api/transactions", {
+        method: editId ? "PUT" : "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          transactionId: savedTxId,
-          splits: splitRows
-            .filter((r) => r.amount)
-            .map((r) => ({
-              categoryId: r.categoryId ? parseInt(r.categoryId) : null,
-              amount: sign * Math.abs(parseFloat(r.amount) || 0),
-              note: r.note,
-            })),
-        }),
+        body: JSON.stringify(body),
       });
-    }
 
-    if (savedTxId) {
-      await onSaved(savedTxId, {
-        mode: editId ? "update" : "create",
-        isTransfer: false,
-      });
-    }
+      if (!res.ok) {
+        // Read a CLONE so `parseSaveError` below still has an unconsumed body.
+        const data = await res.clone().json().catch(() => ({}));
+        if (data?.code === "fx-currency-needs-override") {
+          setSubmitError({
+            message: `No FX rate for ${data.currency ?? form.currency}.`,
+            currency: data.currency ?? form.currency,
+          });
+        } else if (data?.code === "portfolio_edit_blocked" && editId) {
+          // The edited row opened a lot that's been sold/transferred out.
+          // FINLYNQ-176 — fetch the reallocation preview and let the user
+          // confirm proceeding instead of dead-ending.
+          setSubmitError({
+            message:
+              "This transaction opened a lot that has since been sold or transferred out. " +
+              "You can still save your edit — the dependent transactions will be re-matched to your other lots.",
+          });
+          setReallocPreview(null);
+          setReallocPending(true);
+          try {
+            const pRes = await fetch("/api/transactions/lot-replan-preview", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ op: "edit", id: editId }),
+            });
+            if (pRes.ok) {
+              const pData = await pRes.json().catch(() => null);
+              if (pData?.preview) setReallocPreview(pData.preview as LotReallocationPreview);
+            }
+          } finally {
+            setReallocPending(false);
+          }
+        } else {
+          // parseSaveError owns HTTP 423 → the canonical DEK_LOCKED_MESSAGE
+          // ("Unlock your data to make changes"), which the hand-rolled
+          // `data?.error` read here used to bury under a raw server string.
+          setSubmitError({ message: await parseSaveError(res, `Save failed (${res.status})`) });
+        }
+        return;
+      }
+      // A successful (re)save clears any pending reallocation prompt.
+      setReallocPreview(null);
 
-    // ─── Rule suggestion (FINLYNQ-125) ────────────────────────────────
-    // Runs ONLY after the tx save + reconcile link above succeeded. A failure
-    // here never unwinds the saved tx — at worst it leaves a soft amber notice
-    // and keeps the dialog open.
-    const trimmedPayee = form.payee.trim();
-    const catId = Number(form.categoryId);
-    if (ruleIntent === "customize" && trimmedPayee && catId > 0) {
-      setRuleSeed({ payee: trimmedPayee, categoryId: catId });
-      setRuleEditorOpen(true);
-      onOpenChange(false); // close main dialog; sibling editor opens as it closes
-      return;
-    }
-    if (ruleIntent === "auto" && trimmedPayee && catId > 0) {
-      try {
-        const ruleRes = await fetch("/api/rules", {
+      let savedTxId = editId;
+      if (!savedTxId) {
+        const created = await res.json();
+        savedTxId = created.id;
+      }
+
+      // Splits are a SEPARATE POST after the transaction exists. Its response
+      // was previously never checked, so a failed/locked splits write was
+      // silently discarded and the dialog closed as if everything saved. The
+      // transaction itself is already committed, so onSaved (reconcile link,
+      // list refresh) still runs — but the dialog stays open with the error.
+      let splitsError: string | null = null;
+      if (showSplits && splitRows.filter((r) => r.amount).length >= 2 && savedTxId) {
+        const sign = parseFloat(form.amount) < 0 ? -1 : 1;
+        const splitRes = await fetch("/api/transactions/splits", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(buildPayeeCategoryRule(trimmedPayee, catId)),
+          body: JSON.stringify({
+            transactionId: savedTxId,
+            splits: splitRows
+              .filter((r) => r.amount)
+              .map((r) => ({
+                categoryId: r.categoryId ? parseInt(r.categoryId) : null,
+                amount: sign * Math.abs(parseFloat(r.amount) || 0),
+                note: r.note,
+              })),
+          }),
         });
-        if (!ruleRes.ok) {
-          const data = await ruleRes.json().catch(() => ({}));
-          // Transaction is already saved; surface a soft notice and keep the
-          // dialog open so the user can retry "Customize…" if they want.
+        if (!splitRes.ok) {
+          splitsError = await parseSaveError(
+            splitRes,
+            `The splits could not be saved (${splitRes.status}).`,
+          );
+        }
+      }
+
+      if (savedTxId) {
+        await onSaved(savedTxId, {
+          mode: editId ? "update" : "create",
+          isTransfer: false,
+        });
+      }
+
+      if (splitsError) {
+        setSubmitError({
+          message: `Transaction saved, but the splits were not: ${splitsError}`,
+        });
+        return;
+      }
+
+      // ─── Rule suggestion (FINLYNQ-125) ────────────────────────────────
+      // Runs ONLY after the tx save + reconcile link above succeeded. A failure
+      // here never unwinds the saved tx — at worst it leaves a soft amber notice
+      // and keeps the dialog open.
+      const trimmedPayee = form.payee.trim();
+      const catId = Number(form.categoryId);
+      if (ruleIntent === "customize" && trimmedPayee && catId > 0) {
+        setRuleSeed({ payee: trimmedPayee, categoryId: catId });
+        setRuleEditorOpen(true);
+        onOpenChange(false); // close main dialog; sibling editor opens as it closes
+        return;
+      }
+      if (ruleIntent === "auto" && trimmedPayee && catId > 0) {
+        try {
+          const ruleRes = await fetch("/api/rules", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(buildPayeeCategoryRule(trimmedPayee, catId)),
+          });
+          if (!ruleRes.ok) {
+            const data = await ruleRes.json().catch(() => ({}));
+            // Transaction is already saved; surface a soft notice and keep the
+            // dialog open so the user can retry "Customize…" if they want.
+            setRuleNotice(
+              data?.error
+                ? `Transaction saved, but the rule could not be created: ${data.error}`
+                : "Transaction saved, but the rule could not be created.",
+            );
+            return;
+          }
+        } catch (err) {
           setRuleNotice(
-            data?.error
-              ? `Transaction saved, but the rule could not be created: ${data.error}`
+            err instanceof Error
+              ? `Transaction saved, but the rule could not be created: ${err.message}`
               : "Transaction saved, but the rule could not be created.",
           );
           return;
         }
-      } catch (err) {
-        setRuleNotice(
-          err instanceof Error
-            ? `Transaction saved, but the rule could not be created: ${err.message}`
-            : "Transaction saved, but the rule could not be created.",
-        );
-        return;
       }
-    }
 
-    onOpenChange(false);
+      onOpenChange(false);
+    } catch (err) {
+      setSubmitError({
+        message:
+          err instanceof Error
+            ? `Could not reach the server: ${err.message}`
+            : "Could not reach the server. Check your connection and try again.",
+      });
+    } finally {
+      setSaving(false);
+    }
   }
 
   async function handleTransferSubmit(e: React.FormEvent) {
@@ -1553,7 +1601,7 @@ export function TransactionDialog({
                   variant="destructive"
                   size="sm"
                   className="w-full"
-                  disabled={reallocPending}
+                  disabled={reallocPending || saving}
                   onClick={(e) => handleSubmit(e, "none", true)}
                 >
                   Reallocate &amp; save
@@ -1604,7 +1652,8 @@ export function TransactionDialog({
                   {" · "}
                   <button
                     type="button"
-                    className="underline hover:no-underline text-sky-700 dark:text-sky-300"
+                    className="underline hover:no-underline text-sky-700 dark:text-sky-300 disabled:opacity-50"
+                    disabled={saving}
                     onClick={(e) => handleSubmit(e, "customize")}
                   >
                     Customize…
@@ -1633,8 +1682,10 @@ export function TransactionDialog({
                   <Trash2 className="h-4 w-4 mr-1.5" /> Delete
                 </Button>
               )}
-              <Button type="submit" className="flex-1">
-                {editId ? "Update" : "Create"} Transaction
+              <Button type="submit" className="flex-1" disabled={saving}>
+                {saving
+                  ? `${editId ? "Updating" : "Creating"}…`
+                  : `${editId ? "Update" : "Create"} Transaction`}
               </Button>
             </div>
           </form>

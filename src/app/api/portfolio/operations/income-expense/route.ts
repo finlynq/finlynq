@@ -9,7 +9,7 @@ import {
 import { resolveOrCreateInvestmentIncomeCategory } from "@/lib/investment-income-category";
 import { invalidateUser as invalidateUserTxCache } from "@/lib/mcp/user-tx-cache";
 import { markSnapshotsDirty } from "@/lib/portfolio/snapshots/dirty";
-import { mapOperationError, cascadeDeleteForReplace } from "../_helpers";
+import { mapOperationError, replacePortfolioOperation } from "../_helpers";
 
 const schema = z.object({
   accountId: z.number().int().positive(),
@@ -68,10 +68,6 @@ export const POST = apiHandler(
           { status: 400 },
         );
       }
-      if (editId != null) {
-        const refusal = await cascadeDeleteForReplace(userId, editId);
-        if (refusal) return refusal;
-      }
       // Category resolution mirrors the cash path: an explicit categoryId
       // (any category the user picked) always wins; otherwise a dividend/
       // interest preset resolves-or-creates its canonical category. "other"/
@@ -88,7 +84,9 @@ export const POST = apiHandler(
           incomeType,
         );
       }
-      const sharesResult = await recordReinvestedIncomeInShares({
+      // Delete + record in ONE transaction on edit — a failure in the record
+      // step used to leave the original share-dividend row destroyed.
+      const recordShares = () => recordReinvestedIncomeInShares({
         userId,
         dek,
         accountId: input.accountId,
@@ -102,6 +100,14 @@ export const POST = apiHandler(
         tags: input.tags,
         source: "manual",
       });
+      let sharesResult;
+      if (editId != null) {
+        const replaced = await replacePortfolioOperation(userId, editId, recordShares);
+        if (!replaced.ok) return replaced.response;
+        sharesResult = replaced.result;
+      } else {
+        sharesResult = await recordShares();
+      }
       invalidateUserTxCache(userId);
       await markSnapshotsDirty(userId, input.date);
       return NextResponse.json(
@@ -116,10 +122,6 @@ export const POST = apiHandler(
         { error: "Pick a currency / cash sleeve." },
         { status: 400 },
       );
-    }
-    if (editId != null) {
-      const refusal = await cascadeDeleteForReplace(userId, editId);
-      if (refusal) return refusal;
     }
     // Category resolution precedence: an explicit categoryId (user override)
     // always wins. Otherwise map the income type to its canonical category,
@@ -138,7 +140,7 @@ export const POST = apiHandler(
         );
       }
     }
-    const result = await recordPortfolioIncomeOrExpense({
+    const recordCash = () => recordPortfolioIncomeOrExpense({
       ...input,
       currency,
       categoryId,
@@ -146,6 +148,14 @@ export const POST = apiHandler(
       dek,
       source: "manual",
     });
+    let result;
+    if (editId != null) {
+      const replaced = await replacePortfolioOperation(userId, editId, recordCash);
+      if (!replaced.ok) return replaced.response;
+      result = replaced.result;
+    } else {
+      result = await recordCash();
+    }
     invalidateUserTxCache(userId);
     // Snapshot history is stale from this trade date forward — auto-rebuild.
     await markSnapshotsDirty(userId, input.date);

@@ -3,8 +3,7 @@ import { VsPage, type VsPageContent } from "../_components/VsPage";
 import { MCP_TOOL_COUNTS, MCP_SERVER_VERSION } from "@/lib/mcp/tool-counts";
 
 export const metadata: Metadata = {
-  title:
-    "Finlynq vs Firefly III: open-source PFM with first-party MCP",
+  title: "Firefly III MCP server & alternative: Finlynq vs Firefly III",
   description: `Finlynq vs Firefly III: two AGPL v3 PFMs. Firefly is double-entry accounting; Finlynq adds a first-party MCP server (${MCP_TOOL_COUNTS.http} tools) and envelope encryption.`,
   alternates: {
     canonical: "/vs/firefly-iii",
@@ -348,6 +347,10 @@ const content: VsPageContent = {
   ],
   faq: [
     {
+      q: "Does Firefly III have an MCP server?",
+      a: `Not a first-party one. The feature request was closed without plans to ship, so AI access comes from community wrappers (etnperlong/firefly-iii-mcp, horsfallnathan/firefly-iii-mcp-server, and others) that sit on Firefly's REST API as third-party projects. Finlynq's MCP server is first-party: ${MCP_TOOL_COUNTS.http} HTTP / ${MCP_TOOL_COUNTS.stdio} stdio tools maintained in the same repo as the app.`,
+    },
+    {
       q: "Isn't Firefly III strictly better since it's older and more popular?",
       a: (
         <>
@@ -501,7 +504,7 @@ const content: VsPageContent = {
       note: "current tool counts + connect-to-Claude instructions",
     },
   ],
-  lastUpdated: "2026-07-01",
+  lastUpdated: "2026-07-29",
 };
 
 export default function VsFireflyIiiPage() {

@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getAccounts, getAccountById, createAccount, updateAccount, deleteAccount } from "@/lib/queries";
 import { requireAuth } from "@/lib/auth/require-auth";
+import { requireEncryption } from "@/lib/auth/require-encryption";
 import { z } from "zod";
 import { validateBody, safeErrorMessage, logApiError } from "@/lib/validate";
 import { buildNameFields, decryptNamedRows } from "@/lib/crypto/encrypted-columns";
@@ -53,37 +54,44 @@ export async function GET(request: NextRequest) {
 }
 
 export async function POST(request: NextRequest) {
-  const auth = await requireAuth(request); if (!auth.authenticated) return auth.response;
+  // requireEncryption, not requireAuth: this handler calls buildNameFields,
+  // which returns {} for a null DEK — the row would persist with NULL
+  // name_ct/name_lookup and be permanently nameless (review 2026-07-30 #7).
+  const auth = await requireEncryption(request); if (!auth.ok) return auth.response;
+  const { userId, dek } = auth;
   try {
     const body = await request.json();
     const parsed = validateBody(body, postSchema);
     if (parsed.error) return parsed.error;
     const { alias, name, ...rest } = parsed.data;
     const normalizedAlias = alias ? alias : null;
-    const enc = buildNameFields(auth.context.dek, { name, alias: normalizedAlias });
+    const enc = buildNameFields(dek, { name, alias: normalizedAlias });
     // Stream D Phase 4 — plaintext `name`/`alias` columns dropped. Only the
     // `*_ct`/`*_lookup` siblings get persisted via `enc`.
-    const account = await createAccount(auth.context.userId, { ...rest, ...enc });
+    const account = await createAccount(userId, { ...rest, ...enc });
     // When the user creates an account already flagged investment, ensure
     // the per-account Cash holding exists so the constraint is satisfiable
     // out of the gate. No transactions to reassign on a fresh account.
     if (rest.isInvestment === true && account?.id != null) {
       try {
-        await backfillInvestmentAccount(auth.context.userId, account.id, auth.context.dek);
+        await backfillInvestmentAccount(userId, account.id, dek);
       } catch (e) {
         // Backfill failure shouldn't undo the account creation — log only.
-        await logApiError("POST-backfill", "/api/accounts", e, auth.context.userId);
+        await logApiError("POST-backfill", "/api/accounts", e, userId);
       }
     }
     return NextResponse.json(account, { status: 201 });
   } catch (error: unknown) {
-    await logApiError("POST", "/api/accounts", error, auth.context.userId);
+    await logApiError("POST", "/api/accounts", error, userId);
     return NextResponse.json({ error: safeErrorMessage(error, "Failed to create account") }, { status: 500 });
   }
 }
 
 export async function PUT(request: NextRequest) {
-  const auth = await requireAuth(request); if (!auth.authenticated) return auth.response;
+  // requireEncryption — buildNameFields(null) yields {}, so a rename would
+  // silently no-op while the request reported success (review 2026-07-30 #7).
+  const auth = await requireEncryption(request); if (!auth.ok) return auth.response;
+  const { userId, dek } = auth;
   try {
     const body = await request.json();
     const parsed = validateBody(body, putSchema);
@@ -95,26 +103,26 @@ export async function PUT(request: NextRequest) {
     const toEncrypt: Record<string, string | null | undefined> = {};
     if (name !== undefined) toEncrypt.name = name;
     if (normalizedAlias !== undefined) toEncrypt.alias = normalizedAlias;
-    const enc = buildNameFields(auth.context.dek, toEncrypt);
+    const enc = buildNameFields(dek, toEncrypt);
     const normalized = data;
     // Detect false → true flip on isInvestment so we can run the backfill
     // (Cash holding + null-FK reassignment) in the same request.
     let needsInvestmentBackfill = false;
     if (normalized.isInvestment === true) {
-      const before = await getAccountById(id, auth.context.userId);
+      const before = await getAccountById(id, userId);
       if (before && before.isInvestment === false) needsInvestmentBackfill = true;
     }
-    const account = await updateAccount(id, auth.context.userId, { ...normalized, ...enc });
+    const account = await updateAccount(id, userId, { ...normalized, ...enc });
     if (!account) return NextResponse.json({ error: "Account not found" }, { status: 404 });
     if (needsInvestmentBackfill) {
       try {
-        await backfillInvestmentAccount(auth.context.userId, id, auth.context.dek);
+        await backfillInvestmentAccount(userId, id, dek);
       } catch (e) {
         // Surface the backfill failure rather than leaving the user with a
         // freshly-flagged account whose existing rows still violate the
         // constraint. The flag flip already committed; the error tells
         // them to retry or investigate.
-        await logApiError("PUT-backfill", "/api/accounts", e, auth.context.userId);
+        await logApiError("PUT-backfill", "/api/accounts", e, userId);
         return NextResponse.json(
           {
             error: "Account flagged as investment, but the cash-holding backfill failed. Existing transactions in this account may not yet satisfy the constraint — retry the toggle or contact support.",
@@ -125,7 +133,7 @@ export async function PUT(request: NextRequest) {
     }
     return NextResponse.json(account);
   } catch (error: unknown) {
-    await logApiError("PUT", "/api/accounts", error, auth.context.userId);
+    await logApiError("PUT", "/api/accounts", error, userId);
     return NextResponse.json({ error: safeErrorMessage(error, "Failed to update account") }, { status: 500 });
   }
 }

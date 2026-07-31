@@ -3,13 +3,13 @@ import { VsPage, type VsPageContent } from "../_components/VsPage";
 import { MCP_TOOL_COUNTS, MCP_SERVER_VERSION } from "@/lib/mcp/tool-counts";
 
 export const metadata: Metadata = {
-  title: "Finlynq vs Monarch Money: open-source AI-native alternative",
-  description: `Finlynq vs Monarch Money: open-source AGPL v3 with envelope encryption and a first-party MCP server (${MCP_TOOL_COUNTS.http} tools), vs Monarch's closed hosted SaaS.`,
+  title: "Monarch Money MCP & open-source alternative: Finlynq vs Monarch",
+  description: `Does Monarch Money have an MCP server or public API? Not an official one. Finlynq is the open-source Monarch alternative with a first-party MCP server (${MCP_TOOL_COUNTS.http} tools).`,
   alternates: {
     canonical: "/vs/monarch",
   },
   openGraph: {
-    title: "Finlynq vs Monarch Money: open-source AI-native alternative",
+    title: "Monarch Money MCP & open-source alternative: Finlynq vs Monarch",
     description: `Two AI-native PFMs, compared. Monarch: closed-source SaaS, $99/yr, Plaid bank sync, household plan. Finlynq: AGPL v3, self-hostable, ${MCP_TOOL_COUNTS.http} MCP tools, per-user envelope encryption, direct bank connections (auto-sync) plus file/CSV/OFX import, RRSP/TFSA tracking.`,
     url: "/vs/monarch",
     siteName: "Finlynq",
@@ -17,7 +17,7 @@ export const metadata: Metadata = {
   },
   twitter: {
     card: "summary_large_image",
-    title: "Finlynq vs Monarch Money: open-source AI-native alternative",
+    title: "Monarch Money MCP & open-source alternative: Finlynq vs Monarch",
     description: `Open-source self-hostable PFM with ${MCP_TOOL_COUNTS.http} MCP tools and per-user envelope encryption, compared with Monarch Money's closed SaaS.`,
   },
 };
@@ -305,16 +305,30 @@ const content: VsPageContent = {
       ),
     },
     {
-      q: "Monarch has an MCP server now too. Doesn't that close Finlynq's main gap?",
+      q: "Does Monarch Money have an MCP server?",
       a: (
         <>
-          It narrows the gap, but it doesn&apos;t close it. Finlynq&apos;s MCP is
-          {MCP_TOOL_COUNTS.http} HTTP / {MCP_TOOL_COUNTS.stdio} stdio tools at v{MCP_SERVER_VERSION}, built from day one as a
-          first-party surface with OAuth 2.1 + DCR, stdio transport, and
-          per-user encryption. Monarch&apos;s MCP is a 2026 addition layered on
-          top of a closed-source SaaS. It&apos;s useful, but the underlying data
-          still lives on Monarch&apos;s infrastructure, the operator can read
-          everything, and you can&apos;t audit the tool implementations.
+          Not an official one. As of mid-2026 Monarch has shipped no
+          first-party MCP server and no official developer API to build one
+          on. What exists is a handful of community-built MCP servers layered
+          on an unofficial, reverse-engineered client library; they work, but
+          they need your actual Monarch email, password, and MFA secret, and
+          the unofficial path can break without notice. Finlynq&apos;s MCP is
+          first-party: {MCP_TOOL_COUNTS.http} HTTP / {MCP_TOOL_COUNTS.stdio}{" "}
+          stdio tools at v{MCP_SERVER_VERSION}, with OAuth 2.1 + DCR instead
+          of handing an AI tool your login credentials.
+        </>
+      ),
+    },
+    {
+      q: "Does Monarch Money have a public API?",
+      a: (
+        <>
+          No. Monarch publishes no official public API; the community
+          libraries that exist reverse-engineer the private one, which is why
+          every unofficial integration wants your real credentials and can
+          break when Monarch changes something. Finlynq&apos;s full surface is
+          available over REST with a Bearer API key, and mirrored over MCP.
         </>
       ),
     },
@@ -387,7 +401,7 @@ const content: VsPageContent = {
       note: "current tool counts + connect-to-Claude instructions",
     },
   ],
-  lastUpdated: "2026-07-01",
+  lastUpdated: "2026-07-29",
 };
 
 export default function VsMonarchPage() {
