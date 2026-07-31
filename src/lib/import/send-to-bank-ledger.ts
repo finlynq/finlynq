@@ -82,6 +82,37 @@ export function importFullyResolved(rows: readonly ResolutionRow[]): boolean {
   );
 }
 
+/**
+ * Mark the staged import `approved` when `importFullyResolved` says no row
+ * still needs user action, so it leaves /import/pending.
+ *
+ * Called from BOTH exits of `sendStagedRowsToBankLedger` — after a promote
+ * pass AND on the nothing-eligible early return. That second callsite is
+ * load-bearing: a dupe-only re-sync with no balance anchor selects ZERO rows
+ * to promote, so it bails at the `allSelected.length === 0` guard long before
+ * the post-promote check. Verified on dev — two identical 3-row dupe-only
+ * imports, one carrying a statement balance and one not: the anchored one
+ * reached the post-promote check and closed, the anchor-less one parked in
+ * pending forever. A SimpleFIN sync always carries a balance snapshot, which
+ * is why the feed path looked fixed while a plain re-upload was not.
+ */
+async function markImportResolvedIfDone(stagedImportId: string): Promise<void> {
+  const rows = await db
+    .select({
+      reconcileState: schema.stagedTransactions.reconcileState,
+      rowStatus: schema.stagedTransactions.rowStatus,
+    })
+    .from(schema.stagedTransactions)
+    .where(eq(schema.stagedTransactions.stagedImportId, stagedImportId))
+    .all();
+  if (rows.length === 0) return;
+  if (!importFullyResolved(rows)) return;
+  await db
+    .update(schema.stagedImports)
+    .set({ status: "approved" })
+    .where(eq(schema.stagedImports.id, stagedImportId));
+}
+
 export type SendToBankLedgerFailCode = "not_found";
 
 export interface SendToBankLedgerInput {
@@ -242,6 +273,14 @@ export async function sendStagedRowsToBankLedger(
     staged.boundAccountId != null && dedupedAnchors.length > 0;
 
   if (allSelected.length === 0 && !anchorsOnlyApprove) {
+    // Nothing eligible to promote — which is the STEADY STATE of a dupe-only
+    // re-sync, not an error: every row is `skipped_duplicate` and deliberately
+    // excluded above. Resolve the import here too, or it parks in
+    // /import/pending forever (the post-promote check below is unreachable
+    // from this exit). The predicate still guards the genuine empty-selection
+    // case — an explicit `rowIds: []` over rows that DO need action leaves the
+    // import pending, exactly as before.
+    await markImportResolvedIfDone(id);
     return { ok: false, code: "not_found", message: "No rows selected" };
   }
 
@@ -490,20 +529,7 @@ export async function sendStagedRowsToBankLedger(
   // (deliberately never promoted), so they must NOT keep the import pending —
   // otherwise a dupe-heavy re-sync parks in /import/pending forever even
   // though every genuinely-new row already imported (`importFullyResolved`).
-  const outstanding = await db
-    .select({
-      reconcileState: schema.stagedTransactions.reconcileState,
-      rowStatus: schema.stagedTransactions.rowStatus,
-    })
-    .from(schema.stagedTransactions)
-    .where(eq(schema.stagedTransactions.stagedImportId, id))
-    .all();
-  if (importFullyResolved(outstanding)) {
-    await db
-      .update(schema.stagedImports)
-      .set({ status: "approved" })
-      .where(eq(schema.stagedImports.id, id));
-  }
+  await markImportResolvedIfDone(id);
 
   const firstAnchor = dedupedAnchors[0] ?? null;
   return {
