@@ -37,7 +37,7 @@
  */
 
 import { db, schema } from "@/db";
-import { and, eq, asc, inArray, ne } from "drizzle-orm";
+import { and, eq, asc, inArray } from "drizzle-orm";
 import { decryptStaged } from "@/lib/crypto/staging-envelope";
 import { tryDecryptField } from "@/lib/crypto/envelope";
 import {
@@ -54,6 +54,33 @@ import {
   ANCHOR_SOURCES,
   type AnchorSource,
 } from "@/lib/bank-ledger-balance";
+
+/**
+ * A staged row, reduced to just the two fields that decide whether it still
+ * needs user action after a promote pass. Exported for `importFullyResolved`.
+ */
+export interface ResolutionRow {
+  reconcileState: string;
+  rowStatus: string;
+}
+
+/**
+ * True when NO staged row still needs user action — the signal to mark the
+ * staged import `approved` so it leaves /import/pending.
+ *
+ * A row is resolved when either:
+ *   - it promoted (`rowStatus === 'approved'`), OR
+ *   - it is a `skipped_duplicate` — deliberately excluded from promotion (it's
+ *     already in the ledger), so it never gets a rowStatus and must NOT be
+ *     counted as outstanding. Counting these was the SimpleFIN "import hell"
+ *     bug: a dupe-heavy re-sync stayed pending forever even though every
+ *     genuinely-new row had already been imported and categorized.
+ */
+export function importFullyResolved(rows: readonly ResolutionRow[]): boolean {
+  return rows.every(
+    (r) => r.rowStatus === "approved" || r.reconcileState === "skipped_duplicate",
+  );
+}
 
 export type SendToBankLedgerFailCode = "not_found";
 
@@ -458,18 +485,20 @@ export async function sendStagedRowsToBankLedger(
       .set({ rowStatus: "approved" })
       .where(inArray(schema.stagedTransactions.id, Array.from(materializedRowIds)));
   }
-  // If no rows still need action (every row is now 'approved'), mark the
-  // import approved so it leaves the pending list.
-  const remaining = await db
-    .select({ id: schema.stagedTransactions.id })
+  // If no row still needs user action, mark the import approved so it leaves
+  // the pending list. `skipped_duplicate` rows are resolved by construction
+  // (deliberately never promoted), so they must NOT keep the import pending —
+  // otherwise a dupe-heavy re-sync parks in /import/pending forever even
+  // though every genuinely-new row already imported (`importFullyResolved`).
+  const outstanding = await db
+    .select({
+      reconcileState: schema.stagedTransactions.reconcileState,
+      rowStatus: schema.stagedTransactions.rowStatus,
+    })
     .from(schema.stagedTransactions)
-    .where(and(
-      eq(schema.stagedTransactions.stagedImportId, id),
-      ne(schema.stagedTransactions.rowStatus, "approved"),
-    ))
-    .limit(1)
+    .where(eq(schema.stagedTransactions.stagedImportId, id))
     .all();
-  if (remaining.length === 0) {
+  if (importFullyResolved(outstanding)) {
     await db
       .update(schema.stagedImports)
       .set({ status: "approved" })
