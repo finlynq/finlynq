@@ -79,6 +79,13 @@ export type SpotlightItem = {
   description: string;
   actionUrl: string;
   amount?: number;
+  /**
+   * Currency of `amount` and of the figures inside `description` — always the
+   * user's display currency, converted server-side. Optional so a payload from
+   * an older server doesn't break the card; the render falls back to USD, the
+   * app-wide default (FINLYNQ-183), never CAD.
+   */
+  currency?: string;
 };
 
 export type WeeklyRecapData = {
