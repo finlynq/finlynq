@@ -9,7 +9,10 @@ import type { RawTransaction } from "@/lib/import-pipeline";
 import { sourceTagFor, type FormatTag } from "@/lib/tx-source";
 import { requireAuth } from "@/lib/auth/require-auth";
 import { safeErrorMessage } from "@/lib/validate";
-import { parseCsvWithFallback } from "@/lib/external-import/parsers/csv-pipeline";
+import {
+  parseCsvWithFallback,
+  NEEDS_CURRENCY_MESSAGE,
+} from "@/lib/external-import/parsers/csv-pipeline";
 import { parseCsvImportKnobs } from "@/lib/external-import/parsers/import-knobs";
 import { detectInvestmentFileFormat } from "@/lib/external-import/parsers/detect";
 import { parseOfxToCanonical } from "@/lib/external-import/parsers/ofx";
@@ -250,6 +253,26 @@ async function respondWithCsvResult(
       suggestedMapping: result.suggestedMapping,
       fileName,
     });
+  }
+  // GH #328 — this route is the account-UNBOUND surface, so it's the one that
+  // genuinely reaches "no currency anywhere". 422 (not 400) to match the other
+  // "we need one more thing from you before this can import" branches, and the
+  // body carries headers/sampleRows/suggestedMapping so a caller that only
+  // wanted a re-detect (the column-mapping dialog's skip-rows re-parse) can
+  // keep working instead of dead-ending on the throw.
+  if (result.kind === "needs-currency") {
+    return NextResponse.json(
+      {
+        type: "csv-needs-currency",
+        error: NEEDS_CURRENCY_MESSAGE,
+        headers: result.headers,
+        sampleRows: result.sampleRows,
+        suggestedMapping: result.suggestedMapping,
+        rowCount: result.rowCount,
+        fileName,
+      },
+      { status: 422 },
+    );
   }
   if (result.kind === "auto-detected") {
     // Unreachable on this route — /api/import/preview never passes

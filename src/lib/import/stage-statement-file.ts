@@ -58,6 +58,7 @@ import { normalizeDate } from "@/lib/csv-parser";
 import { parseOfx } from "@/lib/ofx-parser";
 import {
   parseCsvWithFallback,
+  NEEDS_CURRENCY_MESSAGE,
   type ParseError,
 } from "@/lib/external-import/parsers/csv-pipeline";
 import type { DateFormatOverride } from "@/lib/csv-parser";
@@ -187,6 +188,27 @@ export async function parseStatement(
           headers: result.headers,
           sampleRows: result.sampleRows,
           suggestedMapping: result.suggestedMapping,
+          fileName: file.name,
+        },
+      };
+    }
+    // GH #328 — the file names no currency and nothing was left to fall back
+    // on. Only reachable when the upload is NOT account-bound (`accountId`
+    // null ⇒ `boundAccountCurrency` null): both callers of `parseStatement`
+    // resolve `boundAccountCurrency` from the bound account, and the MCP
+    // `manage_statement_import(op:upload)` always requires an accountId. Kept
+    // as a defensive refusal rather than an `assert` so an unbound cross-account
+    // CSV gets a clean, actionable 422 instead of silently-CAD rows.
+    if (result.kind === "needs-currency") {
+      return {
+        status: 422,
+        body: {
+          type: "csv-needs-currency",
+          error: NEEDS_CURRENCY_MESSAGE,
+          headers: result.headers,
+          sampleRows: result.sampleRows,
+          suggestedMapping: result.suggestedMapping,
+          rowCount: result.rowCount,
           fileName: file.name,
         },
       };
@@ -682,6 +704,13 @@ export async function writeStagedImport(
     stagedImportId: stagedImportIdLocal,
     userId,
     date: r.date,
+    // GH #328 — same resolution order as the CSV pipeline (row value → upload
+    // default knob → bound account). The trailing "CAD" is now UNREACHABLE and
+    // kept only as a type-level total: the CSV path always arrives with a
+    // non-null `r.currency` (the pipeline refuses with `needs-currency`
+    // otherwise), OFX/QFX carry CURDEF (and are refused without a bound
+    // account), and the SimpleFIN connector stamps the account's currency on
+    // every row. Do not restore it as a working fallback.
     currency: r.currency ?? knobs.defaultCurrency ?? boundAccountCurrency ?? "CAD",
     amount: r.amount,
     // User-tier encryption: DEK available, wrap directly under the user's DEK.
