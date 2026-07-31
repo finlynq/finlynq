@@ -377,8 +377,13 @@ export default function AdminPage() {
           // Single line. The secondary identifier is appended inline ONLY when
           // it adds information — most signups have displayName === username,
           // and rendering both unconditionally doubled every row's height to
-          // show the same string twice.
-          const showSecondary = secondary !== null && secondary !== primary;
+          // show the same string twice. The comparison is case- and
+          // whitespace-insensitive because a display name is typically just the
+          // capitalized username ("Jason" / "jason"), which is still the same
+          // value shown twice.
+          const showSecondary =
+            secondary !== null &&
+            secondary.trim().toLowerCase() !== primary.trim().toLowerCase();
           return (
             <span className="flex items-baseline gap-1.5 whitespace-nowrap">
               <span className="font-medium">{primary}</span>
