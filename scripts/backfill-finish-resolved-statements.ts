@@ -23,16 +23,35 @@
  * invisible in both lists.
  */
 
-import { db, schema } from "@/db";
+import { PostgresAdapter } from "../src/db/adapters/postgres";
+import { setAdapter, setDialect, db, schema } from "../src/db";
 import { and, eq, isNotNull, sql } from "drizzle-orm";
 import {
   statementsFullyInLedger,
   finishStatement,
-} from "@/lib/import/statement-resolution";
+} from "../src/lib/import/statement-resolution";
 
 async function main() {
   const apply = process.argv.includes("--apply");
   console.log(apply ? "MODE: APPLY (writing)" : "MODE: DRY RUN (no writes) — pass --apply to write");
+
+  // Standalone script: `instrumentation.ts` bootstraps the adapter inside the
+  // app, so a script driving the `@/db` proxy must do it itself or the first
+  // property access throws "Database adapter not initialized".
+  const databaseUrl = process.env.DATABASE_URL || process.env.PF_DATABASE_URL;
+  if (!databaseUrl) {
+    console.error("ERROR: DATABASE_URL (or PF_DATABASE_URL) must be set");
+    process.exit(1);
+  }
+  setDialect("postgres");
+  const adapter = new PostgresAdapter();
+  // userId is connection metadata only — every query below is scoped by the
+  // explicit per-user id read from staged_imports.
+  await adapter.initialize({
+    dialect: "postgres",
+    postgres: { connectionString: databaseUrl, userId: "" },
+  });
+  setAdapter(adapter);
 
   // Every (user, account) pair that still has pending statements.
   const pairs = await db
