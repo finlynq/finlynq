@@ -11,7 +11,7 @@ import type { DrizzleDb } from "@/db";
 import * as pgSchema from "@/db/schema-pg";
 import { eq, count, sql, inArray, and, isNull } from "drizzle-orm";
 import { normalizeDbRows } from "@/lib/db-utils";
-import { spanBucketById } from "@/lib/auth/activity-span";
+import type { TableColFilter } from "@/lib/table-filters";
 import crypto from "crypto";
 
 /** Returns the PostgreSQL schema tables */
@@ -493,13 +493,95 @@ function userSortSql(key: UserSortKey) {
 /** Default ordering when the caller names none: newest signups first. */
 const DEFAULT_USER_SORT: UserSortKey = "joined";
 
+/**
+ * Per-column filter → SQL predicate. Columns absent from this map are not
+ * filterable and are IGNORED rather than erroring, so a stale saved filter for
+ * a removed column degrades to "no filter" instead of a hard failure.
+ *
+ * Text search spans the three identity columns the User cell can render, so
+ * filtering "User" finds a row by display name, username OR email — matching
+ * what the cell actually shows.
+ */
+function userFilterSql(f: TableColFilter) {
+  switch (f.columnId) {
+    case "user": {
+      if (f.type !== "text") return null;
+      const needle = `%${f.value.trim().toLowerCase()}%`;
+      return sql`(lower(COALESCE(u.display_name, '')) LIKE ${needle} OR lower(COALESCE(u.username, '')) LIKE ${needle} OR lower(COALESCE(u.email, '')) LIKE ${needle})`;
+    }
+    case "role":
+      return f.type === "enum" ? sql`u.role IN ${f.values}` : null;
+    case "plan":
+      return f.type === "enum" ? sql`u.plan IN ${f.values}` : null;
+    case "verified":
+      return f.type === "enum"
+        ? sql`u.email_verified IN ${f.values.map((v) => (v === "1" ? 1 : 0))}`
+        : null;
+    case "mfa":
+      return f.type === "enum"
+        ? sql`u.mfa_enabled IN ${f.values.map((v) => (v === "1" ? 1 : 0))}`
+        : null;
+    case "txns":
+      return f.type === "numeric"
+        ? numericPredicate(sql`COALESCE(tx.total, 0)`, f)
+        : null;
+    case "span":
+      return f.type === "numeric" ? numericPredicate(activeSpanSql(), f) : null;
+    case "lastActive":
+      return f.type === "date" ? datePredicate(sql`u.last_active_at`, f) : null;
+    case "joined":
+      return f.type === "date"
+        ? datePredicate(sql`u.created_at::timestamptz`, f)
+        : null;
+    default:
+      return null;
+  }
+}
+
+function numericPredicate(
+  expr: ReturnType<typeof sql>,
+  f: Extract<TableColFilter, { type: "numeric" }>,
+) {
+  if (!Number.isFinite(f.value)) return null;
+  switch (f.op) {
+    case "eq":
+      return sql`${expr} = ${f.value}`;
+    case "gt":
+      return sql`${expr} > ${f.value}`;
+    case "lt":
+      return sql`${expr} < ${f.value}`;
+    case "between":
+      return f.value2 != null && Number.isFinite(f.value2)
+        ? sql`${expr} BETWEEN ${f.value} AND ${f.value2}`
+        : sql`${expr} >= ${f.value}`;
+  }
+}
+
+/**
+ * `to` is compared with `< to + 1 day` so an inclusive end date actually
+ * includes that whole day — a bare `<= '2026-07-31'` casts to midnight and
+ * silently excludes everything that happened during the day the user picked.
+ */
+function datePredicate(
+  expr: ReturnType<typeof sql>,
+  f: Extract<TableColFilter, { type: "date" }>,
+) {
+  const parts = [];
+  if (f.from) parts.push(sql`${expr} >= ${f.from}::timestamptz`);
+  if (f.to) parts.push(sql`${expr} < (${f.to}::timestamptz + interval '1 day')`);
+  if (parts.length === 0) return null;
+  return parts.length === 1
+    ? parts[0]
+    : sql`(${parts[0]} AND ${parts[1]})`;
+}
+
 export interface ListUsersPageOptions {
   limit: number;
   offset: number;
   sort?: UserSortKey | null;
   sortDir?: "asc" | "desc" | null;
-  /** A `SPAN_BUCKETS` id from `@/lib/auth/activity-span`, or null for no filter. */
-  spanBucket?: string | null;
+  /** Per-column filters (see @/lib/table-filters). Unknown columns ignored. */
+  filters?: TableColFilter[];
 }
 
 export interface AdminUserRow {
@@ -539,16 +621,17 @@ export interface AdminUserRow {
 export async function listUsersPage(
   options: ListUsersPageOptions,
 ): Promise<{ rows: AdminUserRow[]; total: number }> {
-  const { limit, offset, sort, sortDir, spanBucket } = options;
+  const { limit, offset, sort, sortDir, filters = [] } = options;
 
   // Filter fragment, built ONCE and reused by both the page query and the
   // count query so they cannot drift apart.
-  const bucket = spanBucket ? spanBucketById(spanBucket) : null;
-  const whereSql = !bucket
-    ? sql``
-    : bucket.max === null
-      ? sql`WHERE ${activeSpanSql()} >= ${bucket.min}`
-      : sql`WHERE ${activeSpanSql()} >= ${bucket.min} AND ${activeSpanSql()} <= ${bucket.max}`;
+  const predicates = filters
+    .map((f) => userFilterSql(f))
+    .filter((p): p is NonNullable<typeof p> => p != null);
+  const whereSql =
+    predicates.length === 0
+      ? sql``
+      : sql`WHERE ${sql.join(predicates, sql` AND `)}`;
 
   const sortKey: UserSortKey = isUserSortKey(sort) ? sort : DEFAULT_USER_SORT;
   const dirSql = sortDir === "asc" ? sql`ASC` : sql`DESC`;
@@ -584,10 +667,22 @@ export async function listUsersPage(
     LIMIT ${limit} OFFSET ${offset}
   `);
 
-  // Count needs no tx join — the filter only touches `users` columns.
-  const countResult = await db.execute(
-    sql`SELECT COUNT(*)::int AS total FROM users u ${whereSql}`,
-  );
+  // The count carries the SAME tx join as the page query — `txns` is a
+  // filterable column, so `tx.total` can appear in `whereSql` and a bare
+  // `FROM users u` would fail to resolve it. Joining unconditionally keeps one
+  // WHERE fragment valid in both statements, which is the property that stops
+  // the total from drifting away from the rows.
+  const countResult = await db.execute(sql`
+    WITH tx AS (
+      SELECT user_id, COUNT(*)::int AS total
+      FROM transactions
+      GROUP BY user_id
+    )
+    SELECT COUNT(*)::int AS total
+    FROM users u
+    LEFT JOIN tx ON tx.user_id = u.id
+    ${whereSql}
+  `);
 
   const rows = normalizeDbRows<AdminUserRow>(pageResult);
   const total = normalizeDbRows<{ total: number }>(countResult)[0]?.total ?? 0;

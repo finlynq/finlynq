@@ -16,7 +16,42 @@ import {
   updateUserRole,
   updateUserPlan,
 } from "@/lib/auth/queries";
-import { isSpanBucketId } from "@/lib/auth/activity-span";
+import { parseTableFilters, type TableColFilter } from "@/lib/table-filters";
+
+/**
+ * Server-side re-validation of the per-column filters. `parseTableFilters` only
+ * proves the payload is JSON — this proves it is a filter. Mirrors the union in
+ * @/lib/table-filters; keep the two in step.
+ */
+const colFiltersSchema: z.ZodType<TableColFilter[]> = z.array(
+  z.discriminatedUnion("type", [
+    z.object({
+      type: z.literal("date"),
+      columnId: z.string().min(1),
+      from: z.string().optional(),
+      to: z.string().optional(),
+    }),
+    z.object({
+      type: z.literal("text"),
+      columnId: z.string().min(1),
+      value: z.string(),
+    }),
+    z.object({
+      type: z.literal("numeric"),
+      columnId: z.string().min(1),
+      op: z.enum(["eq", "gt", "lt", "between"]),
+      value: z.number().finite(),
+      value2: z.number().finite().optional(),
+    }),
+    z.object({
+      type: z.literal("enum"),
+      columnId: z.string().min(1),
+      // A zero-length enum would mean "match none" and blank the table; the
+      // client drops those before serializing, and this rejects any that slip.
+      values: z.array(z.string()).min(1),
+    }),
+  ])
+);
 import { validateBody } from "@/lib/validate";
 import { logAdminAction, clientIp } from "@/lib/admin-audit";
 import { getDEK } from "@/lib/crypto/dek-cache";
@@ -58,10 +93,22 @@ export async function GET(request: NextRequest) {
     );
   }
 
-  const spanBucketParam = url.searchParams.get("spanBucket");
-  if (spanBucketParam !== null && !isSpanBucketId(spanBucketParam)) {
+  // Per-column filters arrive as a JSON array (see @/lib/table-filters). A
+  // present-but-unparseable payload is a 400: serving an UNFILTERED page that
+  // the UI still renders as filtered is the same lie as an unfiltered count.
+  const rawFilters = url.searchParams.get("filters");
+  const parsedFilters = parseTableFilters(rawFilters);
+  if (parsedFilters === null) {
     return NextResponse.json(
-      { error: `Unknown span bucket: ${spanBucketParam}` },
+      { error: "Malformed filters parameter." },
+      { status: 400 }
+    );
+  }
+
+  const filtersResult = colFiltersSchema.safeParse(parsedFilters);
+  if (!filtersResult.success) {
+    return NextResponse.json(
+      { error: "Invalid filter shape." },
       { status: 400 }
     );
   }
@@ -74,7 +121,7 @@ export async function GET(request: NextRequest) {
     offset,
     sort: sortParam,
     sortDir: sortDirParam,
-    spanBucket: spanBucketParam,
+    filters: filtersResult.data,
   });
 
   return NextResponse.json({
@@ -84,7 +131,7 @@ export async function GET(request: NextRequest) {
     offset,
     sort: sortParam,
     sortDir: sortDirParam,
-    spanBucket: spanBucketParam,
+    filters: filtersResult.data,
   });
 }
 

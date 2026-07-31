@@ -25,7 +25,11 @@ import {
 } from "lucide-react";
 import { motion } from "framer-motion";
 import { DORMANT_DAYS, isDormant } from "@/lib/auth/dormancy";
-import { SPAN_BUCKETS } from "@/lib/auth/activity-span";
+import {
+  serializeTableFilters,
+  setColFilter,
+  type TableColFilter,
+} from "@/lib/table-filters";
 import { DataTable, type DataTableColumn } from "@/components/ui/data-table";
 import { Pagination } from "@/components/ui/pagination";
 
@@ -236,7 +240,7 @@ export default function AdminPage() {
     null
   );
   const [page, setPage] = useState(0);
-  const [spanBucket, setSpanBucket] = useState<string>("");
+  const [colFilters, setColFilters] = useState<TableColFilter[]>([]);
   // FINLYNQ-167 — OAuth grants panel.
   const [grants, setGrants] = useState<AdminGrant[]>([]);
   const [revokingGrant, setRevokingGrant] = useState<number | null>(null);
@@ -254,7 +258,8 @@ export default function AdminPage() {
       params.set("sort", sort.key);
       params.set("sortDir", sort.dir);
     }
-    if (spanBucket) params.set("spanBucket", spanBucket);
+    const serialized = serializeTableFilters(colFilters);
+    if (serialized) params.set("filters", serialized);
 
     try {
       const res = await fetch(`/api/admin/users?${params.toString()}`);
@@ -275,7 +280,7 @@ export default function AdminPage() {
       setError("Failed to connect to server.");
       setLoading(false);
     }
-  }, [page, sort, spanBucket]);
+  }, [page, sort, colFilters]);
 
   const fetchStatsAndGrants = useCallback(async () => {
     try {
@@ -316,10 +321,14 @@ export default function AdminPage() {
     []
   );
 
-  const handleSpanBucketChange = useCallback((next: string) => {
-    setSpanBucket(next);
-    setPage(0);
-  }, []);
+  /** Same reasoning as sort: a changed filter invalidates the current offset. */
+  const handleColumnFilterChange = useCallback(
+    (columnId: string, next: TableColFilter | null) => {
+      setColFilters((prev) => setColFilter(prev, columnId, next));
+      setPage(0);
+    },
+    []
+  );
 
   const handleRoleToggle = async (userId: string, currentRole: string) => {
     const newRole = currentRole === "admin" ? "user" : "admin";
@@ -370,6 +379,9 @@ export default function AdminPage() {
       {
         key: "user",
         header: "User",
+        // Text search spans display name, username AND email server-side, so it
+        // matches whichever of them the cell happens to be showing.
+        filterType: "text",
         accessor: (u) => u.displayName ?? u.username ?? u.email ?? "",
         render: (u) => {
           const primary = u.displayName || u.username || u.email || "—";
@@ -399,18 +411,34 @@ export default function AdminPage() {
       {
         key: "role",
         header: "Role",
+        filterType: "enum",
+        filterOptions: [
+          { value: "user", label: "User" },
+          { value: "admin", label: "Admin" },
+        ],
         accessor: (u) => u.role,
         render: (u) => <RoleBadge role={u.role} />,
       },
       {
         key: "plan",
         header: "Plan",
+        filterType: "enum",
+        filterOptions: [
+          { value: "free", label: "Free" },
+          { value: "pro", label: "Pro" },
+          { value: "premium", label: "Premium" },
+        ],
         accessor: (u) => u.plan ?? "free",
         render: (u) => <PlanBadge plan={u.plan ?? "free"} />,
       },
       {
         key: "verified",
         header: "Verified",
+        filterType: "enum",
+        filterOptions: [
+          { value: "1", label: "Verified" },
+          { value: "0", label: "Not verified" },
+        ],
         accessor: (u) => (u.emailVerified ? 1 : 0),
         render: (u) =>
           u.emailVerified ? (
@@ -422,6 +450,11 @@ export default function AdminPage() {
       {
         key: "mfa",
         header: "MFA",
+        filterType: "enum",
+        filterOptions: [
+          { value: "1", label: "Enabled" },
+          { value: "0", label: "Disabled" },
+        ],
         accessor: (u) => (u.mfaEnabled ? 1 : 0),
         render: (u) =>
           u.mfaEnabled ? (
@@ -434,6 +467,7 @@ export default function AdminPage() {
         key: "txns",
         header: "Txns",
         align: "right",
+        filterType: "numeric",
         accessor: (u) => u.transactionCount ?? 0,
         render: (u) => (
           <span className="font-mono text-sm">
@@ -444,6 +478,7 @@ export default function AdminPage() {
       {
         key: "lastActive",
         header: "Last active",
+        filterType: "date",
         accessor: (u) => u.lastActiveAt as string | null,
         render: (u) => {
           // FINLYNQ-166 — dormant (null OR >DORMANT_DAYS) renders muted.
@@ -470,6 +505,9 @@ export default function AdminPage() {
         key: "span",
         header: "Active span",
         align: "right",
+        // Numeric rather than the earlier fixed buckets: "> 30 days" is both
+        // more precise and more flexible than picking a predefined band.
+        filterType: "numeric",
         accessor: (u) => u.activeSpanDays,
         render: (u) => (
           <span
@@ -487,6 +525,7 @@ export default function AdminPage() {
       {
         key: "joined",
         header: "Joined",
+        filterType: "date",
         accessor: (u) => u.createdAt,
         render: (u) => (
           <span className="text-sm text-muted-foreground">
@@ -742,38 +781,24 @@ export default function AdminPage() {
           </TabsList>
 
           <TabsContent value="users" className="mt-4 space-y-3">
-            {/* Active-span filter. Server-side, so it narrows the WHOLE table
-                and the count/pager below follow it — not just the loaded page. */}
-            <div className="flex items-center gap-2">
-              <label
-                htmlFor="span-bucket"
-                className="text-sm text-muted-foreground"
-              >
-                Active span
-              </label>
-              <select
-                id="span-bucket"
-                className="h-8 rounded-md border bg-background px-2 text-sm"
-                value={spanBucket}
-                onChange={(e) => handleSpanBucketChange(e.target.value)}
-              >
-                <option value="">All</option>
-                {SPAN_BUCKETS.map((b) => (
-                  <option key={b.id} value={b.id}>
-                    {b.label}
-                  </option>
-                ))}
-              </select>
-              {spanBucket && (
+            {colFilters.length > 0 && (
+              <div className="flex items-center gap-2 text-sm text-muted-foreground">
+                <span>
+                  {colFilters.length} column filter
+                  {colFilters.length === 1 ? "" : "s"} active
+                </span>
                 <button
                   type="button"
                   className="text-xs px-2 py-1 rounded border hover:bg-muted transition-colors"
-                  onClick={() => handleSpanBucketChange("")}
+                  onClick={() => {
+                    setColFilters([]);
+                    setPage(0);
+                  }}
                 >
-                  Clear
+                  Clear all
                 </button>
-              )}
-            </div>
+              </div>
+            )}
 
             <Card>
               <CardContent className="p-0">
@@ -784,6 +809,8 @@ export default function AdminPage() {
                   manualSort
                   sort={sort}
                   onSortChange={handleSortChange}
+                  columnFilters={colFilters}
+                  onColumnFilterChange={handleColumnFilterChange}
                   emptyState={
                     <p className="text-center py-8 text-sm text-muted-foreground">
                       No users found.

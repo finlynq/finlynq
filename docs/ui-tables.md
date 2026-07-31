@@ -29,6 +29,27 @@ replace them). Configured by a `DataTableColumn<T>[]` array mirroring
 | Empty state | `emptyState` prop | Rendered in place of the table when there are zero source rows. |
 | Controlled sort | `sort` + `onSortChange` | Optional; uncontrolled (internal state) by default. |
 | Server-side sort/filter | `manualSort` | Renders `rows` in the given order and applies NO client-side sort/filter. Headers still render, still indicate sort, still fire `onSortChange`. **Required for any server-paged table** — see below. |
+| Server-side per-column filter | `column.filterType` + `column.filterOptions`, with controlled `columnFilters` / `onColumnFilterChange` | Renders the shared header filter popover (`src/components/ui/column-filter.tsx`) — date range / substring / numeric op / multi-select enum, committed on Apply. The column's `key` is the `columnId` sent to the server. **Distinct from `column.filter`** above, which is the client-side filter row; use `filterType` whenever the table pages server-side. |
+
+### Per-column filters
+
+`src/components/ui/column-filter.tsx` — `<ColumnFilterPopover>`, plus the pure
+model in `src/lib/table-filters.ts` (`TableColFilter` union, `serializeTableFilters`,
+`parseTableFilters`, `setColFilter`, `isEmptyFilter`).
+
+Extracted from the transactions table (issue #59), which was the app's only
+implementation. The one transaction-specific part was its enum branch, which
+hardcoded four `columnId` cases; options are injected now, so any table can use
+it. `transactions/_components/column-filter-popover.tsx` is a thin adapter that
+supplies its source/category/account/accountType options and keeps emitting the
+narrower `ColFilterShape`, so persisted `/api/settings/tx-filters` blobs are
+unchanged.
+
+Two rules matter server-side: an **empty filter must never reach the wire**
+(an enum with nothing ticked means "match none" and blanks the table), and
+`parseTableFilters` returns `null` — not `[]` — for an unparseable payload so
+the route can answer 400 instead of serving an unfiltered page the UI still
+labels as filtered.
 
 ### Pagination
 
@@ -69,7 +90,7 @@ with `DataTable`'s `manualSort`: `DataTable` renders the server's page,
 | Table | File | Notes |
 |---|---|---|
 | Reconciliation summary | `src/components/inbox/reconcile-summary-panel.tsx` | FINLYNQ-196 — first consumer. Account / Current balance / Last import / Last reconciled / Pending (sortable) + Open (action). |
-| Admin users | `src/app/(app)/admin/page.tsx` | Migrated 2026-07-31. **The reference server-paged consumer**: `manualSort` + controlled `sort` + shared `<Pagination>`; sort, filter and paging all execute in SQL (`listUsersPage`, `@/lib/auth/queries`). 10 columns incl. the "Active span" retention column (days signup → last activity, never-active = 0) with an out-of-table bucket filter. Replaced a hand-rolled 8-column sort machine that could only sort the loaded page — with a 50-row cap, it showed 50 of 53 users under a heading that read "Users (53)". |
+| Admin users | `src/app/(app)/admin/page.tsx` | Migrated 2026-07-31. **The reference server-paged consumer**: `manualSort` + controlled `sort` + shared `<Pagination>`; sort, filter and paging all execute in SQL (`listUsersPage`, `@/lib/auth/queries`). 10 columns incl. the "Active span" retention column (days signup → last activity, never-active = 0). **Per-column header filters on all 9 data columns** (text / enum / numeric / date), executed in SQL. Replaced a hand-rolled 8-column sort machine that could only sort the loaded page — with a 50-row cap, it showed 50 of 53 users under a heading that read "Users (53)". |
 
 ### Central-path candidate — not yet migrated (hand-rolled sort today)
 

@@ -17,13 +17,7 @@
  */
 
 import { describe, it, expect } from "vitest";
-import {
-  SPAN_BUCKETS,
-  spanDays,
-  bucketForSpan,
-  isSpanBucketId,
-  spanBucketById,
-} from "@/lib/auth/activity-span";
+import { spanDays } from "@/lib/auth/activity-span";
 
 const DAY = 86_400_000;
 const CREATED = "2026-04-01T00:00:00.000Z";
@@ -60,63 +54,15 @@ describe("spanDays", () => {
   });
 });
 
-describe("bucketForSpan", () => {
-  it("puts a never-active / same-day user in the first bucket", () => {
-    expect(bucketForSpan(0)).toBe("0");
-    expect(bucketForSpan(spanDays(CREATED, null))).toBe("0");
-  });
-
-  it("maps each bucket's boundaries to that bucket", () => {
-    expect(bucketForSpan(1)).toBe("1-7");
-    expect(bucketForSpan(7)).toBe("1-7");
-    expect(bucketForSpan(8)).toBe("8-30");
-    expect(bucketForSpan(30)).toBe("8-30");
-    expect(bucketForSpan(31)).toBe("31-90");
-    expect(bucketForSpan(90)).toBe("31-90");
-    expect(bucketForSpan(91)).toBe("90plus");
-    expect(bucketForSpan(10_000)).toBe("90plus");
-  });
-
-  it("clamps negative / non-finite input into the first bucket", () => {
-    expect(bucketForSpan(-1)).toBe("0");
-    expect(bucketForSpan(Number.NaN)).toBe("0");
-  });
-});
-
-describe("SPAN_BUCKETS", () => {
-  it("is contiguous and non-overlapping, so every span matches exactly one", () => {
-    // The SQL filter is a plain BETWEEN per bucket — a gap would make a user
-    // unreachable by any filter value, an overlap would double-count them.
-    for (let i = 1; i < SPAN_BUCKETS.length; i++) {
-      const prev = SPAN_BUCKETS[i - 1];
-      const cur = SPAN_BUCKETS[i];
-      expect(prev.max).not.toBeNull();
-      expect(cur.min).toBe((prev.max as number) + 1);
-    }
-    expect(SPAN_BUCKETS[0].min).toBe(0);
-    // Only the last bucket may be unbounded, or large spans fall through.
-    expect(SPAN_BUCKETS[SPAN_BUCKETS.length - 1].max).toBeNull();
-  });
-
-  it("covers every span from 0 upward", () => {
-    for (const days of [0, 1, 5, 7, 8, 29, 30, 31, 60, 90, 91, 500]) {
-      const id = bucketForSpan(days);
-      const bucket = spanBucketById(id);
-      expect(bucket).not.toBeNull();
-      expect(days).toBeGreaterThanOrEqual(bucket!.min);
-      if (bucket!.max !== null) expect(days).toBeLessThanOrEqual(bucket!.max);
-    }
-  });
-});
-
-describe("isSpanBucketId", () => {
-  it("accepts every real bucket id", () => {
-    for (const b of SPAN_BUCKETS) expect(isSpanBucketId(b.id)).toBe(true);
-  });
-
-  it("rejects anything else — the route 400s on these", () => {
-    for (const bad of ["", "all", "0-7", "90+", null, undefined, 7, {}]) {
-      expect(isSpanBucketId(bad)).toBe(false);
+describe("span as a filterable number", () => {
+  it("is directly comparable, which is what the numeric column filter needs", () => {
+    // The span is filtered as a plain number ("> 30 days") through the shared
+    // per-column filter, so the only contract the UI needs is that spanDays
+    // yields a finite, non-negative integer for every input shape.
+    for (const last of [null, undefined, plusDays(0), plusDays(3.5), plusDays(-9), "junk"]) {
+      const d = spanDays(CREATED, last as string | null);
+      expect(Number.isInteger(d)).toBe(true);
+      expect(d).toBeGreaterThanOrEqual(0);
     }
   });
 });
