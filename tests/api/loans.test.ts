@@ -53,6 +53,18 @@ vi.mock("drizzle-orm", () => ({
   eq: vi.fn(), sql: vi.fn(), and: vi.fn(), desc: vi.fn(), asc: vi.fn(), inArray: vi.fn(),
 }));
 
+// The route resolves the display currency and a rate map so each loan can
+// carry a reporting-currency companion alongside its native amounts
+// (FINLYNQ-123). `getDisplayCurrency` reads `schema.settings`, which the `@/db`
+// stub above doesn't model — mock the whole FX surface instead. RUB is priced
+// deliberately far from 1 so a missed conversion can't pass by coincidence.
+vi.mock("@/lib/fx-service", () => ({
+  getDisplayCurrency: vi.fn(async () => "USD"),
+  getRateMap: vi.fn(async () => new Map([["USD", 1], ["RUB", 0.011]])),
+  convertWithRateMap: (amount: number, from: string, map: Map<string, number>) =>
+    amount * (map.get((from ?? "").trim().toUpperCase()) ?? 1),
+}));
+
 // B4 — verifyOwnership runs a real DB query; bypass here since these
 // tests don't seed accounts. authz-ownership.test.ts covers cross-tenant.
 vi.mock("@/lib/verify-ownership", () => ({
@@ -78,7 +90,7 @@ describe("API /api/loans", () => {
   describe("GET", () => {
     it("returns loans with amortization summary", async () => {
       mockDbChain.all!.mockReturnValueOnce([
-        { id: 1, name: "Mortgage", type: "mortgage", principal: 300000, annualRate: 5, termMonths: 360, startDate: "2020-01-01", extraPayment: 0, paymentFrequency: "monthly", accountId: null, accountName: null, paymentAmount: null, note: "" },
+        { id: 1, name: "Mortgage", type: "mortgage", principal: 300000, annualRate: 5, termMonths: 360, startDate: "2020-01-01", extraPayment: 0, paymentFrequency: "monthly", accountId: null, accountName: null, paymentAmount: null, note: "", currency: "RUB" },
       ]);
       mockGenerateAmortization.mockReturnValue({
         monthlyPayment: 1610.46,
@@ -93,9 +105,20 @@ describe("API /api/loans", () => {
       const res = await GET(req);
       const { status, data } = await parseResponse(res);
       expect(status).toBe(200);
-      const loans = data as { monthlyPayment: number; totalInterest: number }[];
+      const loans = data as {
+        monthlyPayment: number; totalInterest: number;
+        currency: string; displayCurrency: string;
+        remainingBalance: number; remainingBalanceDisplay: number;
+      }[];
       expect(loans[0].monthlyPayment).toBe(1610.46);
       expect(loans[0].totalInterest).toBe(279765.6);
+      // Native amounts stay in the loan's own currency; the companion is the
+      // converted one. Before this fix the row carried no currency at all and
+      // the page rendered all of it as the display currency.
+      expect(loans[0].currency).toBe("RUB");
+      expect(loans[0].displayCurrency).toBe("USD");
+      expect(loans[0].remainingBalance).toBeCloseTo(299639.54, 2);
+      expect(loans[0].remainingBalanceDisplay).toBeCloseTo(299639.54 * 0.011, 2);
     });
   });
 

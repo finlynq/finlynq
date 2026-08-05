@@ -24,6 +24,8 @@ import {
   validateCurrencyCode,
   validateFxDate,
   collapseLegSources,
+  getRateMap,
+  convertWithRateMap,
 } from "../src/lib/fx-service.js";
 import { SUPPORTED_CURRENCIES } from "../src/lib/fx/supported-currencies.js";
 import { resolveTxAmountsCore } from "../src/lib/currency-conversion.js";
@@ -2041,7 +2043,9 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
         data: {
           loanId: loan_id,
           // Stream D Phase 4: loanName omitted on stdio (cannot decrypt name_ct).
-          loanCurrency: loan.currency ?? "CAD",
+          // FINLYNQ-183/284: never a CAD literal — a loan with no explicit
+          // currency reads as the user's own reporting currency.
+          loanCurrency: String(loan.currency ?? reporting).toUpperCase(),
           reportingCurrency: reporting,
           asOfDate: cutoff,
           monthlyPayment: summary.monthlyPayment,
@@ -2070,7 +2074,7 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
   // ── get_debt_payoff_plan ──────────────────────────────────────────────────
   server.tool(
     "get_debt_payoff_plan",
-    "Compare avalanche vs snowball payoff across all user loans. Loan balances stay in each loan's own currency; reportingCurrency is surfaced as metadata.",
+    "Compare avalanche vs snowball payoff across all user loans. Balances and minimum payments are converted to reportingCurrency before ranking and before the shared extra_payment budget is applied; `inputs.debts` echoes each loan's native currency and amount. extra_payment is interpreted in reportingCurrency.",
     {
       strategy: z.enum(["avalanche", "snowball", "both"]).optional(),
       extra_payment: z.number().optional(),
@@ -2079,14 +2083,24 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
     async ({ strategy, extra_payment, reportingCurrency }) => {
       const reporting = await resolveReportingCurrencyStdio(sqlite, userId, reportingCurrency);
       const loans = await sqlite.prepare(
-        `SELECT id, principal, annual_rate, term_months, start_date, payment_amount, payment_frequency, extra_payment, residual_value FROM loans WHERE user_id = ?`
+        `SELECT id, principal, annual_rate, term_months, start_date, payment_amount, payment_frequency, extra_payment, residual_value, currency FROM loans WHERE user_id = ?`
       ).all(userId) as SqliteRow[];
       if (!loans.length) return txt({ success: true, data: { message: "No loans found", strategies: {} } });
+      // FINLYNQ-123: snowball ranks by balance and the extra_payment budget is
+      // pooled across every debt, so all balances must share one currency
+      // first. Mirrors the HTTP tool in mcp-server/tools/loans.ts.
+      const rateMap = await getRateMap(reporting, userId);
       const today = new Date().toISOString().split("T")[0];
       // Issue #213 — split out legacy bad rows so one bad start_date no
       // longer poisons the whole strategy computation.
       const excluded: Array<{ loanId: number; error: string; value: unknown }> = [];
       const debts: Debt[] = [];
+      // Native-currency echo alongside the converted figures the strategy uses.
+      const debtsNative: Array<{
+        id: number; currency: string;
+        nativeBalance: number; nativeMinPayment: number;
+        balance: number; minPayment: number;
+      }> = [];
       for (const l of loans) {
         if (parseYmdSafe(String(l.start_date)) === null) {
           excluded.push({ loanId: Number(l.id), error: "invalid start_date", value: l.start_date });
@@ -2113,20 +2127,35 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
         }
         const paid = summary.schedule.filter((r) => r.date <= today);
         const principalPaid = paid.reduce((s, r) => s + r.principal, 0);
-        const balance = Math.max(Number(l.principal) - principalPaid, 0);
-        const minPayment = Number(l.payment_amount ?? summary.monthlyPayment);
+        const nativeBalance = Math.round(Math.max(Number(l.principal) - principalPaid, 0) * 100) / 100;
+        const nativeMinPayment = Number(l.payment_amount ?? summary.monthlyPayment);
+        const loanCurrency = String(l.currency ?? reporting).toUpperCase();
+        const balance = Math.round(convertWithRateMap(nativeBalance, loanCurrency, rateMap) * 100) / 100;
+        const minPayment = Math.round(convertWithRateMap(nativeMinPayment, loanCurrency, rateMap) * 100) / 100;
         debts.push({
           id: Number(l.id),
           // Stream D Phase 4: stdio cannot decrypt loan name — surface id only.
           name: `Loan #${Number(l.id)}`,
-          balance: Math.round(balance * 100) / 100,
+          balance,
           rate: Number(l.annual_rate),
+          minPayment,
+        });
+        debtsNative.push({
+          id: Number(l.id),
+          currency: loanCurrency,
+          nativeBalance,
+          nativeMinPayment,
+          balance,
           minPayment,
         });
       }
       const strat = strategy ?? "both";
       const extra = extra_payment ?? 0;
-      const result: Record<string, unknown> = { inputs: { extraPayment: extra, debts }, reportingCurrency: reporting };
+      const result: Record<string, unknown> = {
+        inputs: { extraPayment: extra, extraPaymentCurrency: reporting, debts: debtsNative },
+        reportingCurrency: reporting,
+        amountsConvertedTo: reporting,
+      };
       if (excluded.length) result.excluded = excluded;
       if (strat === "avalanche" || strat === "both") result.avalanche = calculateDebtPayoff(debts, extra, "avalanche");
       if (strat === "snowball" || strat === "both") result.snowball = calculateDebtPayoff(debts, extra, "snowball");

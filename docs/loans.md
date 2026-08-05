@@ -104,6 +104,44 @@ posting starts writing transactions — nothing here blocks it.
   instead of throwing. Same for the **stdio** read tools (stdio writes still
   refuse per Stream D Phase 4).
 
+## Currency (2026-08-05)
+
+A loan is denominated in `loans.currency`, resolved on create as **explicit >
+linked account's currency > the user's display currency** via the shared pure
+`pickRecordCurrency` ([src/lib/fx/record-currency.ts](../src/lib/fx/record-currency.ts)).
+The column default is USD and exists only as a backstop.
+
+Every read surface is **dual basis**, matching accounts and transactions:
+
+- Amounts stay in the loan's **own** currency — that is what
+  `buildLoanSchedule` computed, and what the schedule/amortization/what-if
+  tables display.
+- Each row also carries an **additive current-rate companion** for totalling
+  across a mixed-currency book: `remainingBalanceDisplay` /
+  `monthlyEquivalentPaymentDisplay` (REST `GET /api/loans`, alongside
+  `displayCurrency`) and `remainingBalanceReporting` /
+  `monthlyEquivalentPaymentReporting` (MCP `manage_loans(op:list)`, alongside
+  `reportingCurrency`). **Only these may be summed** (FINLYNQ-123) — the
+  Total Debt / Monthly Payments tiles read them and caveat "converted at
+  today's rates" whenever a foreign-currency loan is present.
+
+`get_debt_payoff_plan` **converts balances and minimum payments into
+`reportingCurrency` before ranking**, on both transports. This is a
+correctness fix, not a labelling one: snowball orders by balance and the single
+`extra_payment` budget is pooled across every debt, so an unconverted foreign
+balance could outrank every other debt purely on magnitude and absorb the whole
+budget. `inputs.debts` echoes each loan's native currency and amount next to the
+converted figures; `extra_payment` is interpreted in `reportingCurrency`.
+Interest **rates are percentages and are never converted** — avalanche ordering
+was always sound.
+
+`manage_loans` add/update accept `currency`. On update it **re-denominates**
+the loan (reinterprets the stored numbers); it does not convert them. That is
+the repair path for loans created before the parameter existed — those were
+stamped with the old CAD table default, and the migration deliberately does not
+rewrite them, since "the user chose CAD" and "MCP never sent a currency" are
+indistinguishable after the fact.
+
 ## Deferred (Phase 4 — tracked on FINLYNQ-136)
 
 - Posting the principal/interest split into `transactions` (principal =

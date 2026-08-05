@@ -39,6 +39,11 @@ import {
   resolveReportingCurrency,
 } from "../reporting-currency";
 import {
+  getRateMap,
+  convertWithRateMap,
+} from "../../src/lib/fx-service";
+import { pickRecordCurrency } from "../../src/lib/fx/record-currency";
+import {
   ymdDate,
   parseYmdSafe,
 } from "../lib/date-validators";
@@ -63,7 +68,8 @@ export function registerLoansTools(server: McpServer, ctx: PgToolContext) {
       const rawRows = await q(db, sql`
         SELECT l.id, l.name_ct, l.type, l.principal, l.annual_rate, l.term_months,
                l.start_date, l.payment_amount, l.payment_frequency, l.extra_payment,
-               l.residual_value, l.note, l.account_id, a.name_ct AS account_name_ct
+               l.residual_value, l.note, l.account_id, l.currency,
+               a.name_ct AS account_name_ct
         FROM loans l
         LEFT JOIN accounts a ON a.id = l.account_id
         WHERE l.user_id = ${userId}
@@ -92,10 +98,22 @@ export function registerLoansTools(server: McpServer, ctx: PgToolContext) {
           acctBalances.set(Number(b.account_id), { balance: Number(b.balance), txCount: Number(b.tx_count) });
         }
       }
+      // FINLYNQ-123 dual basis: amounts stay in each loan's own currency and
+      // each row also carries a current-rate conversion, so an assistant can
+      // both quote a loan correctly and total a mixed-currency book.
+      const reporting = await resolveReportingCurrency(db, userId, null);
+      const rateMap = await getRateMap(reporting, userId);
       const today = new Date().toISOString().split("T")[0];
       const enriched = rows.map((r) => {
+        const loanCurrency = String(r.currency ?? reporting).toUpperCase();
+        const toReporting = (amount: number | null) =>
+          amount == null ? null : Math.round(convertWithRateMap(amount, loanCurrency, rateMap) * 100) / 100;
         const integrityRow = (error: string, value: unknown) => ({
           ...r,
+          currency: loanCurrency,
+          reportingCurrency: reporting,
+          remainingBalanceReporting: null,
+          monthlyEquivalentPaymentReporting: null,
           monthlyPayment: null,
           totalInterest: null,
           payoffDate: null,
@@ -177,6 +195,10 @@ export function registerLoansTools(server: McpServer, ctx: PgToolContext) {
               : Math.round(principalPaid * 100) / 100,
           interestPaid: Math.round(interestPaid * 100) / 100,
           periodsRemaining,
+          currency: loanCurrency,
+          reportingCurrency: reporting,
+          remainingBalanceReporting: toReporting(remainingBalance),
+          monthlyEquivalentPaymentReporting: toReporting(summary.monthlyEquivalentPayment),
         };
       });
       return text({ success: true, data: enriched });
@@ -197,9 +219,10 @@ export function registerLoansTools(server: McpServer, ctx: PgToolContext) {
     extra_payment?: number;
     residual_value?: number;
     min_payment?: number;
+    currency?: string;
     note?: string;
   }): Promise<ToolResult> {
-      const { name, type, principal, annual_rate, term_months, start_date, account, account_id, payment_amount, payment_frequency, extra_payment, residual_value, min_payment, note } = args;
+      const { name, type, principal, annual_rate, term_months, start_date, account, account_id, payment_amount, payment_frequency, extra_payment, residual_value, min_payment, currency, note } = args;
       // FINLYNQ-267: resolve the optional linked account via the shared envelope
       // — a mistyped/unmatched name is REFUSED (not silently unlinked) and a 2+
       // match returns an ambiguous list; `account_id` is the FK fast-path.
@@ -234,15 +257,31 @@ export function registerLoansTools(server: McpServer, ctx: PgToolContext) {
         if (e instanceof LoanValidationError) return err(e.message);
         throw e;
       }
+      // Currency resolution (feedback #7): explicit > linked account > display.
+      // This INSERT used to omit the column entirely, so every MCP-created loan
+      // silently took the table default — which was CAD.
+      let accountCurrency: string | null = null;
+      if (accountId != null) {
+        const acctRow = await q(db, sql`
+          SELECT currency FROM accounts WHERE id = ${accountId} AND user_id = ${userId}
+        `);
+        accountCurrency = (acctRow[0]?.currency as string | undefined) ?? null;
+      }
+      const loanCurrency = pickRecordCurrency({
+        explicit: currency,
+        accountCurrency,
+        displayCurrency: await resolveReportingCurrency(db, userId, null),
+      });
       const n = dek ? encryptName(dek, name) : { ct: null, lookup: null };
       // Stream D Phase 4 — plaintext name dropped.
       const result = await q(db, sql`
-        INSERT INTO loans (user_id, type, account_id, principal, annual_rate, term_months, start_date, payment_amount, payment_frequency, extra_payment, residual_value, note, name_ct, name_lookup)
-        VALUES (${userId}, ${type}, ${accountId}, ${principal}, ${annual_rate}, ${term_months ?? null}, ${start_date}, ${pmt}, ${payment_frequency ?? "monthly"}, ${extra_payment ?? 0}, ${residual_value ?? null}, ${encNote(note)}, ${n.ct}, ${n.lookup})
+        INSERT INTO loans (user_id, type, account_id, currency, principal, annual_rate, term_months, start_date, payment_amount, payment_frequency, extra_payment, residual_value, note, name_ct, name_lookup)
+        VALUES (${userId}, ${type}, ${accountId}, ${loanCurrency}, ${principal}, ${annual_rate}, ${term_months ?? null}, ${start_date}, ${pmt}, ${payment_frequency ?? "monthly"}, ${extra_payment ?? 0}, ${residual_value ?? null}, ${encNote(note)}, ${n.ct}, ${n.lookup})
         RETURNING id
       `);
       const termDesc = term_months != null ? `over ${term_months} months` : `at ${pmt}/${payment_frequency ?? "monthly"} (payment-driven)`;
-      return text({ success: true, data: { id: result[0]?.id, message: `Loan "${name}" created — $${principal} at ${annual_rate}% ${termDesc}` } });
+      // Report the currency rather than a bare `$` — the amount is not USD.
+      return text({ success: true, data: { id: result[0]?.id, currency: loanCurrency, message: `Loan "${name}" created — ${principal} ${loanCurrency} at ${annual_rate}% ${termDesc}` } });
   }
 
   // ── op: update — lifted VERBATIM from update_loan ──────────────────────────
@@ -260,9 +299,10 @@ export function registerLoansTools(server: McpServer, ctx: PgToolContext) {
     residual_value?: number;
     account?: string;
     account_id?: number;
+    currency?: string;
     note?: string;
   }): Promise<ToolResult> {
-      const { id, name, type, principal, annual_rate, term_months, start_date, payment_amount, payment_frequency, extra_payment, residual_value, account, account_id, note } = args;
+      const { id, name, type, principal, annual_rate, term_months, start_date, payment_amount, payment_frequency, extra_payment, residual_value, account, account_id, currency, note } = args;
       const existing = await q(db, sql`
         SELECT id, principal, annual_rate, term_months, start_date, payment_amount,
                payment_frequency, extra_payment, residual_value
@@ -333,6 +373,9 @@ export function registerLoansTools(server: McpServer, ctx: PgToolContext) {
       if (extra_payment !== undefined) updates.push(sql`extra_payment = ${extra_payment}`);
       if (residual_value !== undefined) updates.push(sql`residual_value = ${residual_value}`);
       if (accountIdUpdate !== undefined) updates.push(sql`account_id = ${accountIdUpdate}`);
+      // Re-denominates the loan; it does NOT convert the stored amounts. This
+      // is the repair path for a loan created before the currency was settable.
+      if (currency !== undefined) updates.push(sql`currency = ${currency.toUpperCase()}`);
       if (note !== undefined) updates.push(sql`note = ${encNote(note)}`);
       if (!updates.length) return err("No fields to update");
 
@@ -365,7 +408,7 @@ export function registerLoansTools(server: McpServer, ctx: PgToolContext) {
   registerManageTool(
     server,
     "manage_loans",
-    "Manage loans & debt: `op` selects add / update / delete / list. add: create a loan or lease (principal/rate + term_months OR payment_amount; residual_value for leases). update: change any loan field by id. delete: remove a loan by id. list: all loans with balance/rate/payment/payoff date/linked account. For amortization schedules or payoff strategies use get_loan_amortization / get_debt_payoff_plan.",
+    "Manage loans & debt: `op` selects add / update / delete / list. add: create a loan or lease (principal/rate + term_months OR payment_amount; residual_value for leases; `currency` defaults to the linked account's, else the user's display currency). update: change any loan field by id. delete: remove a loan by id. list: all loans with balance/rate/payment/payoff date/linked account — amounts are in each loan's own `currency`, with `*Reporting` companions converted to `reportingCurrency` for totalling across currencies. For amortization schedules or payoff strategies use get_loan_amortization / get_debt_payoff_plan.",
     z.discriminatedUnion("op", [
       z.object({
         op: z.literal("add"),
@@ -382,6 +425,7 @@ export function registerLoansTools(server: McpServer, ctx: PgToolContext) {
         extra_payment: z.number().nonnegative().optional().describe("Extra principal per payment (must be >= 0; default 0)"),
         residual_value: z.number().nonnegative().optional().describe("Lease residual/buyout — the schedule amortizes down to this instead of 0 (must be < principal)"),
         min_payment: z.number().positive().optional().describe("Alias for payment_amount — minimum required payment (must be > 0)"),
+        currency: z.string().regex(/^[A-Za-z]{3,4}$/).optional().describe("ISO code the loan is denominated in, e.g. 'RUB'. Defaults to the linked account's currency, else the user's display currency — never a hardcoded default."),
         note: z.string().optional(),
       }),
       z.object({
@@ -399,6 +443,7 @@ export function registerLoansTools(server: McpServer, ctx: PgToolContext) {
         residual_value: z.number().nonnegative().optional().describe("Lease residual/buyout — balance remaining at term end (must be < principal)"),
         account: z.string().optional().describe("Linked account — name or alias (fuzzy matched — mistyped/unmatched is REFUSED; 2+ → ambiguous). Pass empty string to clear. PREFER `account_id`."),
         account_id: z.number().int().positive().optional().describe("Linked-account FK fast-path — wins over the fuzzy `account` name."),
+        currency: z.string().regex(/^[A-Za-z]{3,4}$/).optional().describe("ISO code the loan is denominated in. Changes the currency the stored amounts are interpreted in — it does NOT convert them."),
         note: z.string().optional(),
       }),
       z.object({
@@ -479,7 +524,9 @@ export function registerLoansTools(server: McpServer, ctx: PgToolContext) {
         data: {
           loanId: loan_id,
           loanName: loan.name,
-          loanCurrency: loan.currency ?? "CAD",
+          // FINLYNQ-183/284: never a CAD literal. A loan predating an explicit
+          // currency reads as the user's own reporting currency, not Canada's.
+          loanCurrency: String(loan.currency ?? reporting).toUpperCase(),
           reportingCurrency: reporting,
           asOfDate: cutoff,
           monthlyPayment: summary.monthlyPayment,
@@ -510,7 +557,7 @@ export function registerLoansTools(server: McpServer, ctx: PgToolContext) {
   // ── get_debt_payoff_plan ──────────────────────────────────────────────────
   server.tool(
     "get_debt_payoff_plan",
-    "Compare debt payoff strategies (avalanche vs snowball) across all user loans with an optional extra monthly payment. Loan balances stay in each loan's own currency; the response includes the resolved reportingCurrency for cross-currency context.",
+    "Compare debt payoff strategies (avalanche vs snowball) across all user loans with an optional extra monthly payment. Balances and minimum payments are converted to reportingCurrency before ranking and before the shared extra_payment budget is applied, so a mixed-currency book is compared like for like; `inputs.debts` echoes each loan's native currency and amount alongside the converted figures. extra_payment is interpreted in reportingCurrency.",
     {
       strategy: z.enum(["avalanche", "snowball", "both"]).optional().describe("'avalanche' (highest rate first), 'snowball' (smallest balance first), or 'both' (default)"),
       extra_payment: z.number().optional().describe("Extra monthly payment to apply on top of minimums (default 0)"),
@@ -521,17 +568,31 @@ export function registerLoansTools(server: McpServer, ctx: PgToolContext) {
       // Stream D Phase 4: l.name dropped — read l.name_ct only.
       const loansRaw = await q(db, sql`
         SELECT id, name_ct, principal, annual_rate, term_months, start_date,
-               payment_amount, payment_frequency, extra_payment, residual_value
+               payment_amount, payment_frequency, extra_payment, residual_value,
+               currency
         FROM loans WHERE user_id = ${userId}
       `);
       if (!loansRaw.length) return text({ success: true, data: { message: "No loans found", strategies: {} } });
       const loans = decryptNameish(loansRaw, dek);
+      // FINLYNQ-123: this tool RANKS loans against each other (snowball orders
+      // by balance) and pools one `extra_payment` budget across all of them, so
+      // every balance and minimum must be in ONE currency first. Without this
+      // an ₽8.1M loan outranked every USD debt by ~80x and consumed the whole
+      // extra budget — the strategy itself came out wrong, not just its labels.
+      const rateMap = await getRateMap(reporting, userId);
       const today = new Date().toISOString().split("T")[0];
       // Issue #213 — split out legacy bad rows so one bad start_date no
       // longer poisons the whole strategy computation. The bad rows still
       // surface to the caller (`excluded`) so they can be fixed.
       const excluded: Array<{ loanId: number; error: string; value: unknown }> = [];
       const debts: Debt[] = [];
+      // Native-currency echo so the caller can see what each figure was before
+      // conversion — the converted `debts` array is what drives the strategy.
+      const debtsNative: Array<{
+        id: number; name: string; currency: string;
+        nativeBalance: number; nativeMinPayment: number;
+        balance: number; minPayment: number;
+      }> = [];
       for (const l of loans) {
         if (parseYmdSafe(String(l.start_date)) === null) {
           excluded.push({ loanId: Number(l.id), error: "invalid start_date", value: l.start_date });
@@ -558,19 +619,39 @@ export function registerLoansTools(server: McpServer, ctx: PgToolContext) {
         }
         const paid = summary.schedule.filter((r) => r.date <= today);
         const principalPaid = paid.reduce((s, r) => s + r.principal, 0);
-        const balance = Math.max(Number(l.principal) - principalPaid, 0);
-        const minPayment = Number(l.payment_amount ?? summary.monthlyPayment);
+        const nativeBalance = Math.round(Math.max(Number(l.principal) - principalPaid, 0) * 100) / 100;
+        const nativeMinPayment = Number(l.payment_amount ?? summary.monthlyPayment);
+        const loanCurrency = String(l.currency ?? reporting).toUpperCase();
+        const balance = Math.round(convertWithRateMap(nativeBalance, loanCurrency, rateMap) * 100) / 100;
+        const minPayment = Math.round(convertWithRateMap(nativeMinPayment, loanCurrency, rateMap) * 100) / 100;
         debts.push({
           id: Number(l.id),
           name: String(l.name),
-          balance: Math.round(balance * 100) / 100,
+          // Rate is a percentage — comparable across currencies as-is, so the
+          // avalanche ordering was always sound; only snowball/pooling broke.
+          balance,
           rate: Number(l.annual_rate),
+          minPayment,
+        });
+        debtsNative.push({
+          id: Number(l.id),
+          name: String(l.name),
+          currency: loanCurrency,
+          nativeBalance,
+          nativeMinPayment,
+          balance,
           minPayment,
         });
       }
       const strat = strategy ?? "both";
       const extra = extra_payment ?? 0;
-      const result: Record<string, unknown> = { inputs: { extraPayment: extra, debts }, reportingCurrency: reporting };
+      const result: Record<string, unknown> = {
+        // `extraPayment` is the caller's pooled budget and is interpreted in
+        // the reporting currency, same as every converted balance below.
+        inputs: { extraPayment: extra, extraPaymentCurrency: reporting, debts: debtsNative },
+        reportingCurrency: reporting,
+        amountsConvertedTo: reporting,
+      };
       if (excluded.length) result.excluded = excluded;
       if (strat === "avalanche" || strat === "both") {
         result.avalanche = calculateDebtPayoff(debts, extra, "avalanche");
