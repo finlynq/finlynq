@@ -142,6 +142,28 @@ stamped with the old CAD table default, and the migration deliberately does not
 rewrite them, since "the user chose CAD" and "MCP never sent a currency" are
 indistinguishable after the fact.
 
+## Editing a loan (2026-08-05)
+
+`PUT /api/loans` has existed since v2 but nothing in the app called it, so a
+loan was create-or-delete only in the browser — including when its currency was
+wrong. The loan card now carries an **Edit** action.
+
+Create and edit share **one** `DialogContent` and **one** `buildPayload()`,
+switched solely by an `editingLoan` state flag: add a field to the form and it
+becomes editable in the same change. Keep it that way — a second dialog or a
+second payload shape is how the two modes drift apart.
+
+- The edit form seeds from the loan's **native** fields, never the converted
+  `*Display` companions; seeding from those would rewrite the principal in the
+  display currency on save.
+- Changing the currency **re-denominates** (re-labels the stored numbers) and
+  never converts, matching `manage_loans(op:update)`. An inline amber note
+  appears as soon as the picker changes, and saving routes through a
+  `ConfirmDialog` that spells out what will happen.
+- The save handler follows the standard contract: a `saving` re-entry guard
+  (`/api/loans` has no idempotency key), a `try/catch` around the request, and
+  `parseSaveError` on `!res.ok` with the dialog left open and input preserved.
+
 ## Deferred (Phase 4 — tracked on FINLYNQ-136)
 
 - Posting the principal/interest split into `transactions` (principal =
