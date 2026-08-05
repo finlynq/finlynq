@@ -629,7 +629,30 @@ export async function getActiveCurrencies(): Promise<string[]> {
     .groupBy(schema.transactions.currency);
   const txnCurrencies = txnCurrencyRows.map((r) => r.currency);
 
-  return Array.from(new Set([...accountCurrencies, ...txnCurrencies]));
+  // Records that carry their OWN currency must be here too (2026-08-05).
+  // This set is what `getRateMap` iterates, and `convertWithRateMap` falls back
+  // to `rate ?? 1` for anything missing — so a currency absent from this list
+  // converts SILENTLY 1:1 rather than failing. A RUB loan for a user with no
+  // RUB account therefore totalled at ~80x its real value, which is the same
+  // rate=1 trap called out for retired currencies. loans/goals/subscriptions/
+  // budgets are all converted through this map (loans page, spotlight,
+  // dashboard), and none of them were represented.
+  const recordCurrencies: string[] = [];
+  for (const table of [schema.loans, schema.goals, schema.subscriptions, schema.budgets]) {
+    const rows = await db
+      .select({ currency: table.currency })
+      .from(table)
+      .groupBy(table.currency);
+    recordCurrencies.push(...rows.map((r) => r.currency));
+  }
+
+  return Array.from(
+    new Set(
+      [...accountCurrencies, ...txnCurrencies, ...recordCurrencies]
+        .filter((c): c is string => typeof c === "string" && c.trim() !== "")
+        .map((c) => c.trim().toUpperCase()),
+    ),
+  );
 }
 
 export async function getActiveCurrencyPairs(displayCurrency: string): Promise<Array<{ from: string; to: string }>> {
