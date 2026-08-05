@@ -356,7 +356,11 @@ export const loans = pgTable("loans", {
   // dropped. Reads via `name_ct` + DEK; exact-match queries via `name_lookup`.
   type: text("type").notNull(),
   accountId: integer("account_id").references(() => accounts.id),
-  currency: text("currency").notNull().default("CAD"),
+  // FINLYNQ-183/284: USD, not CAD. Every write path resolves the currency
+  // explicitly (explicit > linked account > display currency); this default is
+  // only a backstop, and a CAD one silently stamped CAD onto loans created
+  // through MCP, which never sent the column at all.
+  currency: text("currency").notNull().default("USD"),
   principal: doublePrecision("principal").notNull(),
   annualRate: doublePrecision("annual_rate").notNull(),
   // FINLYNQ-136 (Loans v2): nullable — payment-driven loans solve for the

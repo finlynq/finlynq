@@ -16,6 +16,8 @@ import { validateBody, safeErrorMessage, logApiError } from "@/lib/validate";
 import { buildNameFields, decryptNamedRows, encryptOptional, decryptOptional } from "@/lib/crypto/encrypted-columns";
 import { verifyOwnership, OwnershipError } from "@/lib/verify-ownership";
 import { todayISO } from "@/lib/utils/date";
+import { getDisplayCurrency, getRateMap, convertWithRateMap } from "@/lib/fx-service";
+import { pickRecordCurrency } from "@/lib/fx/record-currency";
 // Issue #213 — shared YYYY-MM-DD validator (regex + leap-year/Feb-30 round-trip).
 import { ymdDate, parseYmdSafe } from "../../../../mcp-server/lib/date-validators";
 
@@ -120,6 +122,20 @@ export async function GET(request: NextRequest) {
   const acctBalances = await getLinkedAccountBalances(userId, linkedIds);
   const today = todayISO();
 
+  // FINLYNQ-123 dual basis: every amount below stays in the LOAN's own
+  // currency (that's what the schedule was computed in), and each row also
+  // carries a current-rate conversion into the display currency so the page
+  // can total across a mixed-currency book. Summing the native figures under
+  // one label — which is what the page used to do — reports an ₽8.1M mortgage
+  // as $8.1M.
+  const displayCurrency = await getDisplayCurrency(
+    userId,
+    request.nextUrl.searchParams.get("currency"),
+  );
+  const rateMap = await getRateMap(displayCurrency, userId);
+  const toDisplay = (amount: number | null, from: string | null) =>
+    amount == null ? null : convertWithRateMap(amount, from ?? displayCurrency, rateMap);
+
   // Add amortization summary for each loan
   const withSummary = loans.map((loan) => {
     const integrityRow = (error: string, value: unknown) => ({
@@ -132,6 +148,9 @@ export async function GET(request: NextRequest) {
       interestPaid: null,
       periodsRemaining: null,
       balanceSource: null,
+      displayCurrency,
+      remainingBalanceDisplay: null,
+      monthlyEquivalentPaymentDisplay: null,
       dataIntegrity: { error, value },
     });
     // Issue #213 — guard against legacy bad start_date so the whole list
@@ -212,6 +231,14 @@ export async function GET(request: NextRequest) {
           : Math.round(principalPaid * 100) / 100,
       interestPaid: Math.round(interestPaid * 100) / 100,
       periodsRemaining,
+      // Additive reporting-currency companions — the native fields above are
+      // untouched, so nothing that already read this response changes.
+      displayCurrency,
+      remainingBalanceDisplay: toDisplay(remainingBalance, loan.currency),
+      monthlyEquivalentPaymentDisplay: toDisplay(
+        summary.monthlyEquivalentPayment,
+        loan.currency,
+      ),
     };
   });
 
@@ -279,13 +306,30 @@ export async function POST(request: NextRequest) {
       extraPayment: d.extraPayment ?? 0,
       residualValue: d.residualValue,
     });
+    // Currency resolution (feedback #7): explicit > linked account > display.
+    // Falling through to the column default is what let MCP-created loans land
+    // as CAD; the web form always sends one, but the REST API is public.
+    let accountCurrency: string | null = null;
+    if (d.accountId != null) {
+      const acct = await db
+        .select({ currency: schema.accounts.currency })
+        .from(schema.accounts)
+        .where(and(eq(schema.accounts.id, d.accountId), eq(schema.accounts.userId, userId)))
+        .get();
+      accountCurrency = acct?.currency ?? null;
+    }
+    const currency = pickRecordCurrency({
+      explicit: d.currency,
+      accountCurrency,
+      displayCurrency: await getDisplayCurrency(userId),
+    });
     const enc = buildNameFields(dek, { name: d.name });
     // Stream D Phase 4 — plaintext name dropped.
     const loan = await db.insert(schema.loans).values({
       userId,
       type: d.type,
       accountId: d.accountId || null,
-      ...(d.currency ? { currency: d.currency.toUpperCase() } : {}),
+      currency,
       principal: d.principal,
       annualRate: d.annualRate,
       termMonths: d.termMonths ?? null,

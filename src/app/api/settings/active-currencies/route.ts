@@ -71,6 +71,20 @@ async function deriveFromData(userId: string): Promise<string[]> {
   const set = new Set<string>();
   for (const r of accountRows) if (r.currency) set.add(r.currency.toUpperCase());
   for (const r of txRows) if (r.currency) set.add(r.currency.toUpperCase());
+  // Records that carry their OWN currency count as "in use" too (2026-08-05).
+  // Accounts and transactions alone missed money the user genuinely holds in a
+  // currency: a RUB loan (or goal/subscription/budget) for someone with no RUB
+  // account left RUB out of every dropdown, so they could not create another
+  // one from the web — the form's `ensure` only force-includes the value a
+  // record ALREADY has. Same omission as `getActiveCurrencies` in fx-service.
+  for (const table of [schema.loans, schema.goals, schema.subscriptions, schema.budgets]) {
+    const rows = await db
+      .select({ currency: table.currency })
+      .from(table)
+      .where(eq(table.userId, userId))
+      .groupBy(table.currency);
+    for (const r of rows) if (r.currency) set.add(r.currency.toUpperCase());
+  }
   return Array.from(set);
 }
 

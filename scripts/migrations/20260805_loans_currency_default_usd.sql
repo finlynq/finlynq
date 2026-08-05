@@ -1,0 +1,31 @@
+-- Loans: default `currency` to USD instead of CAD.
+--
+-- `loans.currency` has existed since Loans v2 (FINLYNQ-136) and the REST
+-- create/update path has always persisted it, but nothing else did:
+--
+--   * MCP `manage_loans(op:add)` omitted the column from its INSERT entirely,
+--     so every loan created through an AI assistant silently took this
+--     default.
+--   * The web `/loans` page never read the column back, formatting every
+--     amount in the user's display currency instead.
+--
+-- The second half is a UI fix (same commit). This migration closes the first:
+-- a CAD default contradicts the app-wide "default display currency = USD"
+-- convention (FINLYNQ-183) and the MCP resolver's own USD terminal fallback
+-- (FINLYNQ-284, `resolveReportingCurrency`). It is the same class of bug as
+-- the `?? "CAD"` literal that stamped auto-detected subscriptions CAD for a
+-- user holding only MXN/USD (feedback #7).
+--
+-- EXISTING ROWS ARE DELIBERATELY NOT REWRITTEN. A loan already stamped 'CAD'
+-- may genuinely be a CAD loan; we cannot distinguish "the user chose CAD"
+-- from "MCP never sent a currency and the default filled in". Guessing would
+-- silently restate someone's debt. Loans are still dev-mode-gated
+-- (`requireDevMode` 404s the route, `DevModeGuard` redirects the page), so the
+-- affected population is small and can correct a loan in the UI, which now
+-- shows the currency it is actually stored in.
+--
+-- After this, the default is only ever a backstop: all three write paths
+-- (REST POST, REST PUT, MCP manage_loans add/update) resolve the currency
+-- explicitly as explicit > linked account's currency > display currency.
+
+ALTER TABLE loans ALTER COLUMN currency SET DEFAULT 'USD';
