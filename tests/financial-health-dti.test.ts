@@ -91,10 +91,20 @@ describe("DTI numerator predicate (GH #333)", () => {
     expect(code).toContain("FROM loans l");
   });
 
-  it("requires a link_id on realized payments", () => {
-    // The cash leg is what makes a positive row on a liability a PAYMENT
-    // rather than a refund or a write-off.
-    expect(code).toContain("t.link_id IS NOT NULL");
+  it("correlates the loan exclusion ON DATE so pre-loan payments still count", () => {
+    // A loan covers the window from its own start_date onward. Excluding the
+    // account outright let a loan created 16 days ago erase that card's whole
+    // 12-month payment history ($6,600 -> $58 on dev, DTI reported as 0%).
+    expect(code).toContain("AND t.date >= l.start_date");
+  });
+
+  it("does NOT require a link_id on realized payments", () => {
+    // Shipped requiring one, and prod validation showed why that was wrong:
+    // only `createTransferPair` stamps a link id, so imported and
+    // hand-entered card payments carry none. Requiring it dropped $6,600 of
+    // real Visa payments and reported DTI as 0% — understating debt, the
+    // direction nobody complains about. Must not come back.
+    expect(code).not.toContain("t.link_id IS NOT NULL");
   });
 
   it("drops the 1.2x anomaly backstop it no longer needs", () => {

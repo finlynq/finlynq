@@ -287,14 +287,33 @@ export async function calculateFinancialHealth(
     sql`, `,
   );
 
-  // Realized payments into liability accounts NO loan points at. Positive
-  // amount on a liability = the balance moving back toward zero; `link_id IS
-  // NOT NULL` is what makes it a PAYMENT (its cash leg exists) rather than a
-  // refund or a write-off. Scoping to loan-less accounts is what stops a
-  // transfer into a loan account being counted twice — once scheduled, once
-  // realized. `opening_balance` / `balance_adjustment` are excluded here too:
-  // a positive opening balance on a liability is still a stated balance, not a
-  // payment (the GH #333 bug, mirrored on the other side of zero).
+  // Realized payments into liability accounts NO loan points at. A positive
+  // amount on a liability is the balance moving back toward zero. Scoping to
+  // loan-less accounts is what stops a transfer into a loan account being
+  // counted twice — once scheduled, once realized. `opening_balance` /
+  // `balance_adjustment` are excluded here too: a positive opening balance on a
+  // liability is still a stated balance, not a payment (the GH #333 bug,
+  // mirrored on the other side of zero).
+  //
+  // The loan exclusion is CORRELATED ON DATE, not just on account. A loan
+  // linked to an account only covers the window from its own `start_date`
+  // onward; payments made BEFORE it was opened have no schedule describing
+  // them and must still count. Measured on dev 2026-08-23: a loan created 16
+  // days earlier suppressed that card's entire 12-month history, turning $6,600
+  // of real payments into a $58 prorated sliver and reporting DTI as 0%. The
+  // scheduled path covers `date >= start_date`; the realized path covers the
+  // rest, so the two partition the window instead of one silently eating it.
+  //
+  // NO `link_id IS NOT NULL` REQUIREMENT — that was this rewrite's own bug,
+  // caught validating on prod 2026-08-23. Only `createTransferPair` stamps a
+  // link id; a card payment that arrived by IMPORT, or was typed as two
+  // independent rows, carries none. Requiring it dropped all six of the demo's
+  // $1,100 Visa payments ($6,600 against a $3,552 balance), reporting DTI as 0%
+  // and scoring that component a perfect 100 — understating debt, which is the
+  // flattering direction nobody reports. A refund or chargeback also lands here
+  // and also genuinely reduces what is owed, so counting it is not wrong; a
+  // write-off is rare enough not to justify re-introducing a filter that
+  // silently deletes real payments.
   const untrackedRows = asRows(await db.execute(sql`
     SELECT COALESCE(t.currency, a.currency) AS currency,
            SUM(t.amount) AS total
@@ -303,11 +322,11 @@ export async function calculateFinancialHealth(
     WHERE t.user_id = ${userId} AND t.date >= ${twelveStart}
       AND a.type = 'L'
       AND t.amount > 0
-      AND t.link_id IS NOT NULL
       AND (t.kind IS NULL OR t.kind NOT IN (${nonDebtServiceKinds}))
       AND NOT EXISTS (
         SELECT 1 FROM loans l
         WHERE l.user_id = ${userId} AND l.account_id = a.id
+          AND t.date >= l.start_date
       )
     GROUP BY COALESCE(t.currency, a.currency)
   `)) as Array<{ currency: string | null; total: number | string }>;
