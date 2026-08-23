@@ -93,7 +93,7 @@ function buildDb(
       }
       // Order matters: the untracked-payments query CONTAINS a `FROM loans`
       // sub-select, so it must be matched before the standalone loans query.
-      if (repr.includes("t.link_id IS NOT NULL")) {
+      if (repr.includes("FROM loans l")) {
         if (capture) capture.untrackedSql = repr;
         return { rows: dispatch.untrackedPayments ?? [] };
       }
@@ -334,7 +334,11 @@ describe("calculateFinancialHealth — load-bearing branches", () => {
     // The realized-payment query must scope to liabilities NO loan points at,
     // or a transfer into a loan account is counted twice.
     expect(capture.untrackedSql).toContain("NOT EXISTS");
-    expect(capture.untrackedSql).toContain("t.link_id IS NOT NULL");
+    // No link_id requirement: only createTransferPair stamps one, so imported
+    // and hand-entered card payments carry none. Requiring it reported DTI as
+    // 0% against a real card balance (caught on prod 2026-08-23).
+    expect(capture.untrackedSql).not.toContain("t.link_id IS NOT NULL");
+    expect(capture.untrackedSql).toContain("t.amount > 0");
 
     // ~300mo @ 3.2% on 838,194 ≈ 4,060/mo ≈ 48.7K/yr.
     expect(r.totals.totalDebtPayments12m.amount).toBeGreaterThan(40000);

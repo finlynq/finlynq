@@ -287,14 +287,24 @@ export async function calculateFinancialHealth(
     sql`, `,
   );
 
-  // Realized payments into liability accounts NO loan points at. Positive
-  // amount on a liability = the balance moving back toward zero; `link_id IS
-  // NOT NULL` is what makes it a PAYMENT (its cash leg exists) rather than a
-  // refund or a write-off. Scoping to loan-less accounts is what stops a
-  // transfer into a loan account being counted twice — once scheduled, once
-  // realized. `opening_balance` / `balance_adjustment` are excluded here too:
-  // a positive opening balance on a liability is still a stated balance, not a
-  // payment (the GH #333 bug, mirrored on the other side of zero).
+  // Realized payments into liability accounts NO loan points at. A positive
+  // amount on a liability is the balance moving back toward zero. Scoping to
+  // loan-less accounts is what stops a transfer into a loan account being
+  // counted twice — once scheduled, once realized. `opening_balance` /
+  // `balance_adjustment` are excluded here too: a positive opening balance on a
+  // liability is still a stated balance, not a payment (the GH #333 bug,
+  // mirrored on the other side of zero).
+  //
+  // NO `link_id IS NOT NULL` REQUIREMENT — that was this rewrite's own bug,
+  // caught validating on prod 2026-08-23. Only `createTransferPair` stamps a
+  // link id; a card payment that arrived by IMPORT, or was typed as two
+  // independent rows, carries none. Requiring it dropped all six of the demo's
+  // $1,100 Visa payments ($6,600 against a $3,552 balance), reporting DTI as 0%
+  // and scoring that component a perfect 100 — understating debt, which is the
+  // flattering direction nobody reports. A refund or chargeback also lands here
+  // and also genuinely reduces what is owed, so counting it is not wrong; a
+  // write-off is rare enough not to justify re-introducing a filter that
+  // silently deletes real payments.
   const untrackedRows = asRows(await db.execute(sql`
     SELECT COALESCE(t.currency, a.currency) AS currency,
            SUM(t.amount) AS total
@@ -303,7 +313,6 @@ export async function calculateFinancialHealth(
     WHERE t.user_id = ${userId} AND t.date >= ${twelveStart}
       AND a.type = 'L'
       AND t.amount > 0
-      AND t.link_id IS NOT NULL
       AND (t.kind IS NULL OR t.kind NOT IN (${nonDebtServiceKinds}))
       AND NOT EXISTS (
         SELECT 1 FROM loans l
