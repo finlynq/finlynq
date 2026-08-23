@@ -19,6 +19,8 @@ import { exportCsv } from "@/lib/csv-export";
 import { buildTxDrillUrl } from "@/lib/transactions/drill-url";
 import { CHART_COLORS } from "@/lib/chart-colors";
 import { todayISO } from "@/lib/utils/date";
+import { AccountFilter } from "./_components/account-filter";
+import { serializeAccountIds } from "@/lib/reports/account-filter";
 import { PageSkeleton } from "@/components/page-skeleton";
 import { SankeyChart } from "@/components/sankey-chart";
 import {
@@ -36,8 +38,7 @@ import {
   ChevronRight,
   ChevronDown,
   Calendar,
-  Layers,
-} from "lucide-react";
+  Layers, Wallet } from "lucide-react";
 import {
   BarChart,
   Bar,
@@ -214,6 +215,8 @@ export default function ReportsPage() {
   const [period, setPeriod] = useState<Period>("monthly");
   const [groupBy, setGroupBy] = useState<GroupByOption>("category");
   const [datePreset, setDatePreset] = useState<string>("ytd");
+  // Account scoping — empty = every account (see lib/reports/account-filter.ts).
+  const [accountIds, setAccountIds] = useState<number[]>([]);
 
   // Data states
   const [trendsData, setTrendsData] = useState<TrendsData | null>(null);
@@ -229,6 +232,13 @@ export default function ReportsPage() {
   // Expand/collapse groups
   const [expandedIncomeGroups, setExpandedIncomeGroups] = useState<Set<string>>(new Set());
   const [expandedExpenseGroups, setExpandedExpenseGroups] = useState<Set<string>>(new Set());
+
+  // One serialization for all four endpoints. Omitted entirely when empty,
+  // so an unfiltered report sends no param at all rather than `accountIds=`.
+  const acctParam = useMemo(() => {
+    const v = serializeAccountIds(accountIds);
+    return v ? `&accountIds=${encodeURIComponent(v)}` : "";
+  }, [accountIds]);
 
   const devMode = useDevMode();
 
@@ -247,7 +257,7 @@ export default function ReportsPage() {
   useEffect(() => {
     let cancelled = false;
     const biz = isBusiness ? "&business=true" : "";
-    fetch(`/api/reports/trends?startDate=${startDate}&endDate=${endDate}&period=${period}&groupBy=${groupBy}${biz}&currency=${encodeURIComponent(displayCurrency)}`)
+    fetch(`/api/reports/trends?startDate=${startDate}&endDate=${endDate}&period=${period}&groupBy=${groupBy}${biz}${acctParam}&currency=${encodeURIComponent(displayCurrency)}`)
       .then((r) => (r.ok ? r.json() : null))
       .then((d) => {
         if (!cancelled) setTrendsData(d && typeof d === "object" ? (d as TrendsData) : null);
@@ -261,12 +271,12 @@ export default function ReportsPage() {
     return () => {
       cancelled = true;
     };
-  }, [startDate, endDate, period, groupBy, isBusiness, displayCurrency]);
+  }, [startDate, endDate, period, groupBy, isBusiness, displayCurrency, acctParam]);
 
   // Fetch balance sheet
   useEffect(() => {
     let cancelled = false;
-    fetch(`/api/reports?type=balance-sheet&endDate=${endDate}&currency=${encodeURIComponent(displayCurrency)}`)
+    fetch(`/api/reports?type=balance-sheet&endDate=${endDate}${acctParam}&currency=${encodeURIComponent(displayCurrency)}`)
       .then((r) => (r.ok ? r.json() : null))
       .then((d) => {
         if (!cancelled) setBalanceSheet(d && typeof d === "object" ? (d as BalanceSheet) : null);
@@ -277,23 +287,23 @@ export default function ReportsPage() {
     return () => {
       cancelled = true;
     };
-  }, [endDate, displayCurrency]);
+  }, [endDate, displayCurrency, acctParam]);
 
   // Fetch unrealized P&L (computed inside the income-statement endpoint).
   // Same period as the rest of the income tab.
   useEffect(() => {
     const biz = isBusiness ? "&business=true" : "";
-    fetch(`/api/reports?type=income-statement&startDate=${startDate}&endDate=${endDate}${biz}&currency=${encodeURIComponent(displayCurrency)}`)
+    fetch(`/api/reports?type=income-statement&startDate=${startDate}&endDate=${endDate}${biz}${acctParam}&currency=${encodeURIComponent(displayCurrency)}`)
       .then((r) => r.json())
       .then((d) => setUnrealizedData(d?.unrealized ?? null))
       .catch(() => setUnrealizedData(null));
-  }, [startDate, endDate, isBusiness, displayCurrency]);
+  }, [startDate, endDate, isBusiness, displayCurrency, acctParam]);
 
   // Fetch YoY (dev mode only)
   useEffect(() => {
     if (!devMode) return;
     let cancelled = false;
-    fetch(`/api/reports/yoy?year1=${yoyYear1}&year2=${yoyYear2}&currency=${encodeURIComponent(displayCurrency)}`)
+    fetch(`/api/reports/yoy?year1=${yoyYear1}&year2=${yoyYear2}${acctParam}&currency=${encodeURIComponent(displayCurrency)}`)
       .then((r) => (r.ok ? r.json() : null))
       .then((d) => {
         if (!cancelled) setYoyData(d && typeof d === "object" ? (d as YoYData) : null);
@@ -304,7 +314,7 @@ export default function ReportsPage() {
     return () => {
       cancelled = true;
     };
-  }, [yoyYear1, yoyYear2, devMode, displayCurrency]);
+  }, [yoyYear1, yoyYear2, devMode, displayCurrency, acctParam]);
 
   // Sankey data
   const sankeyIncome = useMemo(() => {
@@ -488,6 +498,17 @@ export default function ReportsPage() {
                   <SelectItem value="group">Category Group</SelectItem>
                 </SelectContent>
               </Select>
+            </div>
+
+            <Separator orientation="vertical" className="h-8 mx-1" />
+
+            {/* Account scoping — applies to every report on this page. */}
+            <div>
+              <Label className="text-xs text-muted-foreground mb-1 block">
+                <Wallet className="inline h-3 w-3 mr-1" />
+                Accounts
+              </Label>
+              <AccountFilter selected={accountIds} onChange={setAccountIds} />
             </div>
 
             <Separator orientation="vertical" className="h-8 mx-1" />
