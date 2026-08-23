@@ -295,6 +295,15 @@ export async function calculateFinancialHealth(
   // liability is still a stated balance, not a payment (the GH #333 bug,
   // mirrored on the other side of zero).
   //
+  // The loan exclusion is CORRELATED ON DATE, not just on account. A loan
+  // linked to an account only covers the window from its own `start_date`
+  // onward; payments made BEFORE it was opened have no schedule describing
+  // them and must still count. Measured on dev 2026-08-23: a loan created 16
+  // days earlier suppressed that card's entire 12-month history, turning $6,600
+  // of real payments into a $58 prorated sliver and reporting DTI as 0%. The
+  // scheduled path covers `date >= start_date`; the realized path covers the
+  // rest, so the two partition the window instead of one silently eating it.
+  //
   // NO `link_id IS NOT NULL` REQUIREMENT — that was this rewrite's own bug,
   // caught validating on prod 2026-08-23. Only `createTransferPair` stamps a
   // link id; a card payment that arrived by IMPORT, or was typed as two
@@ -317,6 +326,7 @@ export async function calculateFinancialHealth(
       AND NOT EXISTS (
         SELECT 1 FROM loans l
         WHERE l.user_id = ${userId} AND l.account_id = a.id
+          AND t.date >= l.start_date
       )
     GROUP BY COALESCE(t.currency, a.currency)
   `)) as Array<{ currency: string | null; total: number | string }>;
