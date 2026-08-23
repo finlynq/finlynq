@@ -38,6 +38,13 @@ vi.mock("@/lib/fx-service", () => ({
   getDisplayCurrency: vi.fn(async (_userId: string, override: string | null) => override ?? "CAD"),
 }));
 
+// Category display names are encrypted at rest; the route decrypts
+// `categoryNameCt` into `categoryName` for the budgets page to render.
+const mockDecryptName = vi.fn();
+vi.mock("@/lib/crypto/encrypted-columns", () => ({
+  decryptName: (...a: unknown[]) => mockDecryptName(...a),
+}));
+
 import { GET, POST, DELETE } from "@/app/api/budgets/route";
 import { createMockRequest, parseResponse } from "../helpers/api-test-utils";
 
@@ -46,6 +53,7 @@ describe("API /api/budgets", () => {
     vi.clearAllMocks();
     mockGetRateMap.mockResolvedValue(new Map([["CAD", 1]]));
     mockConvertWithRateMap.mockImplementation((amount: number) => amount);
+    mockDecryptName.mockImplementation((ct: string | null) => (ct ? "Groceries" : null));
   });
 
   describe("GET", () => {
@@ -60,6 +68,35 @@ describe("API /api/budgets", () => {
       expect(status).toBe(200);
       expect(Array.isArray(data)).toBe(true);
       expect(mockGetBudgets).toHaveBeenCalledWith("default", "2024-01");
+    });
+
+    it("decrypts categoryNameCt into a plaintext categoryName", async () => {
+      // Regression: the route previously shipped only the encrypted
+      // `categoryNameCt`, so the budgets page — which renders
+      // `b.categoryName` directly — showed every row with a blank label.
+      mockGetBudgets.mockReturnValue([
+        { id: 1, categoryId: 7, categoryNameCt: "v1:abc:def:ghi", categoryGroup: "Personal", month: "2024-01", amount: 500, currency: "CAD" },
+      ]);
+      const req = createMockRequest("http://localhost:3000/api/budgets?month=2024-01");
+      const res = await GET(req);
+      const { status, data } = await parseResponse(res);
+      expect(status).toBe(200);
+      expect((data as Array<{ categoryName: string }>)[0].categoryName).toBe("Groceries");
+      expect(mockDecryptName).toHaveBeenCalledWith("v1:abc:def:ghi", expect.anything(), null);
+    });
+
+    it("falls back to 'Category #<id>' when the DEK cannot decrypt the name", async () => {
+      // A cold DEK (server restart) or a DEK-less auth path (API key, OAuth
+      // MCP) must still render an identifiable row, never an empty label.
+      mockDecryptName.mockReturnValue(null);
+      mockGetBudgets.mockReturnValue([
+        { id: 1, categoryId: 42, categoryNameCt: "v1:abc:def:ghi", categoryGroup: "Personal", month: "2024-01", amount: 500, currency: "CAD" },
+      ]);
+      const req = createMockRequest("http://localhost:3000/api/budgets?month=2024-01");
+      const res = await GET(req);
+      const { status, data } = await parseResponse(res);
+      expect(status).toBe(200);
+      expect((data as Array<{ categoryName: string }>)[0].categoryName).toBe("Category #42");
     });
 
     it("includes spending data when requested", async () => {
