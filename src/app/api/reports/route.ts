@@ -1,12 +1,13 @@
 ﻿import { NextRequest, NextResponse } from "next/server";
 import { db, schema } from "@/db";
-import { sql, eq, and, gte, lte } from "drizzle-orm";
+import { sql, eq, and, gte, lte, inArray } from "drizzle-orm";
 import { requireAuth } from "@/lib/auth/require-auth";
 import { getDEK } from "@/lib/crypto/dek-cache";
 import { decryptName } from "@/lib/crypto/encrypted-columns";
 import { getRateMap, convertWithRateMap, getDisplayCurrency } from "@/lib/fx-service";
 import { selfHealReportingAmounts } from "@/lib/fx/reporting-amount";
 import { todayISO } from "@/lib/utils/date";
+import { parseAccountIdsParam, ACCOUNT_IDS_PARAM } from "@/lib/reports/account-filter";
 import { round2 } from "@/lib/utils/number";
 import {
   computeAllAccountsUnrealizedPnL,
@@ -26,6 +27,8 @@ export async function GET(request: NextRequest) {
   const endDate = params.get("endDate") ?? todayISO();
   const isBusiness = params.get("business") === "true";
   const displayCurrency = await getDisplayCurrency(userId, params.get("currency"));
+  // Reports-page account scoping. `null` = every account (see account-filter.ts).
+  const accountIds = parseAccountIdsParam(params.get(ACCOUNT_IDS_PARAM));
 
   const rateMap = await getRateMap(displayCurrency, userId);
 
@@ -59,6 +62,7 @@ export async function GET(request: NextRequest) {
       lte(schema.transactions.date, endDate),
     ];
     if (isBusiness) conditions.push(eq(schema.transactions.isBusiness, 1));
+    if (accountIds) conditions.push(inArray(schema.transactions.accountId, accountIds));
 
     // Stream D Phase 4 â€” plaintext name dropped. Group on stable id +
     // category metadata; decrypt name_ct in-memory after aggregation.
@@ -196,7 +200,16 @@ export async function GET(request: NextRequest) {
     );
     const balanceByAccount = new Map(overlay.rows.map((r) => [r.id, r.balance]));
 
-    const converted = ledgerBalances.map((b) => {
+    // Account scoping applies here too: a balance sheet restricted to one
+    // account is a meaningful view, and leaving it unfiltered while the tiles
+    // above it ARE filtered is the cross-endpoint disagreement this param
+    // exists to avoid. Filtered BEFORE the totals so assets/liabilities/net
+    // worth describe the same set the rows do.
+    const scopedBalances = accountIds
+      ? ledgerBalances.filter((b) => accountIds.includes(b.accountId))
+      : ledgerBalances;
+
+    const converted = scopedBalances.map((b) => {
       const balance = balanceByAccount.get(b.accountId) ?? Number(b.balance);
       return {
         accountId: b.accountId,
@@ -254,7 +267,8 @@ export async function GET(request: NextRequest) {
           eq(schema.transactions.userId, userId),
           gte(schema.transactions.date, startDate),
           lte(schema.transactions.date, endDate),
-          sql`${schema.categories.type} IN ('I', 'E')`
+          sql`${schema.categories.type} IN ('I', 'E')`,
+          ...(accountIds ? [inArray(schema.transactions.accountId, accountIds)] : []),
         )
       )
       .groupBy(schema.categories.id, schema.categories.group, schema.categories.nameCt, schema.transactions.currency, schema.transactions.reportingCurrency)

@@ -47,14 +47,22 @@ vi.mock("@/lib/age-of-money", () => ({
 
 type FakeQueryDispatch = {
   incomeExpenses3m?: Array<{ month: string; cat_type: string; currency: string | null; total: number }>;
-  incomeDebt12m?: Array<{ cat_type: string | null; currency: string | null; account_type: string | null; total: number }>;
+  /** GH #333 follow-up: the single incomeDebt12m query was split into three.
+   *  Income is now its own query; the debt numerator comes from `loans` +
+   *  realized payments on liabilities no loan points at. */
+  income12m?: Array<{ currency: string | null; total: number }>;
+  loans?: Array<Record<string, unknown>>;
+  untrackedPayments?: Array<{ currency: string | null; total: number }>;
   balances?: Array<{ type: string; group: string; currency: string | null; is_investment: boolean | null; balance: number }>;
   balancesPast?: Array<{ currency: string | null; balance: number }>;
   oldestRow?: Array<{ oldest: string | null }>;
   budgets?: Array<{ budget: number; spent: number }>;
 };
 
-function buildDb(dispatch: FakeQueryDispatch, capture?: { dtiSql?: string }) {
+function buildDb(
+  dispatch: FakeQueryDispatch,
+  capture?: { incomeSql?: string; loansSql?: string; untrackedSql?: string },
+) {
   return {
     execute: vi.fn(async (q: unknown) => {
       // Drizzle's `sql` template literal yields an object with a `queryChunks`
@@ -83,9 +91,19 @@ function buildDb(dispatch: FakeQueryDispatch, capture?: { dtiSql?: string }) {
       if (repr.includes("TO_CHAR(t.date::date, 'YYYY-MM')")) {
         return { rows: dispatch.incomeExpenses3m ?? [] };
       }
-      if (repr.includes("a.type AS account_type")) {
-        if (capture) capture.dtiSql = repr;
-        return { rows: dispatch.incomeDebt12m ?? [] };
+      // Order matters: the untracked-payments query CONTAINS a `FROM loans`
+      // sub-select, so it must be matched before the standalone loans query.
+      if (repr.includes("t.link_id IS NOT NULL")) {
+        if (capture) capture.untrackedSql = repr;
+        return { rows: dispatch.untrackedPayments ?? [] };
+      }
+      if (repr.includes("residual_value")) {
+        if (capture) capture.loansSql = repr;
+        return { rows: dispatch.loans ?? [] };
+      }
+      if (repr.includes("c.type = 'I'")) {
+        if (capture) capture.incomeSql = repr;
+        return { rows: dispatch.income12m ?? [] };
       }
       if (repr.includes("a.is_investment")) {
         return { rows: dispatch.balances ?? [] };
@@ -101,6 +119,25 @@ function buildDb(dispatch: FakeQueryDispatch, capture?: { dtiSql?: string }) {
       }
       return { rows: [] };
     }),
+  };
+}
+
+/** A `loans` row as the calculator's raw SQL returns it (snake_case). A
+ *  24,000 @ 6% / 60mo loan running for the whole window ≈ 463.97/mo ≈ 5,568/yr. */
+function loanRow(over: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    id: 1,
+    account_id: null,
+    currency: "CAD",
+    principal: 24000,
+    annual_rate: 6,
+    term_months: 60,
+    start_date: "2020-01-01",
+    payment_amount: null,
+    payment_frequency: "monthly",
+    extra_payment: 0,
+    residual_value: null,
+    ...over,
   };
 }
 
@@ -120,7 +157,7 @@ describe("calculateFinancialHealth — load-bearing branches", () => {
     aomMock.mockResolvedValue({ ageInDays: 20, trend: 0, history: [] });
     const db = buildDb({
       incomeExpenses3m: [],
-      incomeDebt12m: [],
+      income12m: [],
       balances: [],
       balancesPast: [],
       oldestRow: [{ oldest: "2020-01-01" }], // plenty of history → NW trend not excluded
@@ -244,7 +281,7 @@ describe("calculateFinancialHealth — load-bearing branches", () => {
     recent.setDate(recent.getDate() - 10);
     const db = buildDb({
       incomeExpenses3m: [], // Savings Rate → 0
-      incomeDebt12m: [],     // DTI → 100 (no debt)
+      income12m: [],     // DTI → 100 (no debt)
       balances: [],
       oldestRow: [{ oldest: recent.toISOString().split("T")[0] }],
       budgets: [],
@@ -262,22 +299,23 @@ describe("calculateFinancialHealth — load-bearing branches", () => {
   });
 
   // ── FINLYNQ-255: DTI numerator = genuine debt service only ────────────────
-  it("tc-1: DTI numerator excludes transfer/portfolio legs and yields a realistic DTI", async () => {
+  it("tc-1: DTI numerator is SCHEDULED loan service, not unpaired negative liability rows", async () => {
     aomMock.mockResolvedValue({ ageInDays: 20, trend: 0, history: [] });
-    // Post-filter fixture: the SQL WHERE excludes any link-bearing row, so the
-    // rows that reach the calculator are genuine debt SERVICE only — mortgage
-    // interest + scheduled principal (~$3.7K/mo → ~$44.4K/yr) against ~$307K
-    // income. A big loan-account TRANSFER (a $900K refi/CC-payment leg) carries
-    // a link_id and is filtered OUT by the query, so it never appears here.
-    const capture: { dtiSql?: string } = {};
+    // GH #333 follow-up. Liability balances are stored NEGATIVE-when-owed, so
+    // the old `a.type='L' AND amount<0 AND <no link ids>` predicate selected new
+    // BORROWING (charges, fees, accrued interest) and excluded real payments
+    // twice over — wrong sign AND link-excluded. The numerator is now the
+    // contractual payment on tracked loans.
+    //
+    // A mortgage at 3,700/mo → ~44.4K/yr against ~307.7K income ≈ 14%.
+    const capture: { incomeSql?: string; loansSql?: string; untrackedSql?: string } = {};
     const db = buildDb(
       {
-        incomeDebt12m: [
-          { cat_type: "I", currency: "CAD", account_type: null, total: 307709.52 },
-          // debt service that survived the transfer filter (amount < 0 on L acct)
-          { cat_type: null, currency: "CAD", account_type: "L", total: -44400 },
+        income12m: [{ currency: "CAD", total: 307709.52 }],
+        loans: [
+          loanRow({ principal: 838194.15, annual_rate: 3.2, term_months: 300 }),
         ],
-        // Liabilities large enough that the anomaly guard does NOT trip:
+        untrackedPayments: [],
         balances: [
           { type: "L", group: "Mortgage", currency: "CAD", is_investment: false, balance: -838194.15 },
         ],
@@ -292,36 +330,43 @@ describe("calculateFinancialHealth — load-bearing branches", () => {
       dek: null,
       reportingCurrency: "CAD",
     });
-    // The query text must carry the transfer/portfolio-leg exclusion.
-    expect(capture.dtiSql).toContain("link_id IS NULL");
-    expect(capture.dtiSql).toContain("trade_link_id IS NULL");
-    expect(capture.dtiSql).toContain("swap_link_id IS NULL");
-    // Numerator = 44,400 (debt service), NOT 44,400 + the 900K transfer.
-    expect(r.totals.totalDebtPayments12m.amount).toBeCloseTo(44400, 0);
-    // DTI = 44,400 / 307,709.52 ≈ 14.4% → realistic (single-digit-to-teens), not >100%.
+
+    // The realized-payment query must scope to liabilities NO loan points at,
+    // or a transfer into a loan account is counted twice.
+    expect(capture.untrackedSql).toContain("NOT EXISTS");
+    expect(capture.untrackedSql).toContain("t.link_id IS NOT NULL");
+
+    // ~300mo @ 3.2% on 838,194 ≈ 4,060/mo ≈ 48.7K/yr.
+    expect(r.totals.totalDebtPayments12m.amount).toBeGreaterThan(40000);
+    expect(r.totals.totalDebtPayments12m.amount).toBeLessThan(60000);
+
     const dti = r.components.find((c) => c.name === "Debt-to-Income");
     expect(dti).toBeDefined();
-    expect(dti!.detail).toMatch(/1[0-9]% debt-to-income/); // ~14%
-    // score = (1 - 0.144) * 100 ≈ 85.6 → healthy, not floored at 0.
+    expect(dti!.detail).toMatch(/1[0-9]% debt-to-income/);
     expect(dti!.score).toBeGreaterThan(80);
+    // Nothing came from the realized path, so the figure is authoritative.
+    expect(r.dti.reliable).toBe(true);
   });
 
-  it("tc-2: DTI is EXCLUDED via excludedComponents when 12m payments > 1.2× liabilities", async () => {
+  it("tc-2: DTI is NO LONGER dropped by the 1.2x-liabilities backstop", async () => {
     aomMock.mockResolvedValue({ ageInDays: 20, trend: 0, history: [] });
-    // Anomaly backstop: 12m debt payments ($1.2M) exceed 1.2× outstanding
-    // liabilities ($838,194.15 × 1.2 = $1,005,832.98) — you cannot service more
-    // than ~all your debt in a year, so the whole DTI component is excluded
-    // (renormalizing) instead of scoring a misleading 0.
+    // The backstop existed to contain a numerator that could exceed everything
+    // the user owed — a symptom of the mis-signed predicate, not a data
+    // anomaly. It was observed firing on our own demo dataset. Removing it
+    // matters most for a NEARLY-REPAID loan: a year of payments legitimately
+    // exceeds 1.2x the small remaining balance, and the old guard would have
+    // silently dropped the component for exactly the user who is nearly done
+    // paying it off.
     const db = buildDb({
-      incomeDebt12m: [
-        { cat_type: "I", currency: "CAD", account_type: null, total: 307709.52 },
-        { cat_type: null, currency: "CAD", account_type: "L", total: -1200000 }, // > 1.2 × 838,194
-      ],
+      income12m: [{ currency: "CAD", total: 307709.52 }],
+      loans: [loanRow({ principal: 24000, annual_rate: 6, term_months: 60 })],
+      untrackedPayments: [],
       balances: [
-        { type: "L", group: "Mortgage", currency: "CAD", is_investment: false, balance: -838194.15 },
+        // Almost paid off — 12m of service (~5.6K) exceeds 1.2 x 2,000.
+        { type: "L", group: "Loans", currency: "CAD", is_investment: false, balance: -2000 },
       ],
       oldestRow: [{ oldest: "2020-01-01" }],
-      budgets: [{ budget: 100, spent: 50 }], // keep budget kept so DTI exclusion is isolated
+      budgets: [{ budget: 100, spent: 50 }],
     });
     const r = await calculateFinancialHealth({
       db,
@@ -329,18 +374,13 @@ describe("calculateFinancialHealth — load-bearing branches", () => {
       dek: null,
       reportingCurrency: "CAD",
     });
-    // DTI is NOT a scored component — it was excluded.
-    expect(r.components.find((c) => c.name === "Debt-to-Income")).toBeUndefined();
+    const dti = r.components.find((c) => c.name === "Debt-to-Income");
+    expect(dti).toBeDefined();
     expect(
-      r.excludedComponents.some(
-        (e) => e.name === "Debt-to-Income" && e.reason === "debt_payments_exceed_liabilities",
-      ),
-    ).toBe(true);
-    // Overall score renormalizes over the remaining kept components (weights sum ~1).
+      r.excludedComponents.some((e) => e.name === "Debt-to-Income"),
+    ).toBe(false);
     const renorm = r.components.reduce((s, c) => s + c.weight, 0);
     expect(renorm).toBeCloseTo(1, 2);
-    // And the excluded DTI's 0-ish score no longer drags the total to a floor.
-    expect(r.score).toBeGreaterThan(0);
   });
 
   it("returns a valid grade for any score", async () => {
@@ -395,12 +435,11 @@ describe("calculateFinancialHealth — savingsRatePct + dti standalone figures",
     expect(r.savingsRatePct).toBeNull();
   });
 
-  it("dti is reliable with the real ratio when payments stay within 1.2× liabilities", async () => {
+  it("dti is reliable when the whole numerator is scheduled loan service", async () => {
     const db = buildDb({
-      incomeDebt12m: [
-        { cat_type: "I", currency: "CAD", account_type: null, total: 307709.52 },
-        { cat_type: null, currency: "CAD", account_type: "L", total: -44400 },
-      ],
+      income12m: [{ currency: "CAD", total: 307709.52 }],
+      loans: [loanRow({ principal: 838194.15, annual_rate: 3.2, term_months: 300 })],
+      untrackedPayments: [],
       balances: [
         { type: "L", group: "Mortgage", currency: "CAD", is_investment: false, balance: -838194.15 },
       ],
@@ -409,36 +448,37 @@ describe("calculateFinancialHealth — savingsRatePct + dti standalone figures",
     });
     const r = await calculateFinancialHealth({ db, userId: "u", dek: null, reportingCurrency: "CAD" });
     expect(r.dti.reliable).toBe(true);
-    // 44,400 / 307,709.52 ≈ 14.4% → 14
-    expect(r.dti.pct).toBe(14);
+    expect(r.dti.pct).toBeGreaterThan(10);
+    expect(r.dti.pct).toBeLessThan(20);
   });
 
-  it("dti.reliable is false but the raw ratio is still surfaced when the anomaly backstop fires", async () => {
+  it("dti.reliable is false — but still scored — when an untracked card contributes", async () => {
+    // A transactor who pays their card in full books realized payments equal to
+    // their card SPEND, which overstates debt service. The figure is still
+    // surfaced and still scored; `reliable:false` is what tells the UI to
+    // caveat it rather than assert it.
     const db = buildDb({
-      incomeDebt12m: [
-        { cat_type: "I", currency: "CAD", account_type: null, total: 307709.52 },
-        { cat_type: null, currency: "CAD", account_type: "L", total: -1200000 },
-      ],
+      income12m: [{ currency: "CAD", total: 100000 }],
+      loans: [],
+      untrackedPayments: [{ currency: "CAD", total: 24000 }],
       balances: [
-        { type: "L", group: "Mortgage", currency: "CAD", is_investment: false, balance: -838194.15 },
+        { type: "L", group: "Credit Cards", currency: "CAD", is_investment: false, balance: -3000 },
       ],
       oldestRow: [{ oldest: "2020-01-01" }],
       budgets: [{ budget: 100, spent: 50 }],
     });
     const r = await calculateFinancialHealth({ db, userId: "u", dek: null, reportingCurrency: "CAD" });
-    // DTI is dropped from the composite score…
-    expect(r.components.find((c) => c.name === "Debt-to-Income")).toBeUndefined();
-    // …but the standalone figure is still computed and flagged unreliable so the
-    // UI can caveat it (1,200,000 / 307,709.52 ≈ 390%).
     expect(r.dti.reliable).toBe(false);
-    expect(r.dti.pct).toBe(390);
+    expect(r.dti.pct).toBe(24);
+    // Still a scored component — the old backstop would have dropped it.
+    expect(r.components.find((c) => c.name === "Debt-to-Income")).toBeDefined();
   });
 
   it("dti.pct is null when there is no income (12m)", async () => {
     const db = buildDb({
-      incomeDebt12m: [
-        { cat_type: null, currency: "CAD", account_type: "L", total: -5000 },
-      ],
+      income12m: [],
+      untrackedPayments: [{ currency: "CAD", total: 5000 }],
+      loans: [],
       oldestRow: [{ oldest: "2020-01-01" }],
       budgets: [],
     });

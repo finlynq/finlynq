@@ -47,6 +47,8 @@ import {
   deriveTxWriteWarnings,
   createTransaction,
 } from "../../src/lib/queries";
+import { computeReportingFields } from "../../src/lib/fx/reporting-amount";
+import { resolveReportingCurrency } from "../reporting-currency";
 import {
   createTransferPair,
   updateTransferPair,
@@ -527,6 +529,7 @@ export function registerTransactionsTools(server: McpServer, ctx: PgToolContext)
       account_id?: number;
       date?: string;
       category?: string;
+      category_id?: number;
       note?: string;
       tags?: string;
       portfolioHoldingId?: number;
@@ -809,7 +812,24 @@ export function registerTransactionsTools(server: McpServer, ctx: PgToolContext)
           }
 
           let catId: number | null = null;
-          if (t.category) {
+          // GH #335 — `category_id` FK fast-path, mirroring the single-row path
+          // and `account_id`'s per-row/top-level treatment two fields up. The
+          // per-row field did not exist, so zod stripped it and control fell
+          // through to `autoCategory`, writing NULL while reporting success.
+          // FINLYNQ-267: the FK always wins over the fuzzy name.
+          if (t.category_id != null) {
+            const known = allCats.find((c) => Number(c.id) === Number(t.category_id));
+            if (!known) {
+              results.push({
+                index: i,
+                success: false,
+                message: `Category #${t.category_id} not found or not owned by you.`,
+                resolvedAccount: resolvedAccountInfo,
+              });
+              continue;
+            }
+            catId = Number(known.id);
+          } else if (t.category) {
             // Issue #203: explicit category names must fail loud when they
             // don't resolve. The previous `fuzzyFind` + silent-null branch
             // coerced unknown categories to `category_id = NULL` and
@@ -1314,6 +1334,56 @@ export function registerTransactionsTools(server: McpServer, ctx: PgToolContext)
         await db.execute(sql`UPDATE transactions SET amount = ${amount}, updated_at = NOW() WHERE id = ${id} AND user_id = ${userId}`);
         fieldsUpdated.push("amount");
       }
+
+      // GH #334 — a changed amount (or date, or account currency) invalidates
+      // the STORED reporting amount, and flow reports SUM that column rather
+      // than `amount`. Neither branch above touched it, so an MCP amount edit
+      // left the row internally inconsistent: `amount` correct, dashboard total
+      // wrong. Reported as Monthly Income reading $5,000 high after splitting a
+      // deposit.
+      //
+      // Self-heal CANNOT repair this. Its staleness probe is
+      // `(reporting_currency IS DISTINCT FROM target OR reporting_amount IS
+      // NULL)` — a non-null value in the RIGHT currency that is merely
+      // numerically stale looks healthy to it, so the row stays wrong forever.
+      // That is why this recomputes at the write, exactly as the REST path does
+      // via `updateTransaction` → `computeReportingFields`.
+      //
+      // Best-effort: a failed FX lookup must not fail an otherwise-good edit.
+      // Leaving the stored value untouched is no worse than the pre-fix state,
+      // and the read-side fallback still converts on the fly.
+      if (preResolvedEntered || amount !== undefined || date !== undefined) {
+        try {
+          const postRow = (await q(db, sql`
+            SELECT t.date, t.amount, t.currency
+              FROM transactions t
+             WHERE t.id = ${id} AND t.user_id = ${userId}
+          `))[0] as Row | undefined;
+          if (postRow) {
+            const reportingCurrency = await resolveReportingCurrency(db, userId, null);
+            const fields = await computeReportingFields({
+              userId,
+              accountCurrency: String(postRow.currency),
+              amount: Number(postRow.amount),
+              date: String(postRow.date),
+              reportingCurrency,
+            });
+            if (fields) {
+              await db.execute(sql`
+                UPDATE transactions
+                   SET reporting_currency = ${fields.reportingCurrency},
+                       reporting_amount = ${fields.reportingAmount},
+                       reporting_rate = ${fields.reportingRate},
+                       updated_at = NOW()
+                 WHERE id = ${id} AND user_id = ${userId}
+              `);
+              fieldsUpdated.push("reporting_amount");
+            }
+          }
+        } catch {
+          // Swallow — see the best-effort note above.
+        }
+      }
       if (catId !== undefined) {
         await db.execute(sql`UPDATE transactions SET category_id = ${catId}, updated_at = NOW() WHERE id = ${id} AND user_id = ${userId}`);
         fieldsUpdated.push("category_id");
@@ -1458,7 +1528,8 @@ export function registerTransactionsTools(server: McpServer, ctx: PgToolContext)
           account: z.string().optional().describe("Account name or alias (fuzzy). PREFER `account_id`."),
           account_id: z.number().int().optional().describe("Per-row account FK. Wins over `account` + the top-level `account_id`."),
           date: z.string().optional(),
-          category: z.string().optional(),
+          category: z.string().optional().describe("Category NAME (fuzzy). PREFER `category_id`."),
+          category_id: z.number().int().positive().optional().describe("Per-row category FK — wins over the fuzzy `category` name. GH #335: this used to exist only as a top-level SINGLE-record field, so a batch caller's per-row `category_id` was silently stripped by zod and the row landed uncategorized."),
           note: z.string().optional(),
           tags: z.string().optional(),
           portfolioHoldingId: z.number().int().optional().describe("Bind this row to a position FK."),

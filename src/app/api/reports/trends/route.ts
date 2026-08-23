@@ -1,12 +1,13 @@
 import { NextRequest, NextResponse } from "next/server";
 import { db, schema } from "@/db";
-import { sql, and, gte, lte, eq } from "drizzle-orm";
+import { sql, and, gte, lte, eq, inArray } from "drizzle-orm";
 import { requireAuth } from "@/lib/auth/require-auth";
 import { getDEK } from "@/lib/crypto/dek-cache";
 import { decryptName } from "@/lib/crypto/encrypted-columns";
 import { getDisplayCurrency, getRateMap, convertWithRateMap } from "@/lib/fx-service";
 import { selfHealReportingAmounts } from "@/lib/fx/reporting-amount";
 import { todayISO } from "@/lib/utils/date";
+import { parseAccountIdsParam, ACCOUNT_IDS_PARAM } from "@/lib/reports/account-filter";
 
 type Period = "daily" | "weekly" | "monthly" | "quarterly";
 type GroupBy = "category" | "group";
@@ -55,6 +56,8 @@ export async function GET(request: NextRequest) {
   const period = (params.get("period") ?? "monthly") as Period;
   const groupBy = (params.get("groupBy") ?? "category") as GroupBy;
   const isBusiness = params.get("business") === "true";
+  // Reports-page account scoping. `null` = every account (see account-filter.ts).
+  const accountIds = parseAccountIdsParam(params.get(ACCOUNT_IDS_PARAM));
 
   // Currency rework Phase 3 — convert to the display currency. Prefer the
   // STORED per-row historical reporting_amount; fall back to on-the-fly
@@ -93,6 +96,7 @@ export async function GET(request: NextRequest) {
     sql`${schema.categories.type} IN ('I', 'E')`,
   ];
   if (isBusiness) conditions.push(eq(schema.transactions.isBusiness, 1));
+  if (accountIds) conditions.push(inArray(schema.transactions.accountId, accountIds));
 
   const timeseriesRows = await db
     .select({

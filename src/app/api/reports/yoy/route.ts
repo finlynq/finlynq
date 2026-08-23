@@ -1,11 +1,12 @@
 import { NextRequest, NextResponse } from "next/server";
 import { db, schema } from "@/db";
-import { sql, and, gte, lte, eq } from "drizzle-orm";
+import { sql, and, gte, lte, eq, inArray } from "drizzle-orm";
 import { requireAuth } from "@/lib/auth/require-auth";
 import { getDEK } from "@/lib/crypto/dek-cache";
 import { decryptName } from "@/lib/crypto/encrypted-columns";
 import { getDisplayCurrency, getRateMap, convertWithRateMap } from "@/lib/fx-service";
 import { selfHealReportingAmounts } from "@/lib/fx/reporting-amount";
+import { parseAccountIdsParam, ACCOUNT_IDS_PARAM } from "@/lib/reports/account-filter";
 
 export async function GET(request: NextRequest) {
   const auth = await requireAuth(request); if (!auth.authenticated) return auth.response;
@@ -18,6 +19,8 @@ export async function GET(request: NextRequest) {
   const currentYear = new Date().getFullYear();
   const year1 = parseInt(params.get("year1") ?? String(currentYear - 1), 10);
   const year2 = parseInt(params.get("year2") ?? String(currentYear), 10);
+  // Reports-page account scoping. `null` = every account (see account-filter.ts).
+  const accountIds = parseAccountIdsParam(params.get(ACCOUNT_IDS_PARAM));
 
   // Currency rework Phase 3 — convert to the display currency, preferring the
   // STORED per-row historical reporting_amount with an on-the-fly fallback.
@@ -63,7 +66,8 @@ export async function GET(request: NextRequest) {
         and(
           eq(schema.transactions.userId, userId),
           gte(schema.transactions.date, `${year}-01-01`),
-          lte(schema.transactions.date, `${year}-12-31`)
+          lte(schema.transactions.date, `${year}-12-31`),
+          ...(accountIds ? [inArray(schema.transactions.accountId, accountIds)] : []),
         )
       )
       .groupBy(
@@ -120,7 +124,8 @@ export async function GET(request: NextRequest) {
           eq(schema.transactions.userId, userId),
           gte(schema.transactions.date, `${year}-01-01`),
           lte(schema.transactions.date, `${year}-12-31`),
-          sql`${schema.categories.type} IN ('I', 'E')`
+          sql`${schema.categories.type} IN ('I', 'E')`,
+          ...(accountIds ? [inArray(schema.transactions.accountId, accountIds)] : []),
         )
       )
       .groupBy(

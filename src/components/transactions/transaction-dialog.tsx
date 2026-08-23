@@ -318,6 +318,10 @@ export function TransactionDialog({
   const [destHoldingTouched, setDestHoldingTouched] = useState(false);
   const [destQuantityTouched, setDestQuantityTouched] = useState(false);
   const [transferReceivedTouched, setTransferReceivedTouched] = useState(false);
+  // FINLYNQ-317 — the sent/received pair as ORIGINALLY booked, on a
+  // cross-currency transfer edit. Lets the rate caption show the rate the user
+  // actually got on that date rather than the market rate for the same date.
+  const [transferBooked, setTransferBooked] = useState<{ sent: number; received: number } | null>(null);
 
   // FX preview
   const [fxPreview, setFxPreview] = useState<FxPreview>({ state: "idle" });
@@ -422,7 +426,15 @@ export function TransactionDialog({
       setTransferEdit({ linkId, fromTxId: debit.id, toTxId: credit.id });
 
       const sourceLegAmount = Math.abs(debit.enteredAmount ?? debit.amount);
-      const destLegAmount = Math.abs(credit.enteredAmount ?? credit.amount);
+      // FINLYNQ-317 — the destination leg's `amount` is the ONLY column
+      // denominated in the DESTINATION account's currency. createTransferPair
+      // stamps BOTH legs with the source currency in `enteredCurrency` /
+      // `enteredAmount` and keeps the conversion in `enteredFxRate`, so
+      // `credit.enteredAmount` is the amount SENT. Reading it here showed 300
+      // USD under an "Amount received (CAD)" label and — because the seed below
+      // marks the field user-touched — saving re-booked the pair at 1:1,
+      // silently destroying the rate the user actually banked.
+      const destLegAmount = Math.abs(credit.amount);
       const sourceAcct = accounts.find((a) => a.id === debit.accountId);
       const destAcct = accounts.find((a) => a.id === credit.accountId);
       const isCrossCcy = !!sourceAcct && !!destAcct && sourceAcct.currency !== destAcct.currency;
@@ -459,6 +471,7 @@ export function TransactionDialog({
       // Pre-filled receivedAmount IS the canonical booked rate; mark touched
       // so the FX preview doesn't auto-overwrite with a fresh market rate.
       setTransferReceivedTouched(true);
+      setTransferBooked(isCrossCcy ? { sent: sourceLegAmount, received: destLegAmount } : null);
       return;
     }
     if (initialState.kind === "transfer-create") {
@@ -505,6 +518,7 @@ export function TransactionDialog({
       date: todayISO(),
     });
     setTransferReceivedTouched(false);
+    setTransferBooked(null);
     setDestHoldingTouched(false);
     setDestQuantityTouched(false);
     setTransferFxPreview({ state: "idle" });
@@ -2041,18 +2055,51 @@ export function TransactionDialog({
               const toAcct = accounts.find((a) => String(a.id) === transferForm.toAccountId);
               const isCrossCcy = !!fromAcct && !!toAcct && fromAcct.currency !== toAcct.currency;
               if (!isCrossCcy) return null;
+              // FINLYNQ-317 — the caption reports the rate the CURRENT form
+              // values imply, because that is the rate that will be booked. A
+              // transfer settles at the rate the bank gave, which is rarely the
+              // market rate for the date, so captioning the market rate next to
+              // a hand-entered amount contradicts the field beside it.
+              const sentNum = parseFloat(transferForm.amount);
+              const recvNum = parseFloat(transferForm.receivedAmount);
+              const impliedRate =
+                Number.isFinite(sentNum) && sentNum > 0 && Number.isFinite(recvNum) && recvNum > 0
+                  ? recvNum / sentNum
+                  : null;
+              // Cent-level tolerance: both sides are round2'd on write.
+              const isAsBooked =
+                !!transferBooked &&
+                impliedRate != null &&
+                Math.abs(sentNum - transferBooked.sent) < 0.005 &&
+                Math.abs(recvNum - transferBooked.received) < 0.005;
+              const matchesPreview =
+                transferFxPreview.state === "ok" &&
+                impliedRate != null &&
+                Math.abs(impliedRate - transferFxPreview.rate) < 1e-6;
+              const rateSource = isAsBooked
+                ? "as booked"
+                : matchesPreview && transferFxPreview.state === "ok"
+                  ? transferFxPreview.source
+                  : "entered";
+              // Market rate for the transfer's own date, shown as a reference
+              // only when it disagrees with what is actually booked.
+              const showMarketRef =
+                transferFxPreview.state === "ok" && impliedRate != null && !matchesPreview;
               return (
                 <div className="space-y-2 rounded-md border border-amber-200 dark:border-amber-900 bg-amber-50/50 dark:bg-amber-950/20 p-3">
                   <div className="flex items-center justify-between">
                     <Label className="text-xs">Amount received ({toAcct!.currency})</Label>
-                    {transferFxPreview.state === "loading" && (
+                    {impliedRate != null ? (
+                      <span className="text-[11px] text-muted-foreground">
+                        rate {impliedRate.toFixed(6)} · {rateSource}
+                      </span>
+                    ) : transferFxPreview.state === "loading" ? (
                       <span className="text-[11px] text-muted-foreground">Calculating…</span>
-                    )}
-                    {transferFxPreview.state === "ok" && (
+                    ) : transferFxPreview.state === "ok" ? (
                       <span className="text-[11px] text-muted-foreground">
                         rate {transferFxPreview.rate.toFixed(6)} · {transferFxPreview.source}
                       </span>
-                    )}
+                    ) : null}
                   </div>
                   <Input
                     type="number"
@@ -2068,8 +2115,17 @@ export function TransactionDialog({
                     }
                   />
                   <p className="text-[11px] text-muted-foreground">
-                    Pre-filled from market FX. Override with the actual amount your bank credited.
+                    {isAsBooked
+                      ? "Saved from the original transfer. Override with the actual amount your bank credited."
+                      : "Pre-filled from market FX. Override with the actual amount your bank credited."}
                   </p>
+                  {showMarketRef && transferFxPreview.state === "ok" && (
+                    <p className="text-[11px] text-muted-foreground">
+                      Market rate on {formatDate(transferFxPreview.date)}:{" "}
+                      {transferFxPreview.rate.toFixed(6)} ({transferFxPreview.source}) →{" "}
+                      {formatCurrency(transferFxPreview.converted, transferFxPreview.to)}
+                    </p>
+                  )}
                   {transferFxPreview.state === "needs-override" && (
                     <p className="text-[11px] text-amber-700 dark:text-amber-300">
                       No FX rate cached for this pair —{" "}

@@ -42,6 +42,24 @@ import { calculateAgeOfMoney } from "./age-of-money";
 import { getRate } from "./fx-service";
 import { tagAmount, type TaggedAmount } from "../../mcp-server/currency-tagging";
 import { isCashGroup } from "./accounts/groups";
+import { computeDebtService, type DebtServiceLoan } from "./health/debt-service";
+
+/**
+ * Transaction `kind`s that are NEVER debt service, excluded from the DTI
+ * numerator (GH #333).
+ *
+ * Both are bookkeeping rows that STATE a balance rather than pay one:
+ *  - `opening_balance` — the single linked row backing an account's opening
+ *    balance (FINLYNQ-206). On a liability it is one large negative amount with
+ *    a neutral type-'R' category and no link ids, i.e. indistinguishable from a
+ *    payment to the old predicate.
+ *  - `balance_adjustment` — a manual correction to a stated balance.
+ *
+ * Kept local rather than reusing `PAIRLESS_CANONICAL_KINDS`: that set means
+ * "the backfill planner should not look for a paired leg", which overlaps by
+ * coincidence, not by meaning.
+ */
+export const NON_DEBT_SERVICE_KINDS = ["opening_balance", "balance_adjustment"] as const;
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type DbLike = { execute: (q: ReturnType<typeof sql>) => Promise<any> };
@@ -211,43 +229,110 @@ export async function calculateFinancialHealth(
   // Issue #235: annualizing 3-month income distorts in months with skewed
   // payment timing. Compute trailing-12m on both sides directly.
   //
-  // FINLYNQ-255: the debt-service NUMERATOR is genuine debt service only —
-  // outflows INTO a liability account (`a.type='L' AND amount<0`) that are
-  // NOT part of a linked pair. Transfer legs (`link_id`), portfolio/trade legs
-  // (`trade_link_id`) and swap legs (`swap_link_id`) all carry a link id and
-  // are EXCLUDED: a credit-card PAYMENT is a cash→cc transfer (link_id set),
-  // not debt service — the underlying purchases already register as spending
-  // elsewhere. Counting those gross double-counted, inflating DTI past 100%.
-  // (A robust anomaly backstop below also excludes the whole component when the
-  // numerator still exceeds ~1.2× outstanding liabilities.)
-  const incomeDebt12m = asRows(await db.execute(sql`
-    SELECT c.type AS cat_type,
-           COALESCE(t.currency, a.currency) AS currency,
-           a.type AS account_type,
+  // The NUMERATOR lives in the pure `computeDebtService` (health/debt-service.ts)
+  // — read its header for the full rationale. In short (GH #333 follow-up):
+  // liability balances are stored NEGATIVE-when-owed, so the old
+  // `a.type='L' AND amount<0 AND <no link ids>` predicate selected new
+  // BORROWING rather than debt service, and excluded real payments twice over
+  // (wrong sign AND link-excluded). It is replaced by scheduled service from
+  // tracked `loans` + realized payments into liability accounts no loan points
+  // at. Both sources are plaintext columns, so this stays DEK-free — the MCP
+  // caller passes `dek: null`, and a DEK-dependent branch would give the same
+  // user a different DTI on the dashboard than in their AI assistant.
+  const incomeRows = asRows(await db.execute(sql`
+    SELECT COALESCE(t.currency, a.currency) AS currency,
            SUM(t.amount) AS total
     FROM transactions t
     LEFT JOIN categories c ON t.category_id = c.id
     LEFT JOIN accounts a ON a.id = t.account_id
     WHERE t.user_id = ${userId} AND t.date >= ${twelveStart}
-      AND (c.type = 'I' OR (
-        a.type = 'L' AND t.amount < 0
-        AND t.link_id IS NULL AND t.trade_link_id IS NULL AND t.swap_link_id IS NULL
-      ))
-    GROUP BY c.type, COALESCE(t.currency, a.currency), a.type
-  `)) as Array<{ cat_type: string | null; currency: string | null; account_type: string | null; total: number | string }>;
+      AND c.type = 'I'
+    GROUP BY COALESCE(t.currency, a.currency)
+  `)) as Array<{ currency: string | null; total: number | string }>;
 
   let income12m = 0;
-  let debtPayments12m = 0;
-  for (const r of incomeDebt12m) {
+  for (const r of incomeRows) {
     const fx = await fxFor(String(r.currency ?? reporting));
-    const converted = Number(r.total) * fx;
-    if (r.cat_type === "I") {
-      income12m += converted;
-    } else {
-      // a.type = 'L' AND amount < 0 — payment INTO the liability. Flip sign.
-      debtPayments12m += Math.abs(converted);
-    }
+    income12m += Number(r.total) * fx;
   }
+
+  // Tracked loans — plaintext numeric columns only (no name_ct → no DEK).
+  const loanRows = asRows(await db.execute(sql`
+    SELECT id, account_id, currency, principal, annual_rate, term_months,
+           start_date, payment_amount, payment_frequency, extra_payment,
+           residual_value
+    FROM loans
+    WHERE user_id = ${userId}
+  `)) as Array<Record<string, unknown>>;
+
+  const debtLoans: DebtServiceLoan[] = loanRows.map((r) => ({
+    id: Number(r.id),
+    accountId: r.account_id == null ? null : Number(r.account_id),
+    currency: (r.currency as string | null) ?? null,
+    principal: Number(r.principal),
+    annualRate: Number(r.annual_rate),
+    termMonths: r.term_months == null ? null : Number(r.term_months),
+    startDate: String(r.start_date),
+    paymentAmount: r.payment_amount == null ? null : Number(r.payment_amount),
+    paymentFrequency: (r.payment_frequency as string | null) ?? null,
+    extraPayment: r.extra_payment == null ? null : Number(r.extra_payment),
+    residualValue: r.residual_value == null ? null : Number(r.residual_value),
+  }));
+
+  // Built from the exported const so the rule has ONE definition (the test
+  // pins it). `t.kind IS NULL` must be spelled out: `NULL NOT IN (...)` is NULL,
+  // not true, and would silently drop every ordinary un-kinded transaction.
+  const nonDebtServiceKinds = sql.join(
+    NON_DEBT_SERVICE_KINDS.map((k) => sql`${k}`),
+    sql`, `,
+  );
+
+  // Realized payments into liability accounts NO loan points at. Positive
+  // amount on a liability = the balance moving back toward zero; `link_id IS
+  // NOT NULL` is what makes it a PAYMENT (its cash leg exists) rather than a
+  // refund or a write-off. Scoping to loan-less accounts is what stops a
+  // transfer into a loan account being counted twice — once scheduled, once
+  // realized. `opening_balance` / `balance_adjustment` are excluded here too:
+  // a positive opening balance on a liability is still a stated balance, not a
+  // payment (the GH #333 bug, mirrored on the other side of zero).
+  const untrackedRows = asRows(await db.execute(sql`
+    SELECT COALESCE(t.currency, a.currency) AS currency,
+           SUM(t.amount) AS total
+    FROM transactions t
+    JOIN accounts a ON a.id = t.account_id
+    WHERE t.user_id = ${userId} AND t.date >= ${twelveStart}
+      AND a.type = 'L'
+      AND t.amount > 0
+      AND t.link_id IS NOT NULL
+      AND (t.kind IS NULL OR t.kind NOT IN (${nonDebtServiceKinds}))
+      AND NOT EXISTS (
+        SELECT 1 FROM loans l
+        WHERE l.user_id = ${userId} AND l.account_id = a.id
+      )
+    GROUP BY COALESCE(t.currency, a.currency)
+  `)) as Array<{ currency: string | null; total: number | string }>;
+
+  // Pre-resolve every rate the pure calculator will need — `convert` must be
+  // synchronous, and fxFor is async.
+  const debtCurrencies = new Set<string>();
+  for (const l of debtLoans) debtCurrencies.add(String(l.currency ?? reporting));
+  for (const r of untrackedRows) debtCurrencies.add(String(r.currency ?? reporting));
+  const debtRates = new Map<string, number>();
+  for (const cur of debtCurrencies) debtRates.set(cur, await fxFor(cur));
+
+  const debtService = computeDebtService({
+    loans: debtLoans,
+    untrackedPayments: untrackedRows.map((r) => ({
+      currency: r.currency,
+      total: Number(r.total),
+    })),
+    windowStart: twelveStart,
+    windowEnd: today,
+    convert: (amount, currency) =>
+      amount * (debtRates.get(String(currency ?? reporting)) ?? 1),
+  });
+
+  const debtPayments12m = debtService.total;
   const dtiRatio = income12m > 0 ? debtPayments12m / income12m : null;
   const dtiScore =
     dtiRatio !== null
@@ -255,6 +340,17 @@ export async function calculateFinancialHealth(
       : debtPayments12m === 0
         ? 100
         : 0;
+
+  // The old 1.2×-liabilities anomaly backstop is GONE. It existed to catch a
+  // numerator that could exceed everything the user owed, which was a symptom
+  // of the mis-signed predicate above — measured firing on our own demo data.
+  // A scheduled numerator cannot blow up that way, and keeping a blunt guard
+  // would silently drop the component again for anyone whose liabilities are
+  // small relative to a year of payments (a nearly-repaid loan). `reliable`
+  // now carries a MEANINGFUL caveat instead: false when any of the numerator
+  // came from the realized path, which over-counts a card transactor who pays
+  // in full each month.
+  const dtiReliable = debtService.reliable;
   const dtiDetail =
     dtiRatio !== null
       ? `${Math.round(dtiRatio * 100)}% debt-to-income (12m)`
@@ -285,16 +381,12 @@ export async function calculateFinancialHealth(
     }
   }
 
-  // FINLYNQ-255: anomaly backstop. Even after excluding transfer legs from the
-  // numerator, a data anomaly (mis-signed rows, a refinance/lump event, legacy
-  // pre-link_id transfers) can leave 12m debt payments exceeding what could be
-  // real debt service — you cannot service materially more than your entire
-  // outstanding debt in a year. When the numerator exceeds ~1.2× starting
-  // liabilities, EXCLUDE the whole DTI component via the existing renormalizing
-  // `excludedComponents` mechanism rather than scoring it a misleading 0.
-  const DTI_ANOMALY_MULTIPLE = 1.2;
-  const dtiAnomaly =
-    totalLiabilities > 0 && debtPayments12m > totalLiabilities * DTI_ANOMALY_MULTIPLE;
+  // (FINLYNQ-255's 1.2×-liabilities anomaly backstop was REMOVED with the
+  // GH #333 numerator rewrite — see the DTI block above. It existed to contain
+  // a numerator that could exceed everything the user owed, which was a symptom
+  // of the mis-signed predicate rather than a data anomaly, and it was observed
+  // firing on our own demo dataset. A scheduled numerator cannot blow up that
+  // way; `dtiReliable` carries the meaningful caveat now.)
 
   const avgMonthlyExpenses = totalExpenses / 3;
   const emergencyScore =
@@ -418,11 +510,11 @@ export async function calculateFinancialHealth(
       name: "Debt-to-Income",
       scoreRaw: dtiScore,
       weightCanonical: HEALTH_WEIGHTS.dti,
-      detail: dtiAnomaly
-        ? `Debt payments (${Math.round(debtPayments12m)}) exceed ${DTI_ANOMALY_MULTIPLE}× liabilities (${Math.round(totalLiabilities)}) — likely a data anomaly`
+      detail: !dtiReliable
+        ? `${dtiDetail} — includes card payments, which overstate debt service if you pay in full`
         : dtiDetail,
-      excluded: dtiAnomaly,
-      excludeReason: dtiAnomaly ? "debt_payments_exceed_liabilities" : undefined,
+      excluded: false,
+      excludeReason: undefined,
     },
     {
       name: "Emergency Fund",
@@ -511,7 +603,7 @@ export async function calculateFinancialHealth(
     excludedComponents,
     reportingCurrency: reporting,
     savingsRatePct,
-    dti: { pct: dtiPct, reliable: !dtiAnomaly },
+    dti: { pct: dtiPct, reliable: dtiReliable },
     totals: {
       totalIncome3m: tagAmount(totalIncome, reporting, "reporting"),
       totalExpenses3m: tagAmount(totalExpenses, reporting, "reporting"),

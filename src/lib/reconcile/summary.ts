@@ -27,6 +27,7 @@ import {
   type BalanceSummaryAccount,
 } from "./balance-summary";
 import { getHoldingsValueByAccount } from "@/lib/holdings-value";
+import { unrecordedBankRowSql } from "./unrecorded-rows";
 
 export interface ReconcileSummaryRow {
   accountId: number;
@@ -96,7 +97,7 @@ export async function getReconcileSummary(
     .where(
       and(
         eq(schema.bankTransactions.userId, userId),
-        sql`NOT EXISTS (SELECT 1 FROM transactions t WHERE t.bank_transaction_id = ${schema.bankTransactions.id})`,
+        unrecordedBankRowSql(),
       ),
     )
     .groupBy(schema.bankTransactions.accountId);
