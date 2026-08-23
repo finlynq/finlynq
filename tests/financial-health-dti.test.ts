@@ -69,13 +69,52 @@ describe("DTI numerator predicate (GH #333)", () => {
     expect(code).toContain("(t.kind IS NULL OR t.kind NOT IN (");
   });
 
-  it("still excludes linked pairs (FINLYNQ-255 must not regress)", () => {
-    expect(code).toContain(
-      "AND t.link_id IS NULL AND t.trade_link_id IS NULL AND t.swap_link_id IS NULL",
-    );
+  it("sources the numerator from the pure calculator, not an inline predicate", () => {
+    // GH #333 follow-up: the numerator moved out of raw SQL into
+    // health/debt-service.ts. If it ever moves back inline it stops being
+    // testable, which is how the direction bug survived in the first place.
+    expect(code).toContain("computeDebtService({");
+    expect(code).toContain('from "./health/debt-service"');
   });
 
-  it("keeps the 1.2x anomaly backstop", () => {
-    expect(code).toContain("DTI_ANOMALY_MULTIPLE");
+  it("no longer selects unpaired NEGATIVE liability rows as debt service", () => {
+    // Liability balances are negative-when-owed, so this predicate selected
+    // new BORROWING and excluded real payments twice over (wrong sign AND
+    // link-excluded). It must not come back.
+    expect(code).not.toContain("a.type = 'L' AND t.amount < 0");
+  });
+
+  it("scopes realized payments to liabilities NO loan points at", () => {
+    // Without this, a transfer into a loan account is counted twice — once as
+    // scheduled service, once as a realized payment.
+    expect(code).toContain("NOT EXISTS (");
+    expect(code).toContain("FROM loans l");
+  });
+
+  it("requires a link_id on realized payments", () => {
+    // The cash leg is what makes a positive row on a liability a PAYMENT
+    // rather than a refund or a write-off.
+    expect(code).toContain("t.link_id IS NOT NULL");
+  });
+
+  it("drops the 1.2x anomaly backstop it no longer needs", () => {
+    // It contained a numerator that could exceed everything the user owed —
+    // a symptom of the mis-signed predicate, not a data anomaly. Observed
+    // firing on our own demo dataset 2026-08-22. A scheduled numerator cannot
+    // blow up that way, and a blunt guard would silently drop the component
+    // for anyone with a nearly-repaid loan.
+    expect(code).not.toContain("DTI_ANOMALY_MULTIPLE");
+  });
+
+  it("keeps the DEK-free contract", () => {
+    // The MCP caller passes dek:null, so a DEK-dependent branch would give the
+    // same user a different DTI on the dashboard than in their AI assistant.
+    const dtiBlock = code.slice(
+      code.indexOf("const incomeRows"),
+      code.indexOf("const avgMonthlyExpenses"),
+    );
+    expect(dtiBlock).not.toContain("name_lookup");
+    expect(dtiBlock).not.toContain("decryptName");
+    expect(dtiBlock).not.toContain("dek");
   });
 });
