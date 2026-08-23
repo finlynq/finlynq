@@ -7,10 +7,16 @@
  * key in the `settings` key/value table — NO migration (mirrors the
  * `confirm_csv_mapping` / `email_retention_days` settings-key precedent).
  *
- * Hidden is a DROPDOWN-ONLY filter: hidden accounts stay fully reachable via
- * /settings/import (the toggle home) and direct deep-links like
- * /import?account=<id> and /import/pending. It never affects materialize,
- * dedup, or any aggregate.
+ * Hidden is an ATTENTION filter, never a data filter: hidden accounts stay
+ * fully reachable via /settings/import (the toggle home) and direct deep-links
+ * like /import?account=<id> and /import/pending, and it never affects
+ * materialize, dedup, or any aggregate.
+ *
+ * Two surfaces honour it: the /import reconcile dropdown, and — since GH #332
+ * — the dashboard Action Center's "N imported rows awaiting recording" card.
+ * The card is a NOTIFICATION, so "I've tucked this account away" has to mean
+ * "stop nagging me about it"; the /import panel's own pendingCount badge is
+ * deliberately unfiltered, because that screen is where you go to look.
  */
 
 import { db, schema } from "@/db";

@@ -43,6 +43,23 @@ import { getRate } from "./fx-service";
 import { tagAmount, type TaggedAmount } from "../../mcp-server/currency-tagging";
 import { isCashGroup } from "./accounts/groups";
 
+/**
+ * Transaction `kind`s that are NEVER debt service, excluded from the DTI
+ * numerator (GH #333).
+ *
+ * Both are bookkeeping rows that STATE a balance rather than pay one:
+ *  - `opening_balance` — the single linked row backing an account's opening
+ *    balance (FINLYNQ-206). On a liability it is one large negative amount with
+ *    a neutral type-'R' category and no link ids, i.e. indistinguishable from a
+ *    payment to the old predicate.
+ *  - `balance_adjustment` — a manual correction to a stated balance.
+ *
+ * Kept local rather than reusing `PAIRLESS_CANONICAL_KINDS`: that set means
+ * "the backfill planner should not look for a paired leg", which overlaps by
+ * coincidence, not by meaning.
+ */
+export const NON_DEBT_SERVICE_KINDS = ["opening_balance", "balance_adjustment"] as const;
+
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type DbLike = { execute: (q: ReturnType<typeof sql>) => Promise<any> };
 
@@ -211,15 +228,45 @@ export async function calculateFinancialHealth(
   // Issue #235: annualizing 3-month income distorts in months with skewed
   // payment timing. Compute trailing-12m on both sides directly.
   //
-  // FINLYNQ-255: the debt-service NUMERATOR is genuine debt service only —
-  // outflows INTO a liability account (`a.type='L' AND amount<0`) that are
-  // NOT part of a linked pair. Transfer legs (`link_id`), portfolio/trade legs
-  // (`trade_link_id`) and swap legs (`swap_link_id`) all carry a link id and
-  // are EXCLUDED: a credit-card PAYMENT is a cash→cc transfer (link_id set),
-  // not debt service — the underlying purchases already register as spending
-  // elsewhere. Counting those gross double-counted, inflating DTI past 100%.
+  // FINLYNQ-255: the debt-service NUMERATOR excludes linked pairs. Transfer legs
+  // (`link_id`), portfolio/trade legs (`trade_link_id`) and swap legs
+  // (`swap_link_id`) all carry a link id and are EXCLUDED: a credit-card
+  // PAYMENT is a cash→cc transfer (link_id set), and the underlying purchases
+  // already register as spending elsewhere. Counting those gross
+  // double-counted, inflating DTI past 100%.
+  //
+  // GH #333 (2026-08-22): `kind` exclusions. An account seeded with an opening
+  // balance writes ONE large negative row (`kind='opening_balance'`) on the
+  // liability, with a neutral type-'R' category and no link ids — so it
+  // satisfied this branch and landed in `debtPayments12m` as a phantom
+  // "payment". Reported with three seeded liability accounts contributing
+  // ~$7,870 of trailing-12m debt service that was never paid. `balance_adjustment`
+  // is excluded for the same reason: both are BOOKKEEPING rows stating what is
+  // owed, never a payment of it. Deliberately NOT reusing
+  // `PAIRLESS_CANONICAL_KINDS` — that set answers "can the backfill planner
+  // pair this row", a different question that happens to overlap; coupling the
+  // health score to it would let a backfill change silently move DTI.
+  //
+  // KNOWN LIMITATION (GH #333 follow-up, do not "fix" piecemeal): liability
+  // balances are stored NEGATIVE-when-owed (see `totalLiabilities` below, which
+  // takes Math.abs). A charge on a card is therefore negative and a payment is
+  // POSITIVE — so `a.type='L' AND amount<0` actually selects new BORROWING
+  // (charges, fees, accrued interest), not debt service. The kind exclusions
+  // above remove the phantom rows under either definition, but the numerator's
+  // direction is still open; redefining it (realized payment legs vs scheduled
+  // `loans` service) is a separate, deliberate change.
+  //
   // (A robust anomaly backstop below also excludes the whole component when the
-  // numerator still exceeds ~1.2× outstanding liabilities.)
+  // numerator still exceeds ~1.2× outstanding liabilities — note it does NOT
+  // catch this class on its own: a user carrying a mortgage has liabilities
+  // large enough that the 1.2× threshold never trips.)
+  // Built from the exported const so the rule has ONE definition (the test
+  // pins it). `t.kind IS NULL` must be spelled out: `NULL NOT IN (...)` is NULL,
+  // not true, and would silently drop every ordinary un-kinded transaction.
+  const nonDebtServiceKinds = sql.join(
+    NON_DEBT_SERVICE_KINDS.map((k) => sql`${k}`),
+    sql`, `,
+  );
   const incomeDebt12m = asRows(await db.execute(sql`
     SELECT c.type AS cat_type,
            COALESCE(t.currency, a.currency) AS currency,
@@ -232,6 +279,7 @@ export async function calculateFinancialHealth(
       AND (c.type = 'I' OR (
         a.type = 'L' AND t.amount < 0
         AND t.link_id IS NULL AND t.trade_link_id IS NULL AND t.swap_link_id IS NULL
+        AND (t.kind IS NULL OR t.kind NOT IN (${nonDebtServiceKinds}))
       ))
     GROUP BY c.type, COALESCE(t.currency, a.currency), a.type
   `)) as Array<{ cat_type: string | null; currency: string | null; account_type: string | null; total: number | string }>;

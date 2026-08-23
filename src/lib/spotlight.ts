@@ -12,6 +12,8 @@ import { getDisplayCurrency, getRateMap, convertWithRateMap } from "@/lib/fx-ser
 import { todayISO } from "@/lib/utils/date";
 import { buildTxDrillUrl } from "@/lib/transactions/drill-url";
 import { formatCurrency } from "@/lib/currency";
+import { unrecordedBankRowSql } from "@/lib/reconcile/unrecorded-rows";
+import { getReconcileHiddenAccountIds } from "@/lib/reconcile/hidden-accounts";
 
 const { accounts, categories, transactions, budgets, goals, subscriptions } = schema;
 
@@ -519,6 +521,85 @@ async function getUpcomingSubscriptions(
     });
 }
 
+// 8. Imported bank rows that were never recorded as transactions (GH #332)
+//
+// The gap this closes: in `auto` mode a sync promotes rows into
+// `bank_transactions` and fires the rules engine, but rows that match NO rule
+// simply stay there. Nothing retried them and nothing said so, so from the
+// user's side the transactions never arrived — reported as 17 rows / ~$654
+// accumulating silently across two syncs, noticed only because a trip-spend
+// report came up short.
+//
+// This is deliberately a SURFACING fix, not a behaviour change: the count
+// already existed as `pendingCount` on the /import reconcile panel, but the
+// user had to go look at a screen that auto mode implies they don't need. The
+// card is the thing that goes and finds them.
+//
+// Fires for EVERY mode, not just auto: `approve` mode parks rows in the same
+// place awaiting an /inbox click, and in `manual` mode rows are still in
+// `staged_imports` (not yet in the bank ledger), so the count is naturally 0 —
+// no mode branching is needed or wanted.
+async function getUnrecordedBankRows(
+  userId: string,
+  dek: Buffer | null,
+  fx: RateCtx,
+): Promise<SpotlightItem[]> {
+  const hidden = new Set(await getReconcileHiddenAccountIds(userId));
+
+  const rows = await db
+    .select({
+      accountId: schema.bankTransactions.accountId,
+      accountNameCt: accounts.nameCt,
+      currency: accounts.currency,
+      count: sql<number>`COUNT(*)`,
+      total: sql<number>`COALESCE(SUM(ABS(${schema.bankTransactions.amount})), 0)`,
+    })
+    .from(schema.bankTransactions)
+    .innerJoin(accounts, eq(accounts.id, schema.bankTransactions.accountId))
+    .where(
+      and(
+        eq(schema.bankTransactions.userId, userId),
+        eq(accounts.archived, false),
+        unrecordedBankRowSql(),
+      ),
+    )
+    .groupBy(schema.bankTransactions.accountId, accounts.nameCt, accounts.currency)
+    .all();
+
+  const items: SpotlightItem[] = [];
+  for (const row of rows) {
+    if (row.accountId == null || hidden.has(row.accountId)) continue;
+    const count = Number(row.count) || 0;
+    if (count === 0) continue;
+
+    const accountName = decryptName(row.accountNameCt, dek, null) ?? "";
+    // FINLYNQ-123 — the row amounts are native to the account; convert before
+    // presenting them under the display currency's symbol.
+    const total = convertWithRateMap(
+      Number(row.total) || 0,
+      row.currency ?? fx.displayCurrency,
+      fx.rateMap,
+    );
+
+    items.push({
+      id: `unrecorded-bank-rows-${row.accountId}`,
+      type: "unrecorded_bank_rows",
+      // Money that is missing from every report is worse than a nudge: at 10+
+      // rows a spend report is materially wrong, which is exactly how #332 was
+      // found.
+      severity: count >= 10 ? "warning" : "info",
+      title: `${count} imported row${count > 1 ? "s" : ""} awaiting recording`,
+      description: `${accountName || "Account"} · ${formatCurrency(total, fx.displayCurrency)} imported but not yet recorded as transactions`,
+      // Deep-links to the account's own reconcile view — the same screen whose
+      // pendingCount badge this card is derived from.
+      actionUrl: `/import?account=${row.accountId}`,
+      amount: total,
+      currency: fx.displayCurrency,
+    });
+  }
+  return items;
+}
+
 export async function getSpotlightItems(userId: string, dek: Buffer | null = null): Promise<SpotlightItem[]> {
   // FINLYNQ-123 — resolve the display currency + current-rate map ONCE and hand
   // it to every builder. Each converts its own figures before emitting, so an
@@ -536,6 +617,7 @@ export async function getSpotlightItems(userId: string, dek: Buffer | null = nul
     uncategorized,
     lowBalances,
     upcomingSubs,
+    unrecordedBankRows,
   ] = await Promise.all([
     getOverspentBudgets(userId, dek, fx),
     getUpcomingLargeBills(userId, dek, fx),
@@ -544,6 +626,7 @@ export async function getSpotlightItems(userId: string, dek: Buffer | null = nul
     getUncategorizedTransactions(userId, fx),
     getLowBalances(userId, dek, fx),
     getUpcomingSubscriptions(userId, dek, fx),
+    getUnrecordedBankRows(userId, dek, fx),
   ]);
 
   const items: SpotlightItem[] = [
@@ -554,6 +637,7 @@ export async function getSpotlightItems(userId: string, dek: Buffer | null = nul
     ...uncategorized,
     ...lowBalances,
     ...upcomingSubs,
+    ...unrecordedBankRows,
   ];
 
   return items.sort((a, b) => SEVERITY_ORDER[a.severity] - SEVERITY_ORDER[b.severity]);
