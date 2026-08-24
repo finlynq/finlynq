@@ -105,13 +105,35 @@ describe("Action Center card (GH #332)", () => {
     expect(spotlightSrc).toContain("...unrecordedBankRows,");
   });
 
-  it("deep-links to the reconcile tab on the all-time window", () => {
-    // The count is all-time; the Reconcile tab defaults to a 60-day lookback.
-    // Without both params the card opens a screen that renders none of the rows
-    // it just counted — the phantom-alert report.
+  it("deep-links to the lens-appropriate tab on the all-time window", () => {
+    // The count is all-time; the manual-lens Reconcile tab defaults to a
+    // 60-day lookback. And /import renders a different tab set per lens,
+    // snapping an out-of-set `?tab=` back to the lens default — so a hardcoded
+    // `tab=reconcile` is discarded on every auto/approve account, which is
+    // exactly the population GH #332 was reported against. Without both the
+    // card opens a screen rendering none of the rows it just counted.
     const body = builderBody(spotlightSrc);
-    expect(body).toContain("tab=reconcile");
+    expect(body).toContain("tab=${importTabForMode(row.mode)}");
     expect(body).toContain("window=all");
+  });
+
+  it("resolves the tab from the account's mode, covering all three lenses", () => {
+    // A mapping that silently falls through to one tab would reintroduce the
+    // snap-away bug for the other two lenses.
+    const fn = spotlightSrc.slice(
+      spotlightSrc.indexOf("function importTabForMode"),
+      spotlightSrc.indexOf("async function getUnrecordedBankRows"),
+    );
+    expect(fn).toContain('"auto"');
+    expect(fn).toContain('"to-categorize"');
+    expect(fn).toContain('"approve"');
+    expect(fn).toContain('"to-approve"');
+    expect(fn).toContain('"reconcile"');
+    // The mode must actually be selected + grouped, or `row.mode` is undefined
+    // and every account silently falls back to the manual tab.
+    const body = builderBody(spotlightSrc);
+    expect(body).toContain("mode: accounts.mode");
+    expect(body).toContain("accounts.mode,");
   });
 
   it("converts to the display currency before emitting (FINLYNQ-123)", () => {
