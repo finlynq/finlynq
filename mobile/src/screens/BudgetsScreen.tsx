@@ -86,10 +86,11 @@ export default function BudgetsScreen() {
     fetchBudgets();
   }, [fetchBudgets]);
 
-  // `/api/budgets` returns `categoryNameCt` (ciphertext) un-decrypted — it never
-  // calls decryptName, unlike /api/accounts and /api/transactions. So `b.categoryName`
-  // is undefined on the wire. Resolve the display name from the separately-fetched
-  // (already-decrypted) categories list by id instead.
+  // `/api/budgets` now decrypts `categoryNameCt` into `categoryName` (GH #338),
+  // so `b.categoryName` is populated on the wire. This id lookup against the
+  // separately-fetched categories list is kept as the fallback it always was —
+  // it is the same `Category #<id>` shape the route's own `safeName` degrades
+  // to, so the two agree when the DEK is cold.
   const categoryLabel = (catId: number) =>
     categories.find((c) => c.id === catId)?.name || `Category #${catId}`;
 

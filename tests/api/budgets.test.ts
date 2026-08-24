@@ -85,6 +85,20 @@ describe("API /api/budgets", () => {
       expect(mockDecryptName).toHaveBeenCalledWith("v1:abc:def:ghi", expect.anything(), null);
     });
 
+    it("does not ship the ciphertext to the client", async () => {
+      // No encrypted payload leaves the server — the rule stated in
+      // src/lib/dashboard/spending-by-category.ts and enforced by
+      // /api/transactions. The row is spread into the response, so this pins
+      // that `categoryNameCt` is destructured out rather than carried along.
+      mockGetBudgets.mockReturnValue([
+        { id: 1, categoryId: 7, categoryNameCt: "v1:abc:def:ghi", categoryGroup: "Personal", month: "2024-01", amount: 500, currency: "CAD" },
+      ]);
+      const req = createMockRequest("http://localhost:3000/api/budgets?month=2024-01");
+      const res = await GET(req);
+      const { data } = await parseResponse(res);
+      expect((data as Array<Record<string, unknown>>)[0]).not.toHaveProperty("categoryNameCt");
+    });
+
     it("falls back to 'Category #<id>' when the DEK cannot decrypt the name", async () => {
       // A cold DEK (server restart) or a DEK-less auth path (API key, OAuth
       // MCP) must still render an identifiable row, never an empty label.

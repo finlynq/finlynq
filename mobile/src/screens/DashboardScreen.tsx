@@ -150,9 +150,9 @@ export default function DashboardScreen() {
       else logger.warn("dashboard", "health-score fetch failed", { error: healthRes.error });
       if (budgetRes.success) setBudgets(budgetRes.data);
       else logger.warn("dashboard", "budgets fetch failed", { error: budgetRes.error });
-      // /api/budgets returns categoryNameCt (ciphertext) undecrypted, so resolve
-      // the display name from the decrypted categories list by id (mirrors
-      // BudgetsScreen). Without this the budget progress shows "Category #1014".
+      // /api/budgets now decrypts the category name server-side (GH #338); this
+      // id lookup against the decrypted categories list stays as the fallback
+      // for a cold DEK, mirroring BudgetsScreen.
       if (catRes.success) setCategories(catRes.data);
       else logger.warn("dashboard", "categories fetch failed", { error: catRes.error });
     } catch (e) {
