@@ -27,7 +27,12 @@ export async function GET(request: NextRequest) {
   const rateMap = await getRateMap(displayCurrency, userId);
 
   // Convert budget amounts to display currency
-  let enriched = data.map((b: any) => ({
+  // `categoryNameCt` is destructured OUT of the spread, not deleted after it:
+  // the ciphertext must never reach the wire (the rule stated in
+  // src/lib/dashboard/spending-by-category.ts, and what /api/transactions
+  // enforces with its `delete row.categoryNameCt`), and a `...b` spread that
+  // carries it is one forgotten `delete` away from shipping it again.
+  let enriched = data.map(({ categoryNameCt, ...b }: any) => ({
     ...b,
     // The budgets page renders `b.categoryName` directly (and feeds it to
     // Combobox labels + sort comparators), but `getBudgets` returns only the
@@ -35,7 +40,7 @@ export async function GET(request: NextRequest) {
     // label. Decrypt here, exactly as the dashboard's Spending-by-Category
     // card already does; `safeName` degrades a cold/absent DEK to
     // "Category #<id>" rather than an empty string.
-    categoryName: safeName(decryptName(b.categoryNameCt, dek, null), "Category", b.categoryId),
+    categoryName: safeName(decryptName(categoryNameCt, dek, null), "Category", b.categoryId),
     convertedAmount: convertWithRateMap(b.amount, b.currency, rateMap),
     displayCurrency,
     spent: 0,
