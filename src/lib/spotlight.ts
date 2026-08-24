@@ -591,8 +591,12 @@ async function getUnrecordedBankRows(
       title: `${count} imported row${count > 1 ? "s" : ""} awaiting recording`,
       description: `${accountName || "Account"} · ${formatCurrency(total, fx.displayCurrency)} imported but not yet recorded as transactions`,
       // Deep-links to the account's own reconcile view — the same screen whose
-      // pendingCount badge this card is derived from.
-      actionUrl: `/import?account=${row.accountId}`,
+      // pendingCount badge this card is derived from. `tab` + `window` are
+      // load-bearing, not decoration: the Reconcile tab defaults to a 60-day
+      // lookback while this count is all-time, so without `window=all` a card
+      // reading "304 rows" opened a screen showing none — reported as a phantom
+      // alert. The card must land on the rows it is counting.
+      actionUrl: `/import?account=${row.accountId}&tab=reconcile&window=all`,
       amount: total,
       currency: fx.displayCurrency,
     });
