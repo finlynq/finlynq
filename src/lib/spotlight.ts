@@ -539,6 +539,23 @@ async function getUpcomingSubscriptions(
 // place awaiting an /inbox click, and in `manual` mode rows are still in
 // `staged_imports` (not yet in the bank ledger), so the count is naturally 0 —
 // no mode branching is needed or wanted.
+/**
+ * Which /import tab lists an account's un-recorded bank-ledger rows, per its
+ * pipeline mode. Mirrors `visibleTabs` + `defaultTabFor` in
+ * [import/page.tsx](../app/(app)/import/page.tsx) — the page renders a
+ * DIFFERENT tab set per lens and snaps an out-of-set `?tab=` back to that
+ * lens's default, so naming a tab the lens doesn't have is the same as naming
+ * none. `manual` is the one lens whose default (`staging`, i.e. rows not yet
+ * in the bank ledger) is NOT where these rows live, so it must be named
+ * explicitly. Keep in lockstep with that page.
+ */
+function importTabForMode(mode: string | null): string {
+  if (mode === "auto") return "to-categorize";
+  if (mode === "approve") return "to-approve";
+  // 'manual' — and a NULL/unknown mode, which the page also treats as manual.
+  return "reconcile";
+}
+
 async function getUnrecordedBankRows(
   userId: string,
   dek: Buffer | null,
@@ -551,6 +568,7 @@ async function getUnrecordedBankRows(
       accountId: schema.bankTransactions.accountId,
       accountNameCt: accounts.nameCt,
       currency: accounts.currency,
+      mode: accounts.mode,
       count: sql<number>`COUNT(*)`,
       total: sql<number>`COALESCE(SUM(ABS(${schema.bankTransactions.amount})), 0)`,
     })
@@ -563,7 +581,12 @@ async function getUnrecordedBankRows(
         unrecordedBankRowSql(),
       ),
     )
-    .groupBy(schema.bankTransactions.accountId, accounts.nameCt, accounts.currency)
+    .groupBy(
+      schema.bankTransactions.accountId,
+      accounts.nameCt,
+      accounts.currency,
+      accounts.mode,
+    )
     .all();
 
   const items: SpotlightItem[] = [];
@@ -590,9 +613,18 @@ async function getUnrecordedBankRows(
       severity: count >= 10 ? "warning" : "info",
       title: `${count} imported row${count > 1 ? "s" : ""} awaiting recording`,
       description: `${accountName || "Account"} · ${formatCurrency(total, fx.displayCurrency)} imported but not yet recorded as transactions`,
-      // Deep-links to the account's own reconcile view — the same screen whose
-      // pendingCount badge this card is derived from.
-      actionUrl: `/import?account=${row.accountId}`,
+      // Deep-links to the tab that actually LISTS these rows, which depends on
+      // the account's pipeline mode — /import shows a different tab set per
+      // lens and silently snaps an out-of-set `?tab=` back to the lens default,
+      // so a hardcoded `tab=reconcile` is discarded on every auto/approve
+      // account (i.e. exactly the accounts GH #332 was reported against).
+      // `window=all` is consumed by the manual-lens Reconcile tab alone, which
+      // is the only one that imposes a client-side lookback (60 days) — the
+      // other two already fetch full history. Without it a card reading
+      // "304 rows" opened a screen rendering none of them, which is what the
+      // phantom-alert report actually was. Both params matter: the card has to
+      // land on the rows it just counted.
+      actionUrl: `/import?account=${row.accountId}&tab=${importTabForMode(row.mode)}&window=all`,
       amount: total,
       currency: fx.displayCurrency,
     });

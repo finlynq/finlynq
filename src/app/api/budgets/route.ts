@@ -5,6 +5,8 @@ import { z } from "zod";
 import { validateBody, safeErrorMessage, logApiError } from "@/lib/validate";
 import { getRateMap, convertWithRateMap, getDisplayCurrency } from "@/lib/fx-service";
 import { verifyOwnership, OwnershipError } from "@/lib/verify-ownership";
+import { decryptName } from "@/lib/crypto/encrypted-columns";
+import { safeName } from "@/lib/safe-name";
 
 const postSchema = z.object({
   categoryId: z.number(),
@@ -15,7 +17,7 @@ const postSchema = z.object({
 
 export async function GET(request: NextRequest) {
   const auth = await requireAuth(request); if (!auth.authenticated) return auth.response;
-  const { userId } = auth.context;
+  const { userId, dek } = auth.context;
   const month = request.nextUrl.searchParams.get("month") ?? undefined;
   const displayCurrency = await getDisplayCurrency(userId, request.nextUrl.searchParams.get("currency"));
   const includeRollover = request.nextUrl.searchParams.get("rollover") === "1";
@@ -25,8 +27,20 @@ export async function GET(request: NextRequest) {
   const rateMap = await getRateMap(displayCurrency, userId);
 
   // Convert budget amounts to display currency
-  let enriched = data.map((b: any) => ({
+  // `categoryNameCt` is destructured OUT of the spread, not deleted after it:
+  // the ciphertext must never reach the wire (the rule stated in
+  // src/lib/dashboard/spending-by-category.ts, and what /api/transactions
+  // enforces with its `delete row.categoryNameCt`), and a `...b` spread that
+  // carries it is one forgotten `delete` away from shipping it again.
+  let enriched = data.map(({ categoryNameCt, ...b }: any) => ({
     ...b,
+    // The budgets page renders `b.categoryName` directly (and feeds it to
+    // Combobox labels + sort comparators), but `getBudgets` returns only the
+    // encrypted `categoryNameCt` — so every budget row rendered with a blank
+    // label. Decrypt here, exactly as the dashboard's Spending-by-Category
+    // card already does; `safeName` degrades a cold/absent DEK to
+    // "Category #<id>" rather than an empty string.
+    categoryName: safeName(decryptName(categoryNameCt, dek, null), "Category", b.categoryId),
     convertedAmount: convertWithRateMap(b.amount, b.currency, rateMap),
     displayCurrency,
     spent: 0,

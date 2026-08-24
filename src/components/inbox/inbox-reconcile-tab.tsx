@@ -156,6 +156,7 @@ export function InboxReconcileTab({
   accountId,
   accounts,
   onReconcileDataChange,
+  initialAllTime = false,
 }: {
   accountId: number;
   accounts: Account[];
@@ -163,6 +164,13 @@ export function InboxReconcileTab({
    *  refetch the same endpoint twice. The parent caches the data and
    *  the Reconciled tab filters it client-side. */
   onReconcileDataChange?: (data: ReconcileData | null) => void;
+  /** Open on the "All time" window instead of the default 60-day lookback
+   *  (`/import?...&window=all`, GH #332). The dashboard Action Center counts
+   *  unrecorded rows over ALL history, so a card deep-linking here has to open
+   *  the window that shows them — otherwise it points at an empty screen and
+   *  reads as a phantom alert, which is exactly what was reported. Only the
+   *  INITIAL value: the user's own preset clicks take over from there. */
+  initialAllTime?: boolean;
 }) {
   const [data, setData] = useState<ReconcileData | null>(null);
   const [dataLoading, setDataLoading] = useState(false);
@@ -181,7 +189,7 @@ export function InboxReconcileTab({
   const [busyBankId, setBusyBankId] = useState<string | null>(null);
   const [rejected, setRejected] = useState<Set<string>>(new Set());
   const [dateFrom, setDateFrom] = useState<string | null>(
-    shiftDaysFromToday(-DEFAULT_LOOKBACK_DAYS),
+    initialAllTime ? null : shiftDaysFromToday(-DEFAULT_LOOKBACK_DAYS),
   );
   const [dateTo, setDateTo] = useState<string | null>(null);
   const [categories, setCategories] = useState<DialogCategory[]>([]);

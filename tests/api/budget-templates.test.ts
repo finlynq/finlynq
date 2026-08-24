@@ -4,6 +4,13 @@ vi.mock("@/lib/auth/require-auth", () => ({
   requireAuth: vi.fn(async () => ({ authenticated: true, context: { userId: "default", method: "passphrase" as const, mfaVerified: false, dek: Buffer.alloc(32, 0xaa), sessionId: "test-session-jti" } })),
 }));
 
+// Category display names are encrypted at rest; the route decrypts
+// `categoryNameCt` into `categoryName` before responding.
+const mockDecryptName = vi.fn();
+vi.mock("@/lib/crypto/encrypted-columns", () => ({
+  decryptName: (...a: unknown[]) => mockDecryptName(...a),
+}));
+
 const mockGetBudgetTemplates = vi.fn();
 const mockCreateBudgetTemplate = vi.fn();
 const mockDeleteBudgetTemplate = vi.fn();
@@ -19,19 +26,51 @@ import { createMockRequest, parseResponse } from "../helpers/api-test-utils";
 describe("API /api/budget-templates", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    mockDecryptName.mockImplementation((ct: string | null) => (ct ? "Groceries" : null));
   });
 
   describe("GET", () => {
     it("returns all budget templates", async () => {
-      const templates = [
-        { id: 1, name: "Basic", categoryId: 1, amount: 500, createdAt: "2024-01-01" },
-      ];
-      mockGetBudgetTemplates.mockReturnValue(templates);
+      // The fixture carries `categoryNameCt`, the shape `getBudgetTemplates`
+      // actually returns. The previous fixture omitted it entirely, which is
+      // how the missing decrypt survived a passing test (the same fiction that
+      // hid GH #338 in the budgets route).
+      mockGetBudgetTemplates.mockReturnValue([
+        { id: 1, name: "Basic", categoryId: 1, categoryNameCt: "v1:abc:def:ghi", categoryGroup: "Personal", amount: 500, createdAt: "2024-01-01" },
+      ]);
       const req = createMockRequest("http://localhost:3000/api/budget-templates");
       const res = await GET(req);
       const { status, data } = await parseResponse(res);
       expect(status).toBe(200);
-      expect(data).toEqual(templates);
+      expect(data).toEqual([
+        { id: 1, name: "Basic", categoryId: 1, categoryName: "Groceries", categoryGroup: "Personal", amount: 500, createdAt: "2024-01-01" },
+      ]);
+    });
+
+    it("decrypts categoryNameCt and does not ship the ciphertext", async () => {
+      mockGetBudgetTemplates.mockReturnValue([
+        { id: 1, name: "Basic", categoryId: 7, categoryNameCt: "v1:abc:def:ghi", categoryGroup: "Personal", amount: 500, createdAt: "2024-01-01" },
+      ]);
+      const req = createMockRequest("http://localhost:3000/api/budget-templates");
+      const res = await GET(req);
+      const { data } = await parseResponse(res);
+      const row = (data as Array<Record<string, unknown>>)[0];
+      expect(row.categoryName).toBe("Groceries");
+      expect(row).not.toHaveProperty("categoryNameCt");
+      expect(mockDecryptName).toHaveBeenCalledWith("v1:abc:def:ghi", expect.anything(), null);
+    });
+
+    it("falls back to 'Category #<id>' when the DEK cannot decrypt the name", async () => {
+      // A cold DEK (server restart) or a DEK-less auth path (API key, OAuth
+      // MCP) must still render an identifiable row, never an empty label.
+      mockDecryptName.mockReturnValue(null);
+      mockGetBudgetTemplates.mockReturnValue([
+        { id: 1, name: "Basic", categoryId: 42, categoryNameCt: "v1:abc:def:ghi", categoryGroup: "Personal", amount: 500, createdAt: "2024-01-01" },
+      ]);
+      const req = createMockRequest("http://localhost:3000/api/budget-templates");
+      const res = await GET(req);
+      const { data } = await parseResponse(res);
+      expect((data as Array<{ categoryName: string }>)[0].categoryName).toBe("Category #42");
     });
   });
 

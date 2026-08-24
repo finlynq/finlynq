@@ -201,6 +201,16 @@ function ImportPageInner() {
     }
   }, []);
 
+  // GH #332 — `?window=all` opens the Reconcile tab on the All-time window
+  // instead of its default 60-day lookback. The dashboard Action Center counts
+  // unrecorded bank rows over ALL history, so its "View" link has to open the
+  // window that shows them; without this the card lands on an empty 60-day
+  // screen and reads as a phantom alert. Read once on mount — the user's own
+  // preset clicks own the window from then on.
+  const [initialAllTime] = useState(
+    () => searchParams?.get("window") === "all",
+  );
+
   // Persist ?account= and ?tab= so deep links + legacy-route redirects land
   // on the right account + tab, and a refresh keeps the user in place.
   useEffect(() => {
@@ -456,6 +466,7 @@ function ImportPageInner() {
               accountId={account.id}
               accounts={accounts}
               onReconcileDataChange={setReconcileData}
+              initialAllTime={initialAllTime}
             />
           </TabsContent>
         )}
