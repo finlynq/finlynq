@@ -33,6 +33,9 @@ import {
   getRate,
 } from "../../src/lib/fx-service";
 import {
+  todayISO,
+} from "../../src/lib/utils/date";
+import {
   isCashGroup,
 } from "../../src/lib/accounts/groups";
 import {
@@ -896,7 +899,13 @@ export function registerReadsTools(server: McpServer, ctx: PgToolContext) {
       // `netWorthBasis` is whatever the overlay actually managed to do, and
       // `netWorthNote` explains a ledger fallback (no DEK / stale DEK). The
       // component RATIOS are currency-independent; `basis` scopes the totals.
-      return dataResponse({ ...payload, basis: payload.netWorthBasis });
+      // A market basis MUST carry `asOf` (FINLYNQ-268 contract, tc-1): the
+      // overlay marks today's positions to market, so asOf = today.
+      return dataResponse({
+        ...payload,
+        basis: payload.netWorthBasis,
+        ...(payload.netWorthBasis === "market" ? { asOf: todayISO() } : {}),
+      });
     }
   );
 
@@ -1715,7 +1724,7 @@ export function registerReadsTools(server: McpServer, ctx: PgToolContext) {
             get_net_worth: { basis: "market else ledger (current) / ledger (trend)", override: "basis ('market' | 'ledger')" },
             get_account_balances: { basis: "per-row market (DEK) else ledger", override: "basis ('market' | 'ledger')" },
             get_goals: { basis: "per-goal market (investment-linked + DEK) else ledger", override: "none" },
-            get_financial_health_score: { basis: "ledger (money totals; ratios currency-independent)", override: "none" },
+            get_financial_health_score: { basis: "market when a usable DEK is present (+ asOf = today), else ledger (money totals; ratios currency-independent)", override: "none" },
             get_portfolio_analysis: { basis: "lifetime_cost", override: "none" },
             get_portfolio_performance: { basis: "active_cost", override: "none" },
             get_portfolio_returns: { basis: "market (+ asOf = latest snapshot date)", override: "none" },
