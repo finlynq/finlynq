@@ -31,6 +31,10 @@ import {
   decryptRuleFields,
 } from "../../src/lib/rules/crypto";
 import {
+  ConditionGroup,
+  Action,
+} from "../../src/lib/rules/schema";
+import {
   invalidateUser as invalidateUserTxCache,
 } from "../../src/lib/mcp/user-tx-cache";
 import { registerManageTool } from "./_consolidate";
@@ -651,8 +655,13 @@ export function registerRulesTools(server: McpServer, ctx: PgToolContext) {
         assign_category: z.string().optional().describe("Legacy: category name (fuzzy matched)"),
         assign_tags: z.string().optional().describe("Legacy: tags assigned by the rule"),
         rename_to: z.string().optional().describe("Legacy: payee rename target"),
-        conditions: z.unknown().optional().describe("v2: full ConditionGroup JSON. Replaces conditions entirely."),
-        actions: z.unknown().optional().describe("v2: full Action[] JSON. Replaces actions entirely."),
+        // GH #341: these were `z.unknown()`, which emits a JSON-Schema node with
+        // NO `type` — strict clients (Home Assistant's voluptuous converter)
+        // reject the whole tools/list over it. Reuse the REAL rule schemas
+        // (same ones POST /api/rules validates with) so the full condition/
+        // action grammar is both advertised and validated.
+        conditions: ConditionGroup.optional().describe("v2: full ConditionGroup JSON ({all:[...]}). Replaces conditions entirely."),
+        actions: z.array(Action).min(1).max(10).optional().describe("v2: full Action[] JSON. Replaces actions entirely."),
         is_active: z.boolean().optional(),
         priority: z.number().optional(),
       }),

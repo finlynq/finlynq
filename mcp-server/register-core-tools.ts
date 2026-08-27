@@ -38,6 +38,9 @@ import {
   verifyConfirmationToken,
 } from "../src/lib/mcp/confirmation-token.js";
 import { InvestmentHoldingRequiredError } from "../src/lib/investment-account.js";
+// GH #341: real rule schemas for update_rule's v2 fields — `z.unknown()` emits
+// an untyped JSON-Schema node that strict MCP clients reject.
+import { ConditionGroup, Action } from "../src/lib/rules/schema.js";
 import { validateSignVsCategory } from "../src/lib/transactions/sign-category-invariant.js";
 import { ymdDate, ymPeriod, parseYmdSafe } from "./lib/date-validators.js";
 import fs from "fs/promises";
@@ -2428,8 +2431,8 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
       assign_category_id: z.number().int().nullable().optional().describe("Legacy: category FK for set_category action"),
       assign_tags: z.string().optional(),
       rename_to: z.string().optional(),
-      conditions: z.unknown().optional().describe("v2: ConditionGroup JSON. Replaces conditions entirely."),
-      actions: z.unknown().optional().describe("v2: Action[] JSON. Replaces actions entirely."),
+      conditions: ConditionGroup.optional().describe("v2: ConditionGroup JSON ({all:[...]}). Replaces conditions entirely."),
+      actions: z.array(Action).min(1).max(10).optional().describe("v2: Action[] JSON. Replaces actions entirely."),
       is_active: z.boolean().optional(),
       priority: z.number().optional(),
     },
