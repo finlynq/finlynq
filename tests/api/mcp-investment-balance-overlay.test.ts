@@ -45,7 +45,7 @@ vi.mock("../../src/lib/fx-service", async (importOriginal) => {
   return { ...actual, getRate: vi.fn(async () => 1) };
 });
 
-import { applyInvestmentMarketOverlay } from "../../mcp-server/investment-balance-overlay";
+import { applyInvestmentMarketOverlay } from "../../src/lib/accounts/investment-balance-overlay";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { registerPgTools } from "../../mcp-server/register-tools-pg";
 

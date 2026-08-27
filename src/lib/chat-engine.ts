@@ -8,7 +8,8 @@ import { formatCurrency, getCurrentMonth, getMonthLabel } from "@/lib/currency";
 import { getDisplayCurrency, getRateMap, convertWithRateMap } from "@/lib/fx-service";
 import { convertReportingSlice } from "@/lib/fx/reporting-amount";
 import { getAccountBalances, getSpendingByCategoryWithReporting } from "@/lib/queries";
-import { getHoldingsValueByAccount } from "@/lib/holdings-value";
+import { getHoldingsValueByAccount, verifyHoldingDecryptHealth } from "@/lib/holdings-value";
+import { applyInvestmentMarketOverlay } from "@/lib/accounts/investment-balance-overlay";
 import { decryptField } from "@/lib/crypto/envelope";
 import { decryptName, nameLookup } from "@/lib/crypto/encrypted-columns";
 import { todayISO } from "@/lib/utils/date";
@@ -131,18 +132,30 @@ const handleNetWorth: IntentHandler = async (_msg, ctx) => {
   // Reuse the canonical balance query (same one the dashboard uses) — it
   // carries `isInvestment`, which the hand-rolled query here did not.
   const balances = await getAccountBalances(ctx.userId);
-  // "Account balance for accounts with holdings = holdings.value" (FINLYNQ-151).
-  // An investment account's SUM(transactions.amount) is just the cash legs of
-  // buys/sells, which net to ~0 — chat used to report every brokerage account
-  // as roughly zero and disagreed with MCP `get_net_worth` on the same question.
-  const holdingsByAccount = await getHoldingsValueByAccount(ctx.userId, ctx.dek);
+  // "Account balance for accounts with holdings = holdings.value" (FINLYNQ-151),
+  // applied through the ONE shared overlay every net-worth surface uses rather
+  // than a local ternary. An investment account's SUM(transactions.amount) is
+  // just the cash legs of buys/sells, which net to ~0 — chat used to report
+  // every brokerage account as roughly zero and disagreed with MCP
+  // `get_net_worth` on the same question. Going through the overlay also picks
+  // up its DEK gate and the FINLYNQ-281 stale-DEK probe for free, so a bad key
+  // degrades to ledger instead of pricing undecryptable symbols at qty×1.
+  const marked = await applyInvestmentMarketOverlay(
+    balances.map((b) => ({
+      id: b.accountId,
+      currency: b.currency,
+      isInvestment: b.isInvestment === true,
+      ledgerBalance: Number(b.balance),
+    })),
+    ctx.dek,
+    () => getHoldingsValueByAccount(ctx.userId, ctx.dek),
+    () => verifyHoldingDecryptHealth(ctx.userId, ctx.dek),
+  );
 
   let assets = 0;
   let liabilities = 0;
-  const rows = balances.map((b) => {
-    const native = b.isInvestment
-      ? (holdingsByAccount.get(b.accountId)?.value ?? 0)
-      : b.balance;
+  const rows = balances.map((b, i) => {
+    const native = marked.rows[i]?.balance ?? Number(b.balance);
     const display = convertWithRateMap(native, b.currency, rateMap);
     if (b.accountType === "A") assets += display;
     else liabilities += display;

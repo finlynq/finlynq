@@ -278,6 +278,15 @@ export function HealthInfoDialog({ data, open, onOpenChange }: HealthInfoDialogP
                   </div>
                 ) : null}
               </dl>
+              {/* 2026-08-27 — the net-worth figures above go through the same
+                  shared overlay as the dashboard's Total Net Worth tile, so
+                  they normally agree exactly. They can only fall back to net
+                  contributions when no usable decryption key was available to
+                  price holdings; say so rather than let a smaller number look
+                  like a disagreement between two screens. */}
+              {data.netWorthBasis === "ledger" && data.netWorthNote ? (
+                <p className="text-xs text-muted-foreground">{data.netWorthNote}</p>
+              ) : null}
             </div>
           ) : null}
         </div>

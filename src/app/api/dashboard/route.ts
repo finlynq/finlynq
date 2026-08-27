@@ -8,7 +8,8 @@ import {
 } from "@/lib/queries";
 import { getRateMap, convertWithRateMap, getDisplayCurrency } from "@/lib/fx-service";
 import { selfHealReportingAmounts, convertReportingSlice } from "@/lib/fx/reporting-amount";
-import { getHoldingsValueByAccount } from "@/lib/holdings-value";
+import { getHoldingsValueByAccount, verifyHoldingDecryptHealth } from "@/lib/holdings-value";
+import { applyInvestmentMarketOverlay } from "@/lib/accounts/investment-balance-overlay";
 import { requireAuth } from "@/lib/auth/require-auth";
 import { getDEK } from "@/lib/crypto/dek-cache";
 import { logApiError } from "@/lib/validate";
@@ -78,14 +79,34 @@ async function handleGet(request: NextRequest) {
     //
     // cashFlowBasis is the transaction sum exposed separately so the account
     // detail page can display "Cash flow" alongside Market value.
-    const holdingsByAccount = await getHoldingsValueByAccount(userId, dek);
-    const convertedBalances = balances.map((b: any) => {
-      const holdings = holdingsByAccount.get(b.accountId);
+    //
+    // The branch itself is the shared `applyInvestmentMarketOverlay` (2026-08-27)
+    // — the ONE net-worth valuation decision, also behind the Reports balance
+    // sheet, the reconcile summary, the built-in chat, the financial-health
+    // score, and the MCP balance tools. It adds two guards this route did not
+    // have: it never prices with a null DEK (holdings symbols would decrypt to
+    // null and be valued at qty×1), and `verifyHoldingDecryptHealth` catches a
+    // present-but-stale DEK (FINLYNQ-281) and falls back to ledger rather than
+    // rendering garbage. `fetchHoldings` is memoized so the map is available
+    // for the per-row `holdingsValue`/`holdingsCostBasis` fields without a
+    // second pricing pass — and stays UNFETCHED in the null-DEK branch, which
+    // is exactly the case that used to produce qty×1 numbers here.
+    let holdingsByAccount: Awaited<ReturnType<typeof getHoldingsValueByAccount>> | null = null;
+    const overlay = await applyInvestmentMarketOverlay(
+      balances.map((b: any) => ({
+        id: b.accountId,
+        currency: b.currency,
+        isInvestment: Boolean(b.isInvestment),
+        ledgerBalance: Number(b.balance),
+      })),
+      dek,
+      async () => (holdingsByAccount ??= await getHoldingsValueByAccount(userId, dek)),
+      () => verifyHoldingDecryptHealth(userId, dek),
+    );
+    const convertedBalances = balances.map((b: any, i: number) => {
+      const holdings = holdingsByAccount?.get(b.accountId);
       const cashFlowBasis = b.balance;
-      const isInvestment = Boolean(b.isInvestment);
-      const totalBalance = isInvestment
-        ? (holdings?.value ?? 0)
-        : cashFlowBasis;
+      const totalBalance = overlay.rows[i]?.balance ?? cashFlowBasis;
       return {
         ...b,
         balance: totalBalance,

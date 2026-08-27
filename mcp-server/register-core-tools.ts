@@ -38,6 +38,11 @@ import {
   verifyConfirmationToken,
 } from "../src/lib/mcp/confirmation-token.js";
 import { InvestmentHoldingRequiredError } from "../src/lib/investment-account.js";
+// GH #341: real rule schemas for update_rule's v2 fields — `z.unknown()` emits
+// an untyped JSON-Schema node that strict MCP clients reject.
+// collectActionFKs + validateInvestmentOpAction: the GH #341 follow-up FK
+// ownership guard (mirrors REST PUT /api/rules).
+import { ConditionGroup, Action, collectActionFKs, validateInvestmentOpAction } from "../src/lib/rules/schema.js";
 import { validateSignVsCategory } from "../src/lib/transactions/sign-category-invariant.js";
 import { ymdDate, ymPeriod, parseYmdSafe } from "./lib/date-validators.js";
 import fs from "fs/promises";
@@ -2428,8 +2433,8 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
       assign_category_id: z.number().int().nullable().optional().describe("Legacy: category FK for set_category action"),
       assign_tags: z.string().optional(),
       rename_to: z.string().optional(),
-      conditions: z.unknown().optional().describe("v2: ConditionGroup JSON. Replaces conditions entirely."),
-      actions: z.unknown().optional().describe("v2: Action[] JSON. Replaces actions entirely."),
+      conditions: ConditionGroup.optional().describe("v2: ConditionGroup JSON ({all:[...]}). Replaces conditions entirely."),
+      actions: z.array(Action).min(1).max(10).optional().describe("v2: Action[] JSON. Replaces actions entirely."),
       is_active: z.boolean().optional(),
       priority: z.number().optional(),
     },
@@ -2471,6 +2476,44 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
       } else if (hasV2) {
         if (conditions !== undefined) condsJson = JSON.stringify(conditions);
         if (actions !== undefined) actionsJson = JSON.stringify(actions);
+      }
+
+      // GH #341 follow-up — the v2 shape is schema-validated but the ids
+      // inside it are not. Mirror REST PUT /api/rules (and the HTTP
+      // manage_rules op:update): re-validate record_investment_op, then
+      // cross-tenant FK ownership pre-check over every id in actions[] +
+      // account conditions. Goes through the pg-compat shim (NOT the @/db
+      // verifyOwnership) so it still guards when the shared-adapter
+      // bootstrap failed.
+      if (hasV2) {
+        for (const a of actions ?? []) {
+          if (a.kind !== "record_investment_op") continue;
+          const code = validateInvestmentOpAction(a);
+          if (code) return sqliteErr(`Investment-op action (${a.op}) is incomplete: ${code}`);
+        }
+        const fks = collectActionFKs(actions ?? []);
+        if (conditions !== undefined) {
+          for (const c of conditions.all) {
+            if (c.field === "account") fks.accountIds.push(c.accountId);
+          }
+        }
+        const notOwned = async (table: string, label: string, ids: number[]) => {
+          const uniq = [...new Set(ids)];
+          if (uniq.length === 0) return null;
+          const placeholders = uniq.map(() => "?").join(",");
+          const owned = await sqlite.prepare(
+            `SELECT id FROM ${table} WHERE user_id = ? AND id IN (${placeholders})`
+          ).all(userId, ...uniq) as SqliteRow[];
+          const ownedSet = new Set(owned.map((r) => Number(r.id)));
+          const missing = uniq.filter((n) => !ownedSet.has(n));
+          // Anti-enumeration: "not found", never "belongs to someone else".
+          return missing.length ? sqliteErr(`${label} id(s) not found: ${missing.join(", ")}`) : null;
+        };
+        const refusal =
+          (await notOwned("categories", "category", fks.categoryIds))
+          ?? (await notOwned("accounts", "account", fks.accountIds))
+          ?? (await notOwned("portfolio_holdings", "holding", fks.holdingIds));
+        if (refusal) return refusal;
       }
 
       const updates: string[] = [];

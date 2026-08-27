@@ -15,7 +15,7 @@ import {
 } from "@/lib/unrealized-pnl";
 import { getAccountBalances } from "@/lib/queries";
 import { getHoldingsValueByAccount } from "@/lib/holdings-value";
-import { applyInvestmentMarketOverlay } from "../../../../mcp-server/investment-balance-overlay";
+import { applyInvestmentMarketOverlay } from "@/lib/accounts/investment-balance-overlay";
 
 export async function GET(request: NextRequest) {
   const auth = await requireAuth(request); if (!auth.authenticated) return auth.response;

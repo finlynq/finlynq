@@ -1,21 +1,33 @@
 /**
- * Investment-account market-value overlay for the MCP balance tools
- * (FINLYNQ-151).
+ * Investment-account market-value overlay — the ONE net-worth valuation
+ * decision for the whole application (FINLYNQ-151, generalized 2026-08-27).
  *
- * The web app follows the load-bearing invariant **"account with holdings =
+ * The app follows the load-bearing invariant **"account with holdings =
  * `holdings.value`"** — an investment account's balance is its current MARKET
  * value (cash sleeve included), NOT `COALESCE(SUM(transactions.amount), 0)`.
  * For an investment account that ledger figure is *net contributions*: a
  * portfolio buy/sell writes a +stock / −cash pair that sums to zero, and even a
  * realized gain cancels (sell-stock −proceeds offsets +proceeds on the cash
- * leg). So a raw tx-sum systematically understates investment accounts and
- * diverges from the dashboard.
+ * leg). So a raw tx-sum systematically understates investment accounts.
  *
- * This overlay marks investment-account rows to market for BOTH
- * `get_account_balances` and `get_net_worth` so the two tools share ONE
- * decision and stay in parity. It is dependency-injected (`fetchHoldings`) so
- * the production call site is `() => getHoldingsValueByAccount(userId, dek)`
- * while tests inject a spy and need no module mocking.
+ * EVERY surface that turns per-account balances into assets / liabilities /
+ * net worth goes through this function, so they cannot disagree about the same
+ * question. Today that is: MCP `get_account_balances` + `get_net_worth`, the
+ * dashboard, the Reports balance sheet, the reconcile balance summary, the
+ * built-in AI chat, and the financial-health score. Reported 2026-08-27: the
+ * health card said C$485,714 while the dashboard said C$589,864 on the same
+ * data, because the health calculator was the last surface still summing
+ * `transactions.amount` for investment accounts. Do NOT hand-roll the ternary
+ * again — call this.
+ *
+ * It lives in `src/lib` (moved out of `mcp-server/` with that change) because
+ * `src/lib` code now depends on it; `mcp-server` imports it by relative path.
+ *
+ * It is dependency-injected (`fetchHoldings`) so the production call site is
+ * `() => getHoldingsValueByAccount(userId, dek)` — pass an `asOfDate` to value
+ * a HISTORICAL point (both ends of a trend must use the same basis, or the
+ * change is pure basis-shift, not movement) — while tests inject a spy and need
+ * no module mocking.
  *
  * **Critical DEK gate.** When `dek == null` (a `pf_` API-key MCP connection —
  * OAuth/session connections carry a DEK), holdings symbols decrypt to `null`

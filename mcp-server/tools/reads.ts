@@ -33,6 +33,9 @@ import {
   getRate,
 } from "../../src/lib/fx-service";
 import {
+  todayISO,
+} from "../../src/lib/utils/date";
+import {
   isCashGroup,
 } from "../../src/lib/accounts/groups";
 import {
@@ -58,7 +61,7 @@ import {
 } from "../../src/lib/holdings-value";
 import {
   applyInvestmentMarketOverlay,
-} from "../investment-balance-overlay";
+} from "../../src/lib/accounts/investment-balance-overlay";
 import {
   ymdDate,
   ymPeriod,
@@ -882,14 +885,27 @@ export function registerReadsTools(server: McpServer, ctx: PgToolContext) {
       const payload = await calculateFinancialHealth({
         db,
         userId,
-        dek: null,
+        // 2026-08-27: pass the REAL dek. The score's money totals now value
+        // investment accounts at market through the same shared overlay as
+        // `get_account_balances` / `get_net_worth`, so an assistant asking for
+        // the health score and the net worth in the same breath gets one
+        // answer. Hardcoding `null` here forced ledger valuation even on an
+        // OAuth connection that had a perfectly good key. The overlay is
+        // DEK-gated itself, so a `pf_` API key still degrades to ledger.
+        dek,
         reportingCurrency: reporting,
       });
-      // FINLYNQ-268: the score's money totals (netWorthToday, liquidAssets) are
-      // computed with dek:null, so investment accounts are valued at ledger
-      // (net contributions), never market — label the basis truthfully. The
+      // FINLYNQ-268: label the basis TRUTHFULLY rather than assuming one —
+      // `netWorthBasis` is whatever the overlay actually managed to do, and
+      // `netWorthNote` explains a ledger fallback (no DEK / stale DEK). The
       // component RATIOS are currency-independent; `basis` scopes the totals.
-      return dataResponse({ ...payload, basis: "ledger" });
+      // A market basis MUST carry `asOf` (FINLYNQ-268 contract, tc-1): the
+      // overlay marks today's positions to market, so asOf = today.
+      return dataResponse({
+        ...payload,
+        basis: payload.netWorthBasis,
+        ...(payload.netWorthBasis === "market" ? { asOf: todayISO() } : {}),
+      });
     }
   );
 
@@ -1708,7 +1724,7 @@ export function registerReadsTools(server: McpServer, ctx: PgToolContext) {
             get_net_worth: { basis: "market else ledger (current) / ledger (trend)", override: "basis ('market' | 'ledger')" },
             get_account_balances: { basis: "per-row market (DEK) else ledger", override: "basis ('market' | 'ledger')" },
             get_goals: { basis: "per-goal market (investment-linked + DEK) else ledger", override: "none" },
-            get_financial_health_score: { basis: "ledger (money totals; ratios currency-independent)", override: "none" },
+            get_financial_health_score: { basis: "market when a usable DEK is present (+ asOf = today), else ledger (money totals; ratios currency-independent)", override: "none" },
             get_portfolio_analysis: { basis: "lifetime_cost", override: "none" },
             get_portfolio_performance: { basis: "active_cost", override: "none" },
             get_portfolio_returns: { basis: "market (+ asOf = latest snapshot date)", override: "none" },

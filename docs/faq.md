@@ -86,7 +86,7 @@ The raw forwarded emails are retained for a configurable window and then permane
 
 ### Can I connect directly to my bank?
 
-Not today. Bank-feed aggregator integration (services like Plaid, SnapTrade, and SimpleFIN) is on the roadmap, but there's no shipping date yet. For now, use file-based import: download statements from your bank's website (CSV / OFX / PDF), or forward email statements to your per-user import address.
+Yes — via **SimpleFIN**. Connect a SimpleFIN setup token under **Settings → Bank Feeds**, map each feed account to a Finlynq account, and transactions flow through the same staged import pipeline as file uploads (with your per-account mode deciding whether rows auto-post, wait for approval, or stay staged). Feeds re-sync automatically about every 12 hours on login. Other aggregators (e.g. SnapTrade) are still on the roadmap. If you'd rather not link anything, file-based import still works: download statements from your bank's website (CSV / OFX / PDF), or forward email statements to your per-user import address.
 
 ## Multi-Device & Mobile
 

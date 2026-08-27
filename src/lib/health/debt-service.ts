@@ -19,14 +19,44 @@
  *     month, which is what a lender means by DTI. Derived from the same pure
  *     `buildLoanSchedule` the /loans page uses, so the two can never disagree.
  *  2. UNTRACKED LIABILITIES (a liability account no loan points at) → REALIZED
- *     payments: money moving INTO the account (positive amount, `link_id` set).
- *     For a revolving card that IS the debt service — you pay what you owe —
- *     and there is no schedule to read.
+ *     payments: money moving INTO the account (positive amount). For a
+ *     revolving card that is the closest thing to debt service — you pay what
+ *     you owe — and there is no schedule to read.
  *
  * The split is also what keeps it from double-counting: a payment transferred
  * into a loan-linked account would otherwise be counted once as a scheduled
  * payment and once as a realized one, so realized payments are scoped to
  * accounts with NO loan.
+ *
+ * CREDIT-CARD TREATMENT — the realized side is CAPPED AT THE DEBT CARRIED
+ * ---------------------------------------------------------------------
+ * Reported 2026-08-27: for someone who pays their card in full every month,
+ * counting the payments as debt service measures their card SPEND, not their
+ * debt. A year of $6,600 of groceries paid off each cycle is not $6,600 of debt
+ * service — it is $6,600 of groceries, already counted on the expense side.
+ *
+ * So a revolving account contributes `min(payments, carriedDebt)`, where
+ * `carriedDebt` is the largest balance the account is KNOWN to have owed at a
+ * window endpoint: `max(owedAtWindowStart, owedAtWindowEnd)`. Rationale:
+ *
+ *   - You can only *service* debt that existed. Payments beyond what was ever
+ *     carried are paying for charges made inside the window — spending.
+ *   - Pay-in-full transactor, nothing carried → contributes 0. This is the
+ *     case the user asked to remove, and it falls out of the formula rather
+ *     than needing a separate "is this a transactor" heuristic.
+ *   - A card opened DURING the window that is now carrying a balance still
+ *     counts: `owedAtWindowStart` is 0 but `owedAtWindowEnd` is not, which is
+ *     why the cap takes the MAX of the two endpoints rather than just the
+ *     opening balance. Capping on the opening balance alone would zero out
+ *     every genuinely new debt.
+ *   - A revolver paying less than they owe is untouched (`payments <
+ *     carriedDebt`), so real debt service is never reduced.
+ *
+ * The endpoints are an approximation of the peak carried balance — computing a
+ * true running maximum needs a windowed scan of every liability row, and the
+ * two endpoints already separate a transactor from a revolver. The residual
+ * over-count for a long-standing transactor is one statement cycle (the balance
+ * outstanding at each endpoint), not twelve, and `reliable` discloses it.
  *
  * DEK-FREE BY CONSTRUCTION — and this is load-bearing, not incidental. The MCP
  * caller passes `dek: null` explicitly ([mcp-server/tools/reads.ts]), so any
@@ -38,12 +68,14 @@
  * is instead captured implicitly, since paying it off is part of the realized
  * payment.
  *
- * KNOWN CAVEAT (deliberate, surfaced via `reliable`): a transactor who pays
- * their card in full every month books realized payments equal to their card
- * SPEND, which overstates debt service. `reliable` is false whenever any
- * untracked liability contributed, so the UI caveats the figure rather than
- * presenting it as authoritative. Tracking the card as a loan moves it onto
- * the scheduled path and clears the flag.
+ * KNOWN CAVEAT (deliberate, surfaced via `reliable`): the cap uses balances at
+ * the window endpoints, so a long-standing transactor still contributes up to
+ * one outstanding statement balance. `reliable` is false whenever at least one
+ * account was capped — i.e. whenever we detected pay-in-full behaviour and
+ * estimated rather than measured — so the UI can caveat the figure. An account
+ * whose payments fall below the debt it carries is measured exactly and does
+ * NOT clear the flag. Tracking a debt as a loan moves it onto the scheduled
+ * path, which is always exact.
  *
  * Pure: no db, no I/O, no clock. The caller supplies rows, the window, and an
  * FX converter.
@@ -66,11 +98,32 @@ export type DebtServiceLoan = {
   residualValue: number | null;
 };
 
+/**
+ * One liability account that no loan points at — a credit card, a line of
+ * credit, an untracked personal loan.
+ *
+ * Grouped PER ACCOUNT (not per currency) because the pay-in-full cap has to be
+ * applied per account: a transactor's card and a revolving loan must not offset
+ * each other inside one aggregate.
+ */
+export type UntrackedLiabilityAccount = {
+  accountId: number;
+  /** Account currency — the denomination of the two balances below. */
+  currency: string | null;
+  /** Realized payments in the window, split by the TRANSACTION's currency
+   *  (a row can be booked in a currency other than the account's). Amounts are
+   *  positive: money moving in, reducing the debt. */
+  payments: Array<{ currency: string | null; total: number }>;
+  /** Owed at `windowStart`, POSITIVE when owed, 0 when in credit. */
+  owedAtWindowStart: number;
+  /** Owed at `windowEnd`, POSITIVE when owed, 0 when in credit. */
+  owedAtWindowEnd: number;
+};
+
 export type DebtServiceInput = {
   loans: DebtServiceLoan[];
-  /** Realized payments INTO liability accounts that no loan points at, grouped
-   *  by currency. Amounts are positive (money reducing the debt). */
-  untrackedPayments: Array<{ currency: string | null; total: number }>;
+  /** Liability accounts no loan points at, one entry per account. */
+  untrackedLiabilities: UntrackedLiabilityAccount[];
   /** Inclusive ISO window bounds, e.g. the trailing 12 months. */
   windowStart: string;
   windowEnd: string;
@@ -83,11 +136,20 @@ export type DebtServiceResult = {
   total: number;
   /** Portion from scheduled loan payments. */
   scheduled: number;
-  /** Portion from realized payments into untracked liabilities. */
+  /** Portion from realized payments into untracked liabilities, AFTER the
+   *  pay-in-full cap. */
   realized: number;
   /** Loans that contributed at least one month of service in the window. */
   loansCounted: number;
-  /** True when nothing came from the realized (over-counting) path. */
+  /** Accounts whose payments exceeded the debt they carried, so the excess was
+   *  treated as spending rather than debt service (the pay-in-full case). */
+  cappedAccounts: number;
+  /** Payment total removed by the cap, in the reporting currency. Surfaced so
+   *  the UI can explain the difference rather than silently shrinking DTI. */
+  excludedPayInFull: number;
+  /** True when nothing in the numerator was ESTIMATED — i.e. no account hit
+   *  the pay-in-full cap. Scheduled-only and pay-less-than-you-owe are both
+   *  exact and stay reliable. */
   reliable: boolean;
 };
 
@@ -149,7 +211,7 @@ export function scheduledServiceForLoan(
 
 /** Trailing-window debt service, in the reporting currency. */
 export function computeDebtService(input: DebtServiceInput): DebtServiceResult {
-  const { loans, untrackedPayments, windowStart, windowEnd, convert } = input;
+  const { loans, untrackedLiabilities, windowStart, windowEnd, convert } = input;
 
   let scheduled = 0;
   let loansCounted = 0;
@@ -161,10 +223,32 @@ export function computeDebtService(input: DebtServiceInput): DebtServiceResult {
   }
 
   let realized = 0;
-  for (const row of untrackedPayments) {
-    const amount = Number(row.total);
-    if (!Number.isFinite(amount) || amount <= 0) continue;
-    realized += convert(amount, row.currency);
+  let cappedAccounts = 0;
+  let excludedPayInFull = 0;
+  for (const account of untrackedLiabilities) {
+    let paid = 0;
+    for (const row of account.payments) {
+      const amount = Number(row.total);
+      if (!Number.isFinite(amount) || amount <= 0) continue;
+      paid += convert(amount, row.currency);
+    }
+    if (paid <= 0) continue;
+
+    // The most this account is KNOWN to have owed at a window endpoint. Both
+    // balances arrive already flipped to positive-when-owed by the caller;
+    // clamp anyway so an account in credit reads 0 rather than negative.
+    const carried = Math.max(
+      0,
+      convert(Math.max(0, account.owedAtWindowStart), account.currency),
+      convert(Math.max(0, account.owedAtWindowEnd), account.currency),
+    );
+
+    const serviced = Math.min(paid, carried);
+    if (serviced < paid) {
+      cappedAccounts += 1;
+      excludedPayInFull += paid - serviced;
+    }
+    realized += serviced;
   }
 
   return {
@@ -172,6 +256,8 @@ export function computeDebtService(input: DebtServiceInput): DebtServiceResult {
     scheduled,
     realized,
     loansCounted,
-    reliable: realized === 0,
+    cappedAccounts,
+    excludedPayInFull,
+    reliable: cappedAccounts === 0,
   };
 }
