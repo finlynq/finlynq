@@ -33,7 +33,12 @@ import {
 import {
   ConditionGroup,
   Action,
+  collectActionFKs,
+  validateInvestmentOpAction,
+  type ConditionGroup as ConditionGroupType,
+  type Action as ActionType,
 } from "../../src/lib/rules/schema";
+import { verifyOwnership, OwnershipError } from "../../src/lib/verify-ownership";
 import {
   invalidateUser as invalidateUserTxCache,
 } from "../../src/lib/mcp/user-tx-cache";
@@ -449,6 +454,43 @@ export function registerRulesTools(server: McpServer, ctx: PgToolContext) {
       } else if (hasV2) {
         if (conditions !== undefined) condsObj = conditions;
         if (actions !== undefined) actionsObj = actions;
+      }
+
+      // GH #341 follow-up — the union schema validates the v2 SHAPE, but not
+      // WHOSE ids are inside it. Mirror REST PUT /api/rules: re-validate a
+      // filled record_investment_op action, then cross-tenant FK guard every
+      // id referenced in actions[] (set_category.categoryId, set_account.
+      // accountId, set_portfolio_holding.holdingId, create_transfer.
+      // destAccountId, the record_investment_op FKs) and in account
+      // conditions. Without this a rule could be saved pointing at another
+      // user's row — an IDOR-shaped write once the rule later fires. Runs
+      // BEFORE encryptRuleFields (the guard reads plaintext ids). The legacy
+      // branch above needs no guard: its category resolves via a user-scoped
+      // query. ctx.db IS the `@/db` proxy on the HTTP surface, so the shared
+      // verifyOwnership hits the same database.
+      if (hasV2 && (actionsObj !== undefined || condsObj !== undefined)) {
+        const v2Actions = (actionsObj ?? []) as ActionType[];
+        for (const a of v2Actions) {
+          if (a.kind !== "record_investment_op") continue;
+          const code = validateInvestmentOpAction(a);
+          if (code) return err(`Investment-op action (${a.op}) is incomplete: ${code}`);
+        }
+        const fks = collectActionFKs(v2Actions);
+        if (condsObj !== undefined) {
+          for (const c of (condsObj as ConditionGroupType).all) {
+            if (c.field === "account") fks.accountIds.push(c.accountId);
+          }
+        }
+        try {
+          await verifyOwnership(userId, fks);
+        } catch (e) {
+          if (e instanceof OwnershipError) {
+            // Same anti-enumeration shape as REST's 404 — "not found", never
+            // "belongs to someone else".
+            return err(`${e.kind} id(s) not found: ${e.missingIds.join(", ")}`);
+          }
+          throw e;
+        }
       }
 
       // Encrypt sensitive free-text (name + payee/note/tags values + rename/tags)
