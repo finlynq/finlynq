@@ -23,7 +23,7 @@ import { safeAccountName } from "@/lib/safe-name";
 import { getReconcileSummary } from "@/lib/reconcile/summary";
 import { getReconcileHiddenAccountIds } from "@/lib/reconcile/hidden-accounts";
 import { getHoldingsValueByAccount } from "@/lib/holdings-value";
-import { applyInvestmentMarketOverlay } from "../../../../../mcp-server/investment-balance-overlay";
+import { applyInvestmentMarketOverlay } from "@/lib/accounts/investment-balance-overlay";
 import { safeErrorMessage, logApiError } from "@/lib/validate";
 
 export const dynamic = "force-dynamic";

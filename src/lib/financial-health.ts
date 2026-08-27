@@ -33,8 +33,14 @@
  * Queries are over plaintext columns (`categories.type`, `accounts.type`,
  * `accounts.group`, `accounts.is_investment`, `transactions.amount`,
  * `transactions.date`, `transactions.currency`, `accounts.currency`,
- * `budgets.amount`, `budgets.month`) — no DEK required. `dek` is accepted as
- * an opt-in parameter for future extensions but is unused today.
+ * `budgets.amount`, `budgets.month`) — no DEK required to SCORE.
+ *
+ * `dek` IS used (2026-08-27): the money totals value investment accounts at
+ * market through the shared `applyInvestmentMarketOverlay`, which needs the DEK
+ * to decrypt holding symbols before pricing. Without one the totals fall back
+ * to ledger and `netWorthBasis: "ledger"` says so. The DTI numerator stays
+ * DEK-free by construction (see health/debt-service.ts) so the ratio itself is
+ * identical on every surface.
  */
 
 import { sql } from "drizzle-orm";
@@ -42,7 +48,13 @@ import { calculateAgeOfMoney } from "./age-of-money";
 import { getRate } from "./fx-service";
 import { tagAmount, type TaggedAmount } from "../../mcp-server/currency-tagging";
 import { isCashGroup } from "./accounts/groups";
-import { computeDebtService, type DebtServiceLoan } from "./health/debt-service";
+import { applyInvestmentMarketOverlay } from "./accounts/investment-balance-overlay";
+import { getHoldingsValueByAccount, verifyHoldingDecryptHealth } from "./holdings-value";
+import {
+  computeDebtService,
+  type DebtServiceLoan,
+  type UntrackedLiabilityAccount,
+} from "./health/debt-service";
 
 /**
  * Transaction `kind`s that are NEVER debt service, excluded from the DTI
@@ -146,12 +158,28 @@ export type HealthPayload = {
    */
   savingsRatePct: number | null;
   dti: { pct: number | null; reliable: boolean };
+  /**
+   * How the money totals were valued — `"market"` when investment accounts were
+   * marked to market through the shared overlay (the normal web/OAuth case),
+   * `"ledger"` (net contributions) when no usable DEK was available to price
+   * holdings. Callers MUST label the totals with this rather than assuming one,
+   * and `netWorthNote` explains a `"ledger"` fallback in words.
+   */
+  netWorthBasis: "market" | "ledger";
+  netWorthNote?: string;
 };
 
 export type CalculateFinancialHealthArgs = {
   db: DbLike;
   userId: string;
-  /** Accepted for future use (decryption queries). Today every query is plaintext. */
+  /**
+   * Required to value investment accounts at MARKET. Every query here is over
+   * plaintext columns, but the shared net-worth overlay needs the DEK to
+   * decrypt holding symbols before pricing them; without one the money totals
+   * fall back to ledger (net contributions) and `netWorthBasis` says so. Pass
+   * the caller's real DEK whenever there is one — the DTI numerator stays
+   * DEK-free either way, so the score itself never differs between surfaces.
+   */
   dek: Buffer | null;
   reportingCurrency: string;
 };
@@ -173,7 +201,7 @@ function gradeFor(score: number): HealthPayload["grade"] {
 export async function calculateFinancialHealth(
   args: CalculateFinancialHealthArgs,
 ): Promise<HealthPayload> {
-  const { db, userId, reportingCurrency } = args;
+  const { db, userId, dek, reportingCurrency } = args;
   const reporting = reportingCurrency.toUpperCase();
 
   const now = new Date();
@@ -315,7 +343,9 @@ export async function calculateFinancialHealth(
   // write-off is rare enough not to justify re-introducing a filter that
   // silently deletes real payments.
   const untrackedRows = asRows(await db.execute(sql`
-    SELECT COALESCE(t.currency, a.currency) AS currency,
+    SELECT a.id AS account_id,
+           a.currency AS account_currency,
+           COALESCE(t.currency, a.currency) AS currency,
            SUM(t.amount) AS total
     FROM transactions t
     JOIN accounts a ON a.id = t.account_id
@@ -328,23 +358,81 @@ export async function calculateFinancialHealth(
         WHERE l.user_id = ${userId} AND l.account_id = a.id
           AND t.date >= l.start_date
       )
-    GROUP BY COALESCE(t.currency, a.currency)
-  `)) as Array<{ currency: string | null; total: number | string }>;
+    GROUP BY a.id, a.currency, COALESCE(t.currency, a.currency)
+  `)) as Array<{
+    account_id: number | string;
+    account_currency: string | null;
+    currency: string | null;
+    total: number | string;
+  }>;
+
+  // Balance owed by each liability account at BOTH ends of the window — the
+  // input to the pay-in-full cap (see health/debt-service.ts). Liability
+  // balances are stored NEGATIVE-when-owed, so the sums are flipped below.
+  //
+  // Both endpoints, not just the opening balance: a card opened inside the
+  // window has an opening balance of 0 while genuinely carrying debt today,
+  // and capping on the opening balance alone would erase it.
+  const liabilityBalanceRows = asRows(await db.execute(sql`
+    SELECT a.id AS account_id, a.currency,
+           COALESCE(SUM(t.amount) FILTER (WHERE t.date < ${twelveStart}), 0) AS opening_balance,
+           COALESCE(SUM(t.amount), 0) AS closing_balance
+    FROM accounts a
+    LEFT JOIN transactions t
+      ON t.account_id = a.id AND t.user_id = ${userId} AND t.date <= ${today}
+    WHERE a.user_id = ${userId} AND a.type = 'L'
+    GROUP BY a.id, a.currency
+  `)) as Array<{
+    account_id: number | string;
+    currency: string | null;
+    opening_balance: number | string;
+    closing_balance: number | string;
+  }>;
+
+  const owedByAccount = new Map<number, { start: number; end: number }>();
+  for (const r of liabilityBalanceRows) {
+    owedByAccount.set(Number(r.account_id), {
+      // Negative-when-owed → positive-when-owed; a credit balance clamps to 0.
+      start: Math.max(0, -Number(r.opening_balance)),
+      end: Math.max(0, -Number(r.closing_balance)),
+    });
+  }
+
+  // Collapse the per-(account, currency) payment rows into one entry per
+  // account, which is the grain the pay-in-full cap is applied at.
+  const untrackedByAccount = new Map<number, UntrackedLiabilityAccount>();
+  for (const r of untrackedRows) {
+    const accountId = Number(r.account_id);
+    let entry = untrackedByAccount.get(accountId);
+    if (!entry) {
+      const owed = owedByAccount.get(accountId);
+      entry = {
+        accountId,
+        currency: r.account_currency,
+        payments: [],
+        owedAtWindowStart: owed?.start ?? 0,
+        owedAtWindowEnd: owed?.end ?? 0,
+      };
+      untrackedByAccount.set(accountId, entry);
+    }
+    entry.payments.push({ currency: r.currency, total: Number(r.total) });
+  }
+  const untrackedLiabilities = [...untrackedByAccount.values()];
 
   // Pre-resolve every rate the pure calculator will need — `convert` must be
   // synchronous, and fxFor is async.
   const debtCurrencies = new Set<string>();
   for (const l of debtLoans) debtCurrencies.add(String(l.currency ?? reporting));
-  for (const r of untrackedRows) debtCurrencies.add(String(r.currency ?? reporting));
+  for (const a of untrackedLiabilities) {
+    debtCurrencies.add(String(a.currency ?? reporting));
+    for (const p of a.payments) debtCurrencies.add(String(p.currency ?? reporting));
+  }
   const debtRates = new Map<string, number>();
   for (const cur of debtCurrencies) debtRates.set(cur, await fxFor(cur));
 
   const debtService = computeDebtService({
     loans: debtLoans,
-    untrackedPayments: untrackedRows.map((r) => ({
-      currency: r.currency,
-      total: Number(r.total),
-    })),
+    untrackedLiabilities,
     windowStart: twelveStart,
     windowEnd: today,
     convert: (amount, currency) =>
@@ -366,9 +454,9 @@ export async function calculateFinancialHealth(
   // A scheduled numerator cannot blow up that way, and keeping a blunt guard
   // would silently drop the component again for anyone whose liabilities are
   // small relative to a year of payments (a nearly-repaid loan). `reliable`
-  // now carries a MEANINGFUL caveat instead: false when any of the numerator
-  // came from the realized path, which over-counts a card transactor who pays
-  // in full each month.
+  // now carries a MEANINGFUL caveat instead: false when at least one revolving
+  // account hit the pay-in-full cap, i.e. we ESTIMATED its debt service from
+  // the balance it carries rather than measuring it from payments.
   const dtiReliable = debtService.reliable;
   const dtiDetail =
     dtiRatio !== null
@@ -378,20 +466,55 @@ export async function calculateFinancialHealth(
         : "No income data (12m)";
 
   // ── 3. Emergency Fund + 4. Net Worth Trend (account-balance roll-up) ──
-  // Today's balances per account.
+  //
+  // NET WORTH IS ONE CALCULATION FOR THE WHOLE APP (2026-08-27). Every account
+  // balance goes through the shared `applyInvestmentMarketOverlay`, the same
+  // helper behind the dashboard, the Reports balance sheet, the reconcile
+  // summary, the built-in chat, and the MCP balance tools — so this score can
+  // no longer disagree with the number on the screen next to it.
+  //
+  // What it fixes: a raw `SUM(transactions.amount)` on an INVESTMENT account is
+  // net contributions, not market value (a buy writes a +stock / −cash pair
+  // that nets to zero, and a realized gain cancels the same way). Reported by
+  // the user 2026-08-27: the health card showed C$485,714 next to a dashboard
+  // reading C$589,864 on identical data — a six-figure gap that was entirely
+  // unrealized investment gains this calculator could not see.
   const balances = asRows(await db.execute(sql`
-    SELECT a.type, a."group", a.currency, a.is_investment,
+    SELECT a.id, a.type, a."group", a.currency, a.is_investment,
            COALESCE(SUM(t.amount), 0) AS balance
     FROM accounts a LEFT JOIN transactions t ON a.id = t.account_id AND t.user_id = ${userId}
     WHERE a.user_id = ${userId}
     GROUP BY a.id, a.type, a."group", a.currency, a.is_investment
-  `)) as Array<{ type: string; group: string; currency: string | null; is_investment: boolean | null; balance: number | string }>;
+  `)) as Array<{ id: number | string; type: string; group: string; currency: string | null; is_investment: boolean | null; balance: number | string }>;
+
+  // The overlay is DEK-gated by construction: with `dek == null` (a `pf_` MCP
+  // API key) it never prices — an undecryptable symbol would be valued at
+  // qty×1 — and returns ledger balances plus an explanatory note. The
+  // `verifyHoldingDecryptHealth` probe does the same for a present-but-stale
+  // DEK (FINLYNQ-281), so a wrong key degrades to ledger rather than emitting
+  // silently-wrong money.
+  const marked = await applyInvestmentMarketOverlay(
+    balances.map((b) => ({
+      id: Number(b.id),
+      currency: String(b.currency ?? reporting),
+      isInvestment: b.is_investment === true,
+      ledgerBalance: Number(b.balance),
+    })),
+    dek,
+    () => getHoldingsValueByAccount(userId, dek),
+    () => verifyHoldingDecryptHealth(userId, dek),
+  );
+  const netWorthBasis: "market" | "ledger" = marked.marketApplied ? "market" : "ledger";
 
   let totalLiabilities = 0;
   let liquidAssets = 0;
-  for (const b of balances) {
+  for (let i = 0; i < balances.length; i++) {
+    const b = balances[i];
     const fx = await fxFor(String(b.currency ?? reporting));
-    const converted = Number(b.balance) * fx;
+    // Liability and cash accounts are never `is_investment`, so the overlay
+    // returns their ledger balance unchanged — these two totals are unaffected
+    // by the market pass, and only net worth below actually moves.
+    const converted = (marked.rows[i]?.balance ?? Number(b.balance)) * fx;
     if (b.type === "L") totalLiabilities += Math.abs(converted);
     if (b.type === "A") {
       if (b.is_investment !== true && isCashGroup(b.group)) {
@@ -423,21 +546,42 @@ export async function calculateFinancialHealth(
   const ninetyDaysAgo = new Date(now.getTime() - 90 * 86400000);
   const ninetyDaysAgoStr = ninetyDaysAgo.toISOString().split("T")[0];
   const balancesPast = asRows(await db.execute(sql`
-    SELECT a.currency, COALESCE(SUM(t.amount), 0) AS balance
+    SELECT a.id, a.currency, a.is_investment, COALESCE(SUM(t.amount), 0) AS balance
     FROM accounts a LEFT JOIN transactions t ON a.id = t.account_id AND t.user_id = ${userId} AND t.date <= ${ninetyDaysAgoStr}
     WHERE a.user_id = ${userId}
-    GROUP BY a.id, a.currency
-  `)) as Array<{ currency: string | null; balance: number | string }>;
+    GROUP BY a.id, a.currency, a.is_investment
+  `)) as Array<{ id: number | string; currency: string | null; is_investment: boolean | null; balance: number | string }>;
+
+  // BOTH ENDS OF THE TREND MUST SHARE ONE BASIS. Marking today to market while
+  // leaving the 90-day-ago figure at ledger would report the entire unrealized
+  // gain as if it were three months of movement — a basis shift dressed up as
+  // growth. So the past side is marked to market too, priced AS OF that date,
+  // and only when the overlay actually ran today (a DEK-less or stale-DEK
+  // caller keeps both ends on ledger, which is at least self-consistent).
+  const markedPast = marked.marketApplied
+    ? await applyInvestmentMarketOverlay(
+        balancesPast.map((b) => ({
+          id: Number(b.id),
+          currency: String(b.currency ?? reporting),
+          isInvestment: b.is_investment === true,
+          ledgerBalance: Number(b.balance),
+        })),
+        dek,
+        () => getHoldingsValueByAccount(userId, dek, { asOfDate: ninetyDaysAgoStr }),
+      )
+    : null;
 
   let nwToday = 0;
   let nwPast = 0;
-  for (const b of balances) {
+  for (let i = 0; i < balances.length; i++) {
+    const b = balances[i];
     const fx = await fxFor(String(b.currency ?? reporting));
-    nwToday += Number(b.balance) * fx;
+    nwToday += (marked.rows[i]?.balance ?? Number(b.balance)) * fx;
   }
-  for (const b of balancesPast) {
+  for (let i = 0; i < balancesPast.length; i++) {
+    const b = balancesPast[i];
     const fx = await fxFor(String(b.currency ?? reporting));
-    nwPast += Number(b.balance) * fx;
+    nwPast += (markedPast?.rows[i]?.balance ?? Number(b.balance)) * fx;
   }
 
   // "Not enough history" detection — oldest tx must be ≥60 days back.
@@ -530,7 +674,7 @@ export async function calculateFinancialHealth(
       scoreRaw: dtiScore,
       weightCanonical: HEALTH_WEIGHTS.dti,
       detail: !dtiReliable
-        ? `${dtiDetail} — includes card payments, which overstate debt service if you pay in full`
+        ? `${dtiDetail} — card payments above the balance carried are counted as spending, not debt service`
         : dtiDetail,
       excluded: false,
       excludeReason: undefined,
@@ -623,6 +767,8 @@ export async function calculateFinancialHealth(
     reportingCurrency: reporting,
     savingsRatePct,
     dti: { pct: dtiPct, reliable: dtiReliable },
+    netWorthBasis,
+    netWorthNote: marked.note,
     totals: {
       totalIncome3m: tagAmount(totalIncome, reporting, "reporting"),
       totalExpenses3m: tagAmount(totalExpenses, reporting, "reporting"),

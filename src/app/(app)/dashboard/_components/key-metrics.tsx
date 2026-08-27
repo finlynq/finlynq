@@ -54,13 +54,22 @@ export function KeyMetrics({ health }: { health: HealthData | null }) {
       label: "Debt-to-Income",
       icon: Scale,
       value: dtiPct != null ? `${dtiPct}%` : "—",
-      tone: dtiPct == null || !dtiReliable ? NEUTRAL : toneForDti(dtiPct),
+      // Only a MISSING figure is painted neutral. `reliable:false` used to mean
+      // "this number is probably inflated by card spend"; since 2026-08-27 it
+      // means the opposite — a revolving account was capped at the balance it
+      // carries, so the figure is the CORRECTED one. Greying it out would tell
+      // the user to distrust the better number.
+      tone: dtiPct == null ? NEUTRAL : toneForDti(dtiPct),
       sub:
         dtiPct == null
           ? "No income data yet"
           : dtiReliable
             ? "debt payments vs income · last 12 months"
-            : "approximate · verify your debt payments",
+            // 2026-08-27: `reliable:false` now means a revolving account was
+            // capped at the balance it carries because payments exceeded it —
+            // the pay-in-full case. Say that, rather than the old "go check
+            // your data", which pointed the user at nothing actionable.
+            : "cards paid in full excluded · last 12 months",
     },
   ];
 

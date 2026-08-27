@@ -69,6 +69,16 @@ export type HealthData = {
   // src/lib/financial-health.ts). Optional here since older payloads omit them.
   savingsRatePct?: number | null;
   dti?: { pct: number | null; reliable: boolean };
+  /**
+   * How the money totals above were valued (2026-08-27). `"market"` means
+   * investment accounts were marked to market through the same shared overlay
+   * the dashboard tiles use, so `netWorthToday` ties to the Total Net Worth
+   * headline. `"ledger"` means no usable decryption key was available to price
+   * holdings, so investment accounts are net CONTRIBUTIONS — `netWorthNote`
+   * explains it. Optional: an older server omits both.
+   */
+  netWorthBasis?: "market" | "ledger";
+  netWorthNote?: string;
 };
 
 export type SpotlightItem = {

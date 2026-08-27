@@ -117,14 +117,48 @@ describe("DTI numerator predicate (GH #333)", () => {
   });
 
   it("keeps the DEK-free contract", () => {
-    // The MCP caller passes dek:null, so a DEK-dependent branch would give the
-    // same user a different DTI on the dashboard than in their AI assistant.
+    // A DEK-dependent branch in the NUMERATOR would give the same user a
+    // different DTI on the dashboard than in their AI assistant. (The money
+    // totals below it DO use the dek to mark investment accounts to market —
+    // that is a different question, and it does not move this ratio — so the
+    // slice ends where the numerator does.)
     const dtiBlock = code.slice(
       code.indexOf("const incomeRows"),
-      code.indexOf("const avgMonthlyExpenses"),
+      // `code` has comments stripped, so anchor on the first statement of the
+      // balances block rather than on its section header.
+      code.indexOf("const balances = asRows("),
     );
+    expect(dtiBlock.length).toBeGreaterThan(0);
     expect(dtiBlock).not.toContain("name_lookup");
     expect(dtiBlock).not.toContain("decryptName");
     expect(dtiBlock).not.toContain("dek");
+  });
+});
+
+describe("DTI credit-card treatment (2026-08-27)", () => {
+  it("groups untracked liability payments PER ACCOUNT, not per currency", () => {
+    // The pay-in-full cap is meaningless on a currency-grouped aggregate: a
+    // transactor's headroom would absorb a revolver's excess. `a.id` in the
+    // GROUP BY is what makes the cap applicable at all.
+    expect(code).toContain("GROUP BY a.id, a.currency, COALESCE(t.currency, a.currency)");
+    expect(code).toContain("untrackedLiabilities");
+    expect(code).not.toContain("untrackedPayments:");
+  });
+
+  it("reads the balance owed at BOTH window endpoints", () => {
+    // Opening balance alone would zero out a card opened inside the window
+    // that is genuinely carrying debt today; closing balance alone would
+    // wrongly credit a debt that was already repaid before the window.
+    expect(code).toContain("FILTER (WHERE t.date < ${twelveStart})");
+    expect(code).toContain("owedAtWindowStart");
+    expect(code).toContain("owedAtWindowEnd");
+  });
+
+  it("flips liability balances to positive-when-owed before capping", () => {
+    // Liabilities are stored NEGATIVE-when-owed. Handing the raw sum to the
+    // cap would make every carried balance read as 0 and silently delete the
+    // whole realized path — the flattering direction, again.
+    expect(code).toContain("start: Math.max(0, -Number(r.opening_balance))");
+    expect(code).toContain("end: Math.max(0, -Number(r.closing_balance))");
   });
 });
