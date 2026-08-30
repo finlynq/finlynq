@@ -2,7 +2,6 @@ import { NextRequest, NextResponse } from "next/server";
 import { getTransactions, getTransactionCount, createTransaction, updateTransaction, getAccountById, type TxSortFilter } from "@/lib/queries";
 import { requireAuth } from "@/lib/auth/require-auth";
 import { requireEncryption } from "@/lib/auth/require-encryption";
-import { getDEK } from "@/lib/crypto/dek-cache";
 import { encryptTxWrite, decryptTxRows, filterDecryptedBySearch, nameLookup, decryptName } from "@/lib/crypto/encrypted-columns";
 import { decryptField } from "@/lib/crypto/envelope";
 import { invalidateUser as invalidateUserTxCache } from "@/lib/mcp/user-tx-cache";
@@ -91,10 +90,15 @@ export async function GET(request: NextRequest) {
   // `v1:...` ciphertext, which is ugly but recoverable (re-login
   // repopulates the DEK cache), whereas 423-ing the whole transactions
   // page blocks the user entirely.
+  //
+  // Take the DEK from `auth.context`, which every strategy populates: the
+  // session cache for cookie auth (account.ts), and the api_key_dek unwrap
+  // for Bearer `pf_...` callers (api-key.ts). Re-deriving it from `sessionId`
+  // here dropped the DEK for API-key and OAuth clients -- which have no
+  // session -- so every row came back as `v1:` ciphertext for them.
   const auth = await requireAuth(request);
   if (!auth.authenticated) return auth.response;
-  const { userId, sessionId } = auth.context;
-  const dek = sessionId ? getDEK(sessionId, userId) : null;
+  const { userId, dek } = auth.context;
 
   const params = request.nextUrl.searchParams;
   const search = params.get("search") ?? undefined;

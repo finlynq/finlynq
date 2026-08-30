@@ -2,7 +2,6 @@
 import { and, eq, ne } from "drizzle-orm";
 import { db, schema } from "@/db";
 import { requireAuth } from "@/lib/auth/require-auth";
-import { getDEK } from "@/lib/crypto/dek-cache";
 import { decryptTxRows, decryptName } from "@/lib/crypto/encrypted-columns";
 import { decryptField } from "@/lib/crypto/envelope";
 
@@ -21,8 +20,7 @@ import { decryptField } from "@/lib/crypto/envelope";
 export async function GET(request: NextRequest) {
   const auth = await requireAuth(request);
   if (!auth.authenticated) return auth.response;
-  const { userId, sessionId } = auth.context;
-  const dek = sessionId ? getDEK(sessionId, userId) : null;
+  const { userId, dek } = auth.context;
 
   const params = request.nextUrl.searchParams;
   const linkId = params.get("linkId");
