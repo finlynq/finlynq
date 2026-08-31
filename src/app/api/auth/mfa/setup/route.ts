@@ -106,6 +106,10 @@ export async function POST(request: NextRequest) {
         // Need the DEK to encrypt the TOTP seed at rest. Enabling MFA requires
         // an active encrypted session; send the user to re-login if the DEK
         // is missing (stale deploy cache, legacy unencrypted account, etc.).
+        //
+        // SESSION-DEK-REQUIRED: deliberately NOT auth.context.dek. A live browser session
+        // is the point — enrolling an authenticator must not be reachable with a
+        // bearer token alone, so an API-key caller fails closed with 423 here.
         const dek = sessionId ? getDEK(sessionId, userId) : null;
         if (!dek) {
           return NextResponse.json(
@@ -143,6 +147,8 @@ export async function POST(request: NextRequest) {
           );
         }
         // Decrypt stored MFA secret with the session DEK.
+        // SESSION-DEK-REQUIRED: see the enable branch above — disabling MFA must require a
+        // live login, not just a bearer token.
         const dek = sessionId ? getDEK(sessionId, userId) : null;
         if (!dek) {
           return NextResponse.json(

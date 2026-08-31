@@ -122,6 +122,8 @@ export async function POST(request: NextRequest) {
           { status: 401 }
         );
       }
+      // SESSION-DEK-REQUIRED: deliberately NOT auth.context.dek — same reasoning as
+      // wipe-account. Account deletion requires a live login, not a bearer token.
       const dek = sessionId ? getDEK(sessionId, userId) : null;
       if (!dek) {
         // Without the session DEK we can't decrypt the MFA secret — bounce

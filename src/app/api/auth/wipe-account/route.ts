@@ -131,6 +131,9 @@ export async function POST(request: NextRequest) {
           { status: 401 }
         );
       }
+      // SESSION-DEK-REQUIRED: deliberately NOT auth.context.dek. Wiping every row in the
+      // account must require a live browser session on top of password + TOTP;
+      // an API key is a long-lived bearer token with no expiry and no scopes.
       const dek = sessionId ? getDEK(sessionId, userId) : null;
       if (!dek) {
         // Without the session DEK we can't decrypt the MFA secret — bounce

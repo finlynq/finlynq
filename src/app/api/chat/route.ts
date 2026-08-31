@@ -3,7 +3,6 @@ import { processMessage } from "@/lib/chat-engine";
 import { z } from "zod";
 import { validateBody, safeErrorMessage, logApiError } from "@/lib/validate";
 import { requireAuth } from "@/lib/auth/require-auth";
-import { getDEK } from "@/lib/crypto/dek-cache";
 import { requireDevMode } from "@/lib/require-dev-mode";
 
 const MAX_MESSAGE_LEN = 2000;
@@ -17,8 +16,7 @@ export async function POST(request: NextRequest) {
   if (!auth.authenticated) return auth.response;
   const devGuard = await requireDevMode(request);
   if (devGuard) return devGuard;
-  const { userId, sessionId } = auth.context;
-  const dek = sessionId ? getDEK(sessionId, userId) : null;
+  const { userId, dek } = auth.context;
   try {
     const body = await request.json();
     const parsed = validateBody(body, postSchema);

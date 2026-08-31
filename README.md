@@ -48,7 +48,11 @@ First-party Model Context Protocol server with 54 HTTP / 89 stdio tools covering
 
 - **Claude Web / Mobile / Cursor / Windsurf** — OAuth 2.1 + Dynamic Client Registration. Paste `https://finlynq.com/mcp` into the connector setup; no config file.
 - **Claude Desktop (stdio)** — point at `mcp-server/index.ts` with `PF_USER_ID` in the env block.
-- **Bearer API key** — generate a `pf_*` token in Settings → API Keys for scripts and REST clients.
+- **Bearer API key** — generate a `pf_*` token in Settings → API Keys. Works for the MCP
+  endpoint and for the REST routes under `/api/`. Note that a `pf_*` key is unscoped and
+  does not expire until you regenerate it, so treat it as full access to your account; the
+  REST surface is what the web and mobile apps consume and its response shapes are not a
+  stability guarantee — MCP is the supported integration surface.
 
 Submitted to the [Anthropic Connectors Directory](https://www.anthropic.com/news/connectors-directory) on 2026-05-09. Full client setup, tool catalog, and the brokerage-statement recipe live in the [Connect Your AI guide](https://finlynq.com/mcp-guide).
 

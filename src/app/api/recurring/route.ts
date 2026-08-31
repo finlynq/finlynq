@@ -3,7 +3,6 @@ import { db, schema } from "@/db";
 import { eq, and, sql } from "drizzle-orm";
 import { detectRecurringTransactions, forecastCashFlow } from "@/lib/recurring-detector";
 import { requireAuth } from "@/lib/auth/require-auth";
-import { getDEK } from "@/lib/crypto/dek-cache";
 import { tryDecryptField } from "@/lib/crypto/envelope";
 import { requireDevMode } from "@/lib/require-dev-mode";
 import { getDisplayCurrency, getRateMap, convertWithRateMap } from "@/lib/fx-service";
@@ -13,8 +12,7 @@ export async function GET(request: NextRequest) {
   if (!auth.authenticated) return auth.response;
   const devGuard = await requireDevMode(request);
   if (devGuard) return devGuard;
-  const { userId, sessionId } = auth.context;
-  const dek = sessionId ? getDEK(sessionId, userId) : null;
+  const { userId, dek } = auth.context;
   // Fetch last 12 months of transactions with payees
   const cutoff = new Date();
   cutoff.setFullYear(cutoff.getFullYear() - 1);

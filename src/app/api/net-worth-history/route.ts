@@ -7,7 +7,7 @@
  * substituted by the live holdings aggregator so the latest point matches the
  * dashboard hero net-worth number exactly.
  *
- * Mirrors the head of /api/dashboard (requireAuth → getDEK → getDisplayCurrency
+ * Mirrors the head of /api/dashboard (requireAuth → auth.context.dek → getDisplayCurrency
  * → getRateMap). The heavy lifting is the pure `buildNetWorthHistory` core.
  *
  * plan/net-worth-over-time.md Part A.
@@ -15,7 +15,6 @@
 
 import { NextRequest, NextResponse } from "next/server";
 import { requireAuth } from "@/lib/auth/require-auth";
-import { getDEK } from "@/lib/crypto/dek-cache";
 import {
   getRateMap,
   getDisplayCurrency,
@@ -248,8 +247,7 @@ export function GET(request: NextRequest) {
 async function handleGet(request: NextRequest) {
   const auth = await requireAuth(request);
   if (!auth.authenticated) return auth.response;
-  const { userId, sessionId } = auth.context;
-  const dek = sessionId ? getDEK(sessionId, userId) : null;
+  const { userId, dek } = auth.context;
 
   const params = request.nextUrl.searchParams;
   const period = parsePeriod(params.get("period"));

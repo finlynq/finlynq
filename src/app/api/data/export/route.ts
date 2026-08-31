@@ -3,7 +3,6 @@ import { db, schema } from "@/db";
 import { eq, inArray } from "drizzle-orm";
 import { pbkdf2Sync, randomBytes, createCipheriv } from "crypto";
 import { requireAuth } from "@/lib/auth/require-auth";
-import { getDEK } from "@/lib/crypto/dek-cache";
 import { tryDecryptField } from "@/lib/crypto/envelope";
 import { decryptStaged } from "@/lib/crypto/staging-envelope";
 import { decryptStagingMeta } from "@/lib/crypto/staging-metadata";
@@ -169,10 +168,9 @@ export async function GET(request: NextRequest) {
 async function handleExport(request: NextRequest) {
   const auth = await requireAuth(request);
   if (!auth.authenticated) return auth.response;
-  const { userId, sessionId } = auth.context;
+  const { userId, dek } = auth.context;
   // Export tolerates a missing DEK â€” without it, encrypted rows ship as
   // ciphertext (still restoreable into the same account).
-  const dek = sessionId ? getDEK(sessionId, userId) : null;
 
   try {
     const [

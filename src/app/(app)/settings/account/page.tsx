@@ -336,7 +336,7 @@ export default function AccountSettingsPage() {
             </div>
             <div>
               <CardTitle className="text-base">API Key</CardTitle>
-              <CardDescription>Use this key to connect AI assistants via MCP</CardDescription>
+              <CardDescription>Connect AI assistants via MCP, or call the REST API from scripts</CardDescription>
             </div>
           </div>
         </CardHeader>
@@ -397,7 +397,9 @@ export default function AccountSettingsPage() {
             )}
           </div>
           <p className="text-xs text-muted-foreground">
-            Regenerating invalidates your current key — update any connected MCP clients.
+            This key is unscoped and never expires — it grants full read and write access to your
+            account until you regenerate it. Regenerating invalidates the current key; update any
+            connected MCP clients and scripts.
           </p>
         </CardContent>
       </Card>

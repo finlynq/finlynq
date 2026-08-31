@@ -2,7 +2,6 @@
 import { db, schema } from "@/db";
 import { sql, eq, and, gte, lte, inArray } from "drizzle-orm";
 import { requireAuth } from "@/lib/auth/require-auth";
-import { getDEK } from "@/lib/crypto/dek-cache";
 import { decryptName } from "@/lib/crypto/encrypted-columns";
 import { getRateMap, convertWithRateMap, getDisplayCurrency } from "@/lib/fx-service";
 import { selfHealReportingAmounts } from "@/lib/fx/reporting-amount";
@@ -19,8 +18,7 @@ import { applyInvestmentMarketOverlay } from "@/lib/accounts/investment-balance-
 
 export async function GET(request: NextRequest) {
   const auth = await requireAuth(request); if (!auth.authenticated) return auth.response;
-  const { userId, sessionId } = auth.context;
-  const dek = sessionId ? getDEK(sessionId, userId) : null;
+  const { userId, dek } = auth.context;
   const params = request.nextUrl.searchParams;
   const type = params.get("type") ?? "income-statement";
   const startDate = params.get("startDate") ?? `${new Date().getFullYear()}-01-01`;

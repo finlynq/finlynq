@@ -624,6 +624,39 @@ const INVARIANTS: InvariantConfig[] = [
     requiredHelper: /\bresolveOrCreateSecurity\s*\(/,
     helperName: "resolveOrCreateSecurity (securities master edit-path re-resolve)",
   },
+  {
+    // API-key DEK resolution (GH #343, 2026-08-31) — a route handler must take
+    // the DEK from `auth.context.dek`, NOT re-derive it with
+    // `sessionId ? getDEK(sessionId, userId) : null`.
+    //
+    // `requireAuth` already resolved it for BOTH strategies: the session cache
+    // for cookie auth (strategies/account.ts) and the `settings.api_key_dek`
+    // unwrap for Bearer `pf_...` callers (strategies/api-key.ts). The api-key
+    // strategy synthesizes `sessionId = "apikey:<userId>"` purely as an audit
+    // label — it is never a key in the DEK cache — so the ternary takes its
+    // truthy branch and MISSES, yielding null. `decryptTxRows` then passes rows
+    // through unchanged, so the caller gets a 200 carrying `v1:` ciphertext,
+    // null account/category names, and (worse) an empty result set for
+    // `?search=` — a wrong answer, not a refusal.
+    //
+    // A file may keep the pattern by carrying a `SESSION-DEK-REQUIRED:` comment
+    // explaining why a LIVE BROWSER SESSION is the point. That is the case for
+    // the MFA step-up paths (mfa/setup, wipe-account, delete-account,
+    // admin/users): there the DEK decrypts the TOTP secret and the session
+    // requirement is a deliberate second factor, so switching them to
+    // `auth.context.dek` would let a bearer token that lives in a plaintext
+    // config file stand in for a live login on the account's most destructive
+    // operations. settings/api-key MINTS the api_key_dek wrap and must not
+    // bootstrap it from an API key.
+    id: "dek-from-auth-context",
+    description:
+      "API route handlers must read the DEK from auth.context.dek, not re-derive it from sessionId (API-key callers have no session → silent ciphertext)",
+    fileGlobs: ["src/app/api/"],
+    writeSite: /const\s+dek\s*=\s*sessionId\s*\?\s*getDEK\(/,
+    requiredHelper: /SESSION-DEK-REQUIRED/,
+    helperName:
+      "auth.context.dek (or a `SESSION-DEK-REQUIRED:` comment justifying why a live browser session is required here)",
+  },
 ];
 
 // ---------------------------------------------------------------------------

@@ -4,7 +4,7 @@
  * Floating banner for the newest unread *pinned* announcement. Driven by
  * GET /api/announcements (NOT localStorage — read state lives server-side in
  * announcement_reads so it's consistent across devices). Dismiss POSTs
- * /api/announcements/[id]/read. Styled like DonationBanner; positioned bottom-
+ * /api/announcements/[id]/read. Positioned bottom-
  * left so it doesn't collide with the bottom-right donation card.
  */
 
