@@ -11,7 +11,6 @@ import { selfHealReportingAmounts, convertReportingSlice } from "@/lib/fx/report
 import { getHoldingsValueByAccount, verifyHoldingDecryptHealth } from "@/lib/holdings-value";
 import { applyInvestmentMarketOverlay } from "@/lib/accounts/investment-balance-overlay";
 import { requireAuth } from "@/lib/auth/require-auth";
-import { getDEK } from "@/lib/crypto/dek-cache";
 import { logApiError } from "@/lib/validate";
 import { decryptNamedRows, decryptName } from "@/lib/crypto/encrypted-columns";
 import { safeName } from "@/lib/safe-name";
@@ -25,12 +24,11 @@ export function GET(request: NextRequest) {
 
 async function handleGet(request: NextRequest) {
   // Dashboard must stay accessible even when the session has no cached DEK
-  // (e.g. first request after a server restart). `getDEK` returns null in
+  // (e.g. first request after a server restart). `auth.context.dek` is null in
   // that case; downstream decryption falls through to plaintext/legacy rows.
   const auth = await requireAuth(request);
   if (!auth.authenticated) return auth.response;
-  const { userId, sessionId } = auth.context;
-  const dek = sessionId ? getDEK(sessionId, userId) : null;
+  const { userId, dek } = auth.context;
   const params = request.nextUrl.searchParams;
   const displayCurrency = await getDisplayCurrency(userId, params.get("currency"));
   const includeArchived = params.get("includeArchived") === "1";

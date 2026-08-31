@@ -10,7 +10,6 @@
 
 import { NextRequest, NextResponse } from "next/server";
 import { requireAuth } from "@/lib/auth/require-auth";
-import { getDEK } from "@/lib/crypto/dek-cache";
 import { getDisplayCurrency } from "@/lib/fx-service";
 import { selfHealReportingAmounts } from "@/lib/fx/reporting-amount";
 import {
@@ -22,8 +21,7 @@ import {
 export async function GET(request: NextRequest) {
   const auth = await requireAuth(request);
   if (!auth.authenticated) return auth.response;
-  const { userId, sessionId } = auth.context;
-  const dek = sessionId ? getDEK(sessionId, userId) : null;
+  const { userId, dek } = auth.context;
 
   const params = request.nextUrl.searchParams;
   const groupByRaw = params.get("groupBy");

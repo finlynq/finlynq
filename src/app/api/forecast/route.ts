@@ -6,14 +6,12 @@ import { getDisplayCurrency, getRateMap, convertWithRateMap } from "@/lib/fx-ser
 import { round2 } from "@/lib/utils/number";
 import { CASH_GROUP_NAMES } from "@/lib/accounts/groups";
 import { requireAuth } from "@/lib/auth/require-auth";
-import { getDEK } from "@/lib/crypto/dek-cache";
 import { tryDecryptField } from "@/lib/crypto/envelope";
 
 export async function GET(request: NextRequest) {
   const auth = await requireAuth(request);
   if (!auth.authenticated) return auth.response;
-  const { userId, sessionId } = auth.context;
-  const dek = sessionId ? getDEK(sessionId, userId) : null;
+  const { userId, dek } = auth.context;
   const days = parseInt(request.nextUrl.searchParams.get("days") ?? "90");
 
   // Detect recurring transactions

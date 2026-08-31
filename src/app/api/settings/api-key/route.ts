@@ -20,6 +20,9 @@ export async function GET(request: NextRequest) {
   const auth = await requireAuth(request);
   if (!auth.authenticated) return auth.response;
   const { userId, sessionId } = auth.context;
+  // SESSION-DEK-REQUIRED: deliberately NOT auth.context.dek. This route MINTS the
+  // settings.api_key_dek wrap, so it must never bootstrap that wrap from an
+  // API key — the new key's DEK has to come from a real login.
   const dek = sessionId ? getDEK(sessionId, userId) : undefined;
 
   const apiKey = await getOrCreateApiKey(userId, dek ?? undefined);

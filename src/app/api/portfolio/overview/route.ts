@@ -7,7 +7,6 @@ import { getCryptoPrices, symbolToCoinGeckoId } from "@/lib/crypto-service";
 import { getLatestFxRate, convertCurrency, getDisplayCurrency, getRate } from "@/lib/fx-service";
 import { isMetalCurrency, isCryptoSymbol, isCurrencyCodeSymbol } from "@/lib/fx/supported-currencies";
 import { requireAuth } from "@/lib/auth/require-auth";
-import { getDEK } from "@/lib/crypto/dek-cache";
 import { decryptNamedRows } from "@/lib/crypto/encrypted-columns";
 import { clusterFromAssetType } from "@/lib/securities/canonical";
 import { securitiesReadEnabledForUser } from "@/lib/securities/flag";
@@ -28,8 +27,7 @@ export function GET(request: NextRequest) {
 async function handleGet(request: NextRequest) {
   const auth = await requireAuth(request);
   if (!auth.authenticated) return auth.response;
-  const { userId, sessionId } = auth.context;
-  const dek = sessionId ? getDEK(sessionId, userId) : null;
+  const { userId, dek } = auth.context;
   const displayCurrency = await getDisplayCurrency(userId, request.nextUrl.searchParams.get("currency"));
   const todayDate = todayISO();
 

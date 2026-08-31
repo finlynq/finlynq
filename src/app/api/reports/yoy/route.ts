@@ -2,7 +2,6 @@ import { NextRequest, NextResponse } from "next/server";
 import { db, schema } from "@/db";
 import { sql, and, gte, lte, eq, inArray } from "drizzle-orm";
 import { requireAuth } from "@/lib/auth/require-auth";
-import { getDEK } from "@/lib/crypto/dek-cache";
 import { decryptName } from "@/lib/crypto/encrypted-columns";
 import { getDisplayCurrency, getRateMap, convertWithRateMap } from "@/lib/fx-service";
 import { selfHealReportingAmounts } from "@/lib/fx/reporting-amount";
@@ -10,11 +9,10 @@ import { parseAccountIdsParam, ACCOUNT_IDS_PARAM } from "@/lib/reports/account-f
 
 export async function GET(request: NextRequest) {
   const auth = await requireAuth(request); if (!auth.authenticated) return auth.response;
-  const { userId, sessionId } = auth.context;
+  const { userId, dek } = auth.context;
   // Soft-DEK policy mirrors the income-statement endpoint: legacy plaintext
   // stays readable when the cache is cold; Phase-3 NULL'd rows degrade to
   // "Uncategorized" rather than 423-ing the whole report.
-  const dek = sessionId ? getDEK(sessionId, userId) : null;
   const params = request.nextUrl.searchParams;
   const currentYear = new Date().getFullYear();
   const year1 = parseInt(params.get("year1") ?? String(currentYear - 1), 10);

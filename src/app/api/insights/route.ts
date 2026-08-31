@@ -5,7 +5,6 @@ import { getCurrentMonth } from "@/lib/currency";
 import { getDisplayCurrency, getRateMap } from "@/lib/fx-service";
 import { convertReportingSlice } from "@/lib/fx/reporting-amount";
 import { requireAuth } from "@/lib/auth/require-auth";
-import { getDEK } from "@/lib/crypto/dek-cache";
 import { tryDecryptField } from "@/lib/crypto/envelope";
 import { requireDevMode } from "@/lib/require-dev-mode";
 
@@ -14,8 +13,7 @@ export async function GET(request: NextRequest) {
   if (!auth.authenticated) return auth.response;
   const devGuard = await requireDevMode(request);
   if (devGuard) return devGuard;
-  const { userId, sessionId } = auth.context;
-  const dek = sessionId ? getDEK(sessionId, userId) : null;
+  const { userId, dek } = auth.context;
   const now = new Date();
   const startDate = `${now.getFullYear() - 1}-01-01`;
   const endDate = `${now.getFullYear()}-12-31`;

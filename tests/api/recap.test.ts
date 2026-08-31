@@ -1,5 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 
+const MOCK_DEK = Buffer.alloc(32, 0xaa);
+
 vi.mock("@/lib/auth/require-auth", () => ({
   requireAuth: vi.fn(async () => ({ authenticated: true, context: { userId: "default", method: "passphrase" as const, mfaVerified: false, dek: Buffer.alloc(32, 0xaa), sessionId: "test-session-jti" } })),
 }));
@@ -39,15 +41,16 @@ describe("API /api/recap", () => {
   it("passes date parameter", async () => {
     const req = createMockRequest("http://localhost:3000/api/recap?date=2024-01-15");
     await GET(req);
-    // The route also forwards the session DEK as a 3rd arg (null in this test —
-    // no cached DEK) for payee decryption.
-    expect(mockGenerateWeeklyRecap).toHaveBeenCalledWith("default", "2024-01-15", null);
+    // The route forwards `auth.context.dek` as the 3rd arg for payee decryption.
+    // It must be the DEK requireAuth resolved — NOT a re-derivation from
+    // sessionId, which yields null for API-key callers (GH #343).
+    expect(mockGenerateWeeklyRecap).toHaveBeenCalledWith("default", "2024-01-15", MOCK_DEK);
   });
 
   it("uses undefined for missing date", async () => {
     const req = createMockRequest("http://localhost:3000/api/recap");
     await GET(req);
-    expect(mockGenerateWeeklyRecap).toHaveBeenCalledWith("default", undefined, null);
+    expect(mockGenerateWeeklyRecap).toHaveBeenCalledWith("default", undefined, MOCK_DEK);
   });
 });
 

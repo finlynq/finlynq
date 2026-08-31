@@ -2,7 +2,6 @@ import { NextRequest, NextResponse } from "next/server";
 import { db, schema } from "@/db";
 import { sql, and, gte, lte, eq, inArray } from "drizzle-orm";
 import { requireAuth } from "@/lib/auth/require-auth";
-import { getDEK } from "@/lib/crypto/dek-cache";
 import { decryptName } from "@/lib/crypto/encrypted-columns";
 import { getDisplayCurrency, getRateMap, convertWithRateMap } from "@/lib/fx-service";
 import { selfHealReportingAmounts } from "@/lib/fx/reporting-amount";
@@ -44,11 +43,10 @@ function formatPeriodLabel(key: string, period: Period): string {
 export async function GET(request: NextRequest) {
   const auth = await requireAuth(request);
   if (!auth.authenticated) return auth.response;
-  const { userId, sessionId } = auth.context;
+  const { userId, dek } = auth.context;
   // DEK is needed to resolve `categories.name_ct` for Phase-3 NULL'd users.
   // Soft-fail (null DEK) keeps legacy plaintext readable; encrypted-only
   // rows surface as "" and roll up under the existing "Uncategorized" bucket.
-  const dek = sessionId ? getDEK(sessionId, userId) : null;
 
   const params = request.nextUrl.searchParams;
   const startDate = params.get("startDate") ?? `${new Date().getFullYear()}-01-01`;

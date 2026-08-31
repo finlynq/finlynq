@@ -178,6 +178,9 @@ export async function PATCH(request: NextRequest) {
           { status: 403 }
         );
       }
+      // SESSION-DEK-REQUIRED: deliberately NOT auth.context.dek. This decrypts the ADMIN's
+      // TOTP secret for a step-up check before an admin mutation; the live-session
+      // requirement is a factor, not an accident.
       const dek = sessionId ? getDEK(sessionId, userId) : null;
       if (!dek) {
         return NextResponse.json(
