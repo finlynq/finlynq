@@ -24,11 +24,18 @@ import { parseSaveError } from "@/lib/save-error";
 import { cn } from "@/lib/utils";
 import { formatCurrency } from "@/lib/currency";
 import { safeName } from "@/lib/safe-name";
-import { Landmark, Loader2, RefreshCw, CheckCircle2, ExternalLink, Link2, Plus, Clock } from "lucide-react";
+import { Landmark, Loader2, RefreshCw, CheckCircle2, ExternalLink, Link2, Plus, Clock, AlertTriangle } from "lucide-react";
+
+interface AutoSyncStatus {
+  ok: boolean;
+  at: string;
+  message?: string;
+}
 
 interface SimplefinStatus {
   connected: boolean;
   lastSyncAt: string | null;
+  lastAutoSync: AutoSyncStatus | null;
 }
 
 interface PendingCharge {
@@ -340,6 +347,26 @@ export default function BankFeedsSettingsPage() {
                   </Button>
                 </div>
               </div>
+
+              {/* ── Background (login-triggered) auto-sync last failed ── */}
+              {status.lastAutoSync && !status.lastAutoSync.ok && (
+                <div className="flex items-start gap-2 rounded-lg border border-amber-600/30 bg-amber-50 dark:bg-amber-950/30 px-3 py-2 text-xs text-amber-700 dark:text-amber-400">
+                  <AlertTriangle className="h-3.5 w-3.5 shrink-0 mt-0.5" />
+                  <span>
+                    Automatic sync last failed {formatDateTime(status.lastAutoSync.at)}
+                    {status.lastAutoSync.message ? `: ${status.lastAutoSync.message}` : ""}. It
+                    will retry the next time you log in, or you can{" "}
+                    <button
+                      type="button"
+                      onClick={handleDetect}
+                      className="underline underline-offset-2 hover:text-amber-900 dark:hover:text-amber-300"
+                    >
+                      sync now
+                    </button>
+                    .
+                  </span>
+                </div>
+              )}
 
               {detectError && <p className="text-sm text-destructive">{detectError}</p>}
               {stageError && <p className="text-sm text-destructive">{stageError}</p>}
