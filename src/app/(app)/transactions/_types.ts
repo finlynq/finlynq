@@ -85,6 +85,10 @@ export type Account = {
   // investment account (Section E #10). Always present on the wire because
   // getAccounts uses select()-all on the row.
   isInvestment?: boolean;
+  /** The lookups fetch asks for archived accounts too (see `useLookups`), so
+   *  filter chips and the account filter can name an archived account and the
+   *  `accountType` filter can resolve its ids. Create-mode pickers drop them. */
+  archived?: boolean;
 };
 
 export type Category = { id: number; name: string; type: string; group: string };

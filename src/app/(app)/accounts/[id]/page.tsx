@@ -37,6 +37,7 @@ import { Button } from "@/components/ui/button";
 import { Label } from "@/components/ui/label";
 import { Combobox, type ComboboxItemShape } from "@/components/ui/combobox";
 import { ConfirmDialog } from "@/components/ui/confirm-dialog";
+import { ErrorState } from "@/components/error-state";
 import { useActiveCurrencies } from "@/lib/hooks/useActiveCurrencies";
 import { ModePicker } from "@/components/inbox/mode-picker";
 import { ImportPrefsPicker } from "@/components/inbox/import-prefs-picker";
@@ -104,6 +105,9 @@ export default function AccountDetailPage() {
   const router = useRouter();
   const [account, setAccount] = useState<Account | null>(null);
   const [accounts, setAccounts] = useState<Account[]>([]);
+  /** The account lookup finished and produced nothing (missing id, not yours,
+   *  or the request failed) — as opposed to "still in flight". */
+  const [loadFailed, setLoadFailed] = useState(false);
   // Transaction COUNT for the stat card. The list itself is rendered by the
   // embedded <TransactionsWorkspace> below (its own SWR fetch); this page only
   // needs the total for the header tile.
@@ -272,8 +276,11 @@ export default function AccountDetailPage() {
 
   // Re-fetch this account fresh (decrypted name/alias) after a save — avoids
   // depending on the PUT response shape and keeps `accounts` in sync.
+  // `includeArchived=1` is load-bearing here as well as on the initial load:
+  // archiving from this page's own Edit dialog re-runs this, and without it the
+  // account the user just archived would vanish from under them.
   function reloadAccount() {
-    fetch("/api/accounts")
+    fetch("/api/accounts?includeArchived=1")
       .then((r) => r.json())
       .then((accts: Account[]) => {
         if (!Array.isArray(accts)) return;
@@ -303,13 +310,27 @@ export default function AccountDetailPage() {
   }
 
   useEffect(() => {
-    fetch("/api/accounts")
+    // `includeArchived=1`: GET /api/accounts hides archived accounts by default
+    // (it is the lists/pickers source), but THIS page is the detail view — and
+    // the only place the Unarchive button lives. Without the flag an archived
+    // account was never found, `account` stayed null, and the render guard
+    // below sat on its loading skeleton forever: the account became both
+    // unviewable and permanently un-unarchivable from the web UI.
+    setLoadFailed(false);
+    fetch("/api/accounts?includeArchived=1")
       .then((r) => r.json())
       .then((accts: Account[]) => {
         setAccounts(Array.isArray(accts) ? accts : []);
-        const found = accts.find((a: Account) => a.id === Number(id));
+        const found = Array.isArray(accts)
+          ? accts.find((a: Account) => a.id === Number(id))
+          : undefined;
         setAccount(found ?? null);
-      });
+        // Distinguish "still loading" from "no such account". Both used to
+        // render the same endless skeleton, so a bad/foreign id looked
+        // identical to a slow network.
+        if (!found) setLoadFailed(true);
+      })
+      .catch(() => setLoadFailed(true));
 
     // Fetch the computed balance from the dashboard API. For investment
     // accounts, balance = market value of holdings; cashFlowBasis is the
@@ -340,6 +361,18 @@ export default function AccountDetailPage() {
     else if (hash === "#import-prefs") openEdit("import");
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [account]);
+
+  if (!account && loadFailed) return (
+    <div className="space-y-6">
+      <Link href="/accounts" className="inline-flex items-center gap-1.5 text-sm text-muted-foreground hover:text-foreground transition-colors">
+        <ArrowLeft className="h-4 w-4" /> Back to Accounts
+      </Link>
+      <ErrorState
+        title="Account not found"
+        message="This account doesn't exist, or it isn't one of yours."
+      />
+    </div>
+  );
 
   if (!account) return (
     <div className="space-y-6">
@@ -404,6 +437,9 @@ export default function AccountDetailPage() {
               </Badge>
               {isInvestment && (
                 <Badge variant="secondary" className="text-[10px]">Investment</Badge>
+              )}
+              {account.archived === true && (
+                <Badge variant="secondary" className="text-[10px]">Archived</Badge>
               )}
             </div>
           </div>

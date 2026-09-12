@@ -112,7 +112,10 @@ async function holdingsAccountIds(userId: string): Promise<Set<number>> {
 /**
  * Delete orphaned `source='cash'` snapshot rows — rows for accounts that should
  * have NO cash snapshots because they carry no cash transactions in scope (the
- * transactions were deleted, or the account was archived). `keepAccountIds` is
+ * transactions were deleted). Archiving an account is NOT such a case — an
+ * archived account keeps its transactions and stays in `keepAccountIds`, so its
+ * history survives; the deltas/fingerprint queries deliberately no longer
+ * filter `archived` for exactly this reason. `keepAccountIds` is
  * the set the cash builder is about to (re)write from live deltas; ANY other
  * account with a cash snapshot is stale.
  *

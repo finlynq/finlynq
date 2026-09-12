@@ -8,7 +8,9 @@ export async function GET(request: NextRequest) {
   const { userId } = auth.context;
   const target = await getDisplayCurrency(userId, request.nextUrl.searchParams.get("target"));
 
-  const balances = await getAccountBalances(userId);
+  // Archived accounts included: their currency still needs a rate, since their
+  // balances now stay in net worth and in the history chart.
+  const balances = await getAccountBalances(userId, { includeArchived: true });
   const activeCurrencies = await getActiveCurrencies();
 
   // Build rate map: every active currency → target

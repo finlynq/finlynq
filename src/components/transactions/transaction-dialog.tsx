@@ -84,6 +84,11 @@ export interface DialogAccount {
   alias?: string | null;
   type?: string | null;
   isInvestment?: boolean;
+  /** Archived accounts are hidden when CREATING but kept when EDITING — an
+   *  existing transaction may well belong to one, and dropping it from the
+   *  list would blank out the account select on an otherwise valid row. Same
+   *  `!!editId ||` idiom as `isInvestment`. */
+  archived?: boolean;
 }
 
 export interface DialogCategory {
@@ -1281,7 +1286,7 @@ export function TransactionDialog({
                   }}
                   items={sortAccount(
                     accounts
-                      .filter((a) => !!editId || a.isInvestment !== true)
+                      .filter((a) => !!editId || (a.isInvestment !== true && a.archived !== true))
                       .map((a): ComboboxItemShape => ({ value: String(a.id), label: a.name })),
                     (a) => Number(a.value),
                     (a, z) => (a.label ?? "").localeCompare(z.label ?? ""),
@@ -1751,7 +1756,7 @@ export function TransactionDialog({
                       onValueChange={(v) => setTransferForm({ ...transferForm, fromAccountId: v })}
                       items={sortAccount(
                         accounts
-                          .filter((a) => !!editId || a.isInvestment !== true)
+                          .filter((a) => !!editId || (a.isInvestment !== true && a.archived !== true))
                           .filter((a) => allowSameAccount || String(a.id) !== transferForm.toAccountId)
                           .map((a): ComboboxItemShape => ({
                             value: String(a.id),
@@ -1773,7 +1778,7 @@ export function TransactionDialog({
                       onValueChange={(v) => setTransferForm({ ...transferForm, toAccountId: v })}
                       items={sortAccount(
                         accounts
-                          .filter((a) => !!editId || a.isInvestment !== true)
+                          .filter((a) => !!editId || (a.isInvestment !== true && a.archived !== true))
                           .filter((a) => allowSameAccount || String(a.id) !== transferForm.fromAccountId)
                           .map((a): ComboboxItemShape => ({
                             value: String(a.id),

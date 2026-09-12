@@ -131,7 +131,10 @@ const handleNetWorth: IntentHandler = async (_msg, ctx) => {
 
   // Reuse the canonical balance query (same one the dashboard uses) — it
   // carries `isInvestment`, which the hand-rolled query here did not.
-  const balances = await getAccountBalances(ctx.userId);
+  // `includeArchived: true` — archived is a list/picker flag, so chat's net
+  // worth must count those balances or it contradicts the dashboard hero and
+  // MCP `get_net_worth` on the same question.
+  const balances = await getAccountBalances(ctx.userId, { includeArchived: true });
   // "Account balance for accounts with holdings = holdings.value" (FINLYNQ-151),
   // applied through the ONE shared overlay every net-worth surface uses rather
   // than a local ternary. An investment account's SUM(transactions.amount) is

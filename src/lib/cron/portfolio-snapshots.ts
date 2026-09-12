@@ -20,7 +20,7 @@
  * Idempotent on the (user_id, snap_date, COALESCE(account_id, -1)) unique index.
  */
 
-import { and, eq } from "drizzle-orm";
+import { eq } from "drizzle-orm";
 import { db, schema } from "@/db";
 import { buildDailySnapshot } from "@/lib/portfolio/snapshots/builder";
 import { rebuildCashSnapshots } from "@/lib/portfolio/snapshots/cash-builder";
@@ -99,15 +99,13 @@ export async function runSnapshotsCron(
   }
 
   // ─── Cash pass (DEK-free — real work, broadened to ALL cash users) ───
+  // Archived accounts are NOT excluded: they still carry balances that belong
+  // in the history series, and a user whose only cash accounts are archived
+  // would otherwise never be picked up by the nightly roll-forward at all.
   const cashUsers = await db
     .selectDistinct({ userId: schema.accounts.userId })
     .from(schema.accounts)
-    .where(
-      and(
-        eq(schema.accounts.isInvestment, false),
-        eq(schema.accounts.archived, false),
-      ),
-    );
+    .where(eq(schema.accounts.isInvestment, false));
 
   const windowStart = subtractDaysUTC(date, CASH_CRON_WINDOW_DAYS);
   let cashUsersProcessed = 0;

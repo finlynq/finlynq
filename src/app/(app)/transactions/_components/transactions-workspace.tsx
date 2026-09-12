@@ -757,8 +757,14 @@ export function TransactionsWorkspace({
                 onValueChange={(v) => { setFilters({ ...filters, accountId: v === "all" ? "" : v }); setPage(0); }}
                 items={[
                   { value: "all", label: "All accounts" } satisfies ComboboxItemShape,
+                  // Archived accounts ARE offered here — their transactions are
+                  // in the list, so you must be able to filter to them. Tagged
+                  // the same way the reports account filter tags them.
                   ...sortAccount(
-                    accounts.map((a): ComboboxItemShape => ({ value: String(a.id), label: formatAccountLabel(a) })),
+                    accounts.map((a): ComboboxItemShape => ({
+                      value: String(a.id),
+                      label: formatAccountLabel(a) + (a.archived ? " (archived)" : ""),
+                    })),
                     (a) => Number(a.value),
                     (a, z) => (a.label ?? "").localeCompare(z.label ?? ""),
                   ),
@@ -989,8 +995,13 @@ export function TransactionsWorkspace({
               <Combobox
                 value={bulkAccountId}
                 onValueChange={(v) => setBulkAccountId(v)}
+                // Bulk "move to account" DESTINATION — archived accounts are
+                // excluded: this writes new rows into whatever you pick, and an
+                // archived account is one you've said you're done using.
                 items={sortAccount(
-                  accounts.map((a): ComboboxItemShape => ({ value: String(a.id), label: a.name })),
+                  accounts
+                    .filter((a) => a.archived !== true)
+                    .map((a): ComboboxItemShape => ({ value: String(a.id), label: a.name })),
                   (a) => Number(a.value),
                   (a, z) => (a.label ?? "").localeCompare(z.label ?? ""),
                 )}
