@@ -31,7 +31,13 @@ async function handleGet(request: NextRequest) {
   const { userId, dek } = auth.context;
   const params = request.nextUrl.searchParams;
   const displayCurrency = await getDisplayCurrency(userId, params.get("currency"));
-  const includeArchived = params.get("includeArchived") === "1";
+  // `includeArchived` is accepted for backward compatibility but no longer
+  // gates anything: archived accounts ALWAYS come back now. `archived` is a
+  // list/picker visibility flag, not a claim the money stopped existing, and
+  // this endpoint is the hero net-worth source — omitting them understated it
+  // by the whole archived balance and made the hero disagree with the
+  // net-worth chart. Every row carries `archived`, so a list consumer that
+  // wants to hide them (the /accounts "Show archived" toggle) filters clientside.
 
   // Currency rework Phase 3 — the dashboard is the post-login landing page, so
   // proactively backfill any transaction whose stored reporting_amount is
@@ -51,7 +57,7 @@ async function handleGet(request: NextRequest) {
 
     const rateMap = await getRateMap(displayCurrency, userId);
 
-    const rawBalances = await getAccountBalances(userId, { includeArchived });
+    const rawBalances = await getAccountBalances(userId, { includeArchived: true });
     // Stream D: decrypt accountName + alias before display / currency conversion.
     const balances = decryptNamedRows(rawBalances, dek, {
       accountNameCt: "accountName",

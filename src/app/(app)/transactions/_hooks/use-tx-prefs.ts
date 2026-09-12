@@ -57,8 +57,16 @@ function mergeColPrefs(saved: ColumnPref[] | null | undefined): ColumnPref[] {
  * subtree. Returns the same `{ accounts, categories, holdings }` arrays.
  */
 export function useLookups() {
+  // `includeArchived=1`: the transactions LIST already returns rows from
+  // archived accounts (the query never filtered on `archived`), but this lookup
+  // did — so an archived account was missing from the account filter and the
+  // filter chips, and `buildTransactionQuery`'s `accountType` → account-ids
+  // resolution silently dropped its rows from an Asset/Liability filter.
+  // Create-mode pickers filter archived back out themselves (`!!editId ||` in
+  // TransactionDialog); edit mode keeps them so an archived row still shows
+  // its own account.
   const { data: accounts } = useSWR<Account[]>(
-    swrKey("/api/accounts"),
+    swrKey("/api/accounts?includeArchived=1"),
     softJsonFetcher<Account[]>([]),
     swrListOptions,
   );

@@ -161,11 +161,13 @@ export default function AccountsPage() {
 
   useEffect(() => { loadGroupOrder(); }, []);
 
-  function loadAccounts(includeArchived = showArchived) {
+  // Always fetch EVERY account, archived included — /api/dashboard returns them
+  // unconditionally now, and the totals below need them to match the dashboard
+  // hero and the net-worth chart. "Show archived" is a pure list filter.
+  function loadAccounts() {
     setLoading(true);
     setError(false);
     const params = new URLSearchParams();
-    if (includeArchived) params.set("includeArchived", "1");
     params.set("currency", displayCurrency);
     const url = `/api/dashboard?${params.toString()}`;
     fetch(url)
@@ -177,13 +179,18 @@ export default function AccountsPage() {
       .catch(() => { setError(true); setLoading(false); });
   }
 
-  useEffect(() => { loadAccounts(showArchived);   }, [showArchived, displayCurrency]);
+  useEffect(() => { loadAccounts();   }, [displayCurrency]);
 
-  const assets = accounts.filter((a) => a.accountType === "A");
-  const liabilities = accounts.filter((a) => a.accountType === "L");
-  // Totals always exclude archived, even when the toggle surfaces them in the list.
-  const activeAssets = assets.filter((a) => !a.archived);
-  const activeLiabilities = liabilities.filter((a) => !a.archived);
+  // The toggle hides archived rows from the LIST only.
+  const visible = showArchived ? accounts : accounts.filter((a) => !a.archived);
+  const assets = visible.filter((a) => a.accountType === "A");
+  const liabilities = visible.filter((a) => a.accountType === "L");
+  // Totals INCLUDE archived regardless of the toggle — an archived account's
+  // balance is still the user's money, and excluding it here made this page's
+  // Total Assets / Total Liabilities disagree with both the dashboard hero and
+  // the net-worth chart. Read off the unfiltered `accounts`, not `visible`.
+  const activeAssets = accounts.filter((a) => a.accountType === "A");
+  const activeLiabilities = accounts.filter((a) => a.accountType === "L");
 
   // FINLYNQ-179: the set of group names currently in use, for combobox
   // suggestions (any type) and the management dialog (scoped per type).

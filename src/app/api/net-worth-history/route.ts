@@ -278,9 +278,14 @@ async function handleGet(request: NextRequest) {
       accountId ?? undefined,
     );
 
-    // Today's live override. Restrict to the SAME non-archived account sets the
-    // dashboard hero sums over, so the latest point matches.
-    const balances = await getAccountBalances(userId);
+    // Today's live override. Must cover the SAME account set the dashboard hero
+    // sums over, so the latest point matches — which now includes ARCHIVED
+    // accounts. Omitting them here did two things: today's point dropped the
+    // archived balance (a cliff at the right edge of the chart), and the
+    // `accountNameById` map below — built from these same rows — had no entry,
+    // so an archived account that DID reach the series (investment snapshots
+    // never filtered archived) rendered in the breakdown as "Account #609".
+    const balances = await getAccountBalances(userId, { includeArchived: true });
     const investmentAccountIds = new Set(
       balances.filter((b) => Boolean(b.isInvestment)).map((b) => b.accountId),
     );

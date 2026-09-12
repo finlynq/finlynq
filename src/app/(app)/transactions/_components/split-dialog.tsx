@@ -18,7 +18,7 @@ import { formatCurrency } from "@/lib/currency";
 import { Plus, Trash2, Scissors } from "lucide-react";
 
 type Category = { id: number; name: string; type: string; group: string };
-type Account = { id: number; name: string; currency: string };
+type Account = { id: number; name: string; currency: string; archived?: boolean };
 
 type SplitRow = {
   categoryId: string;
@@ -213,7 +213,12 @@ export function SplitDialog({
                   value={row.accountId}
                   onValueChange={(v) => updateRow(i, "accountId", v)}
                   items={sortAccount(
-                    accounts.map((a): ComboboxItemShape => ({ value: String(a.id), label: a.name })),
+                    // Destination picker for a NEW split leg — archived
+                    // accounts excluded (the lookups fetch now includes them
+                    // so the filters can name them).
+                    accounts
+                      .filter((a) => a.archived !== true)
+                      .map((a): ComboboxItemShape => ({ value: String(a.id), label: a.name })),
                     (a) => Number(a.value),
                     (a, z) => (a.label ?? "").localeCompare(z.label ?? ""),
                   )}
