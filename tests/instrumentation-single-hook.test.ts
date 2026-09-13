@@ -80,7 +80,6 @@ describe("instrumentation hook", () => {
       "startMcpIdempotencySweepTimer",
       "startRevokedJtisSweepTimer",
       "startExpireDcrClientsTimer",
-      "runSnapshotsCron",
     ]) {
       expect(mentions(src, fn), fn).toBe(true);
     }

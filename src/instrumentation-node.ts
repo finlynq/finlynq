@@ -127,28 +127,13 @@ export async function registerNodeJobs(): Promise<void> {
       console.error("[instrumentation] Failed to start expire-dcr-clients cron:", err);
     }
 
-    // Nightly portfolio snapshots (plan/portfolio-lots-and-performance.md
-    // Phase 3). Registered only in the old unloaded src hook before PR #346,
-    // so it had never run. 24h setInterval; the first run fires 24h after
-    // boot. The investment pass is inert without a DEK (buildDailySnapshot
-    // no-ops); the cash pass is DEK-free real work — rolls today's cash
-    // snapshot forward and refreshes a stale recent window. There is
-    // intentionally NO background snapshot-DRAIN cron: back-dated investment
-    // edits are rebuilt by the DEK-bearing chart-load self-heal + the manual
-    // rebuild button.
-    try {
-      const { runSnapshotsCron } = await import("./lib/cron/portfolio-snapshots");
-      const ONE_DAY = 24 * 60 * 60 * 1000;
-      const timer: NodeJS.Timeout = setInterval(() => {
-        runSnapshotsCron().catch((err) => {
-          console.error("[portfolio-snapshots-cron] run failed:", err);
-        });
-      }, ONE_DAY);
-      if (timer.unref) timer.unref();
-      console.log("[instrumentation] portfolio-snapshots cron registered (24h interval)");
-    } catch (err) {
-      console.error("[instrumentation] Failed to register portfolio-snapshots cron:", err);
-    }
+    // (No nightly portfolio-snapshots cron — deliberately.) src/lib/cron/
+    // portfolio-snapshots.ts exists but has never been scheduled: it lived only
+    // in the old, never-loaded src hook, and nothing turned out to depend on
+    // it. Net-worth history is kept current by the chart-load self-heal and
+    // the manual rebuild button. Scheduling it would add a new nightly write
+    // pass over every cash user, so do that as its own reviewed change
+    // (owner decision, PR #346, 2026-09-13).
 
     // (No inbound-email poll cron.) Under the DevManager push relay
     // (INBOUND_EMAIL_PROVIDER=self-smtp) the app holds no Mailpit credentials
