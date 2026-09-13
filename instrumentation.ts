@@ -5,6 +5,14 @@
  * is set (managed hosted edition). In self-hosted mode (no DATABASE_URL),
  * this is a no-op and the existing SQLite connection flow handles initialization.
  *
+ * This is the ONLY instrumentation hook — register every server-boot job HERE.
+ * A second copy at `src/instrumentation.ts` used to exist and was never loaded,
+ * so the portfolio-snapshots cron registered only there never ran. Next also
+ * compiles this file for the edge runtime, so the NEXT_RUNTIME guard below must
+ * stay ahead of every import (a Node-only import in an unguarded hook crashes
+ * it and 500s every request). tests/instrumentation-single-hook.test.ts pins
+ * both rules.
+ *
  * Docs: https://nextjs.org/docs/app/building-your-application/optimizing/instrumentation
  */
 
@@ -127,6 +135,27 @@ export async function register() {
       startExpireDcrClientsTimer();
     } catch (err) {
       console.error("[instrumentation] Failed to start expire-dcr-clients cron:", err);
+    }
+
+    // Nightly portfolio snapshots (plan/portfolio-lots-and-performance.md
+    // Phase 3). 24h setInterval; the first run fires 24h after boot. The
+    // investment pass is inert without a DEK (buildDailySnapshot no-ops); the
+    // cash pass is DEK-free real work — rolls today's cash snapshot forward and
+    // refreshes a stale recent window. There is intentionally NO background
+    // snapshot-DRAIN cron: back-dated investment edits are rebuilt by the
+    // DEK-bearing chart-load self-heal + the manual rebuild button.
+    try {
+      const { runSnapshotsCron } = await import("./src/lib/cron/portfolio-snapshots");
+      const ONE_DAY = 24 * 60 * 60 * 1000;
+      const timer: NodeJS.Timeout = setInterval(() => {
+        runSnapshotsCron().catch((err) => {
+          console.error("[portfolio-snapshots-cron] run failed:", err);
+        });
+      }, ONE_DAY);
+      if (timer.unref) timer.unref();
+      console.log("[instrumentation] portfolio-snapshots cron registered (24h interval)");
+    } catch (err) {
+      console.error("[instrumentation] Failed to register portfolio-snapshots cron:", err);
     }
 
     // (No inbound-email poll cron.) Under the DevManager push relay

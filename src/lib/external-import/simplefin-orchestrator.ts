@@ -39,16 +39,26 @@ import {
 } from "./credentials";
 import { replacePendingTransactions } from "./simplefin-pending";
 import { simplefin } from "@finlynq/import-connectors";
+import { normalizeDbRows } from "@/lib/db-utils";
+import {
+  AUTO_SYNC_MIN_INTERVAL_MS,
+  parseSyncStatus,
+  retryStampIso,
+  summarizeSimplefinSyncOutcome,
+  type SimplefinSyncOutcome,
+  type SimplefinSyncStatus,
+  type SimplefinSyncTrigger,
+} from "./simplefin-sync-status";
 
 const CONNECTOR_ID = "simplefin";
 /** Second credential slot: SimpleFIN account id → Finlynq account id (string). */
 const ACCOUNT_MAP_ID = "simplefin:accounts";
 /** How far back to pull on each sync. SimpleFIN keeps ~90 days. */
 const SYNC_LOOKBACK_DAYS = 90;
-/** Min gap between login-triggered auto-syncs per user. */
-const AUTO_SYNC_MIN_INTERVAL_MS = 12 * 60 * 60 * 1000;
-/** Plaintext settings key holding the last auto-sync timestamp (ISO). */
+/** Plaintext settings key holding the login auto-sync throttle timestamp (ISO). */
 const AUTOSYNC_AT_KEY = "connector:simplefin:autosync_at";
+/** Plaintext settings key holding the last sync's outcome (JSON — see simplefin-sync-status.ts). */
+const SYNC_STATUS_KEY = "connector:simplefin:sync_status";
 
 export class SimplefinNotConnectedError extends Error {
   constructor() {
@@ -130,6 +140,8 @@ export interface SimplefinStatus {
   connected: boolean;
   /** ISO timestamp of the most recent connector staging run, or null. */
   lastSyncAt: string | null;
+  /** Outcome of the most recent sync (automatic or manual), or null if none recorded. */
+  lastSync: SimplefinSyncStatus | null;
 }
 
 // ─── Account cache ──────────────────────────────────────────────────────────
@@ -462,7 +474,8 @@ export async function getSimpleFinStatus(userId: string): Promise<SimplefinStatu
         row.receivedAt instanceof Date ? row.receivedAt.toISOString() : String(row.receivedAt);
     }
   }
-  return { connected, lastSyncAt };
+  const lastSync = connected ? await getSyncStatus(userId) : null;
+  return { connected, lastSyncAt, lastSync };
 }
 
 /** Remove the stored access URL + account map. Does not need the DEK. */
@@ -473,16 +486,26 @@ export async function disconnectSimpleFin(userId: string): Promise<void> {
 
 // ─── Login-triggered auto-sync (~12h throttle) ──────────────────────────────
 
-/** Read the last auto-sync timestamp (ms epoch), or 0 if never. Plaintext. */
-async function getAutoSyncAt(userId: string): Promise<number> {
-  const row = await db
-    .select({ value: schema.settings.value })
-    .from(schema.settings)
-    .where(and(eq(schema.settings.key, AUTOSYNC_AT_KEY), eq(schema.settings.userId, userId)))
-    .get();
-  if (!row?.value) return 0;
-  const t = Date.parse(row.value);
-  return Number.isNaN(t) ? 0 : t;
+/**
+ * Atomically claim the auto-sync slot: stamp `now` only when the stored stamp
+ * is older than the throttle (or missing/unparseable). The conditional upsert
+ * is the concurrency guard — web and mobile share one login endpoint, so two
+ * near-simultaneous logins must not both run a full sync.
+ */
+async function claimAutoSyncSlot(userId: string, now: Date): Promise<boolean> {
+  const cutoffIso = new Date(now.getTime() - AUTO_SYNC_MIN_INTERVAL_MS).toISOString();
+  const res = await db.execute(sql`
+    INSERT INTO settings (key, user_id, value)
+    VALUES (${AUTOSYNC_AT_KEY}, ${userId}, ${now.toISOString()})
+    ON CONFLICT (key, user_id) DO UPDATE SET value = EXCLUDED.value
+    WHERE CASE
+      WHEN settings.value ~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}T'
+        THEN settings.value::timestamptz < ${cutoffIso}::timestamptz
+      ELSE TRUE
+    END
+    RETURNING key
+  `);
+  return normalizeDbRows<{ key: string }>(res).length > 0;
 }
 
 /** Upsert the last auto-sync timestamp (plaintext ISO). */
@@ -494,22 +517,75 @@ async function setAutoSyncAt(userId: string, iso: string): Promise<void> {
   `);
 }
 
+/** Read the outcome of the most recent sync (auto or manual), or null. */
+async function getSyncStatus(userId: string): Promise<SimplefinSyncStatus | null> {
+  const row = await db
+    .select({ value: schema.settings.value })
+    .from(schema.settings)
+    .where(and(eq(schema.settings.key, SYNC_STATUS_KEY), eq(schema.settings.userId, userId)))
+    .get();
+  return parseSyncStatus(row?.value);
+}
+
+/** Upsert the most recent sync's outcome (plaintext JSON — see simplefin-sync-status.ts). */
+async function setSyncStatus(userId: string, status: SimplefinSyncStatus): Promise<void> {
+  const value = JSON.stringify(status);
+  await db.execute(sql`
+    INSERT INTO settings (key, user_id, value)
+    VALUES (${SYNC_STATUS_KEY}, ${userId}, ${value})
+    ON CONFLICT (key, user_id) DO UPDATE SET value = EXCLUDED.value
+  `);
+}
+
+/**
+ * Persist a sync's outcome for Settings → Bank Feeds and, for an automatic sync
+ * that failed transiently, re-open the throttle after the short backoff so one
+ * blip doesn't cost 12h. Never throws — the status is best-effort and must not
+ * mask the sync's own result or error.
+ */
+export async function recordSimpleFinSyncOutcome(
+  userId: string,
+  outcome: SimplefinSyncOutcome,
+  trigger: SimplefinSyncTrigger,
+): Promise<void> {
+  const now = new Date();
+  const { status, retrySooner } = summarizeSimplefinSyncOutcome(outcome, trigger, now);
+  try {
+    await setSyncStatus(userId, status);
+    if (trigger === "auto" && retrySooner) {
+      await setAutoSyncAt(userId, retryStampIso(now));
+    }
+  } catch (err) {
+    console.warn(`[simplefin] user=${userId} failed to record sync outcome:`, err);
+  }
+}
+
 /**
  * Sync SimpleFIN in the background iff connected AND the last auto-sync was more
  * than ~12h ago. Only touches ALREADY-MAPPED accounts (empty choices), each
  * advancing per its own mode via the shared pipeline. Returns null when skipped.
- * The timestamp is stamped BEFORE the sync so a slow/failing run doesn't let the
- * next login re-fire immediately.
+ *
+ * The slot is claimed BEFORE the sync, so concurrent logins can't both run it.
+ * A transient failure then re-opens the slot after a 1h backoff instead of
+ * burning the full 12h; a failure that needs the user (rejected credentials)
+ * keeps the throttle. The outcome is recorded either way, so it shows in
+ * Settings → Bank Feeds rather than only in a server log.
  */
 export async function maybeAutoSyncSimpleFin(
   userId: string,
   dek: Buffer,
 ): Promise<SimplefinSyncResult | null> {
   if (!(await hasConnectorCredentials(userId, CONNECTOR_ID))) return null;
-  const last = await getAutoSyncAt(userId);
-  if (Date.now() - last < AUTO_SYNC_MIN_INTERVAL_MS) return null;
-  await setAutoSyncAt(userId, new Date().toISOString());
-  return syncSimpleFin(userId, dek, {});
+  if (!(await claimAutoSyncSlot(userId, new Date()))) return null;
+  let result: SimplefinSyncResult;
+  try {
+    result = await syncSimpleFin(userId, dek, {});
+  } catch (err) {
+    await recordSimpleFinSyncOutcome(userId, { error: err }, "auto");
+    throw err;
+  }
+  await recordSimpleFinSyncOutcome(userId, { result }, "auto");
+  return result;
 }
 
 /**
