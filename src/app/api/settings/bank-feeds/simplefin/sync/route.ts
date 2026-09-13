@@ -2,7 +2,6 @@ import { NextRequest, NextResponse } from "next/server";
 import { requireEncryption } from "@/lib/auth/require-encryption";
 import {
   syncSimpleFin,
-  recordSimpleFinSyncOutcome,
   SimplefinNotConnectedError,
   type SimplefinAccountChoice,
 } from "@/lib/external-import/simplefin-orchestrator";
@@ -35,13 +34,11 @@ export async function POST(request: NextRequest) {
 
   try {
     const result = await syncSimpleFin(auth.userId, auth.dek, choices);
-    await recordSimpleFinSyncOutcome(auth.userId, { result }, "manual");
     return NextResponse.json(result);
   } catch (err) {
     if (err instanceof SimplefinNotConnectedError) {
       return NextResponse.json({ error: "SimpleFIN is not connected" }, { status: 400 });
     }
-    await recordSimpleFinSyncOutcome(auth.userId, { error: err }, "manual");
     if (err instanceof simplefin.SimpleFinApiError) {
       return NextResponse.json({ error: err.message }, { status: 502 });
     }

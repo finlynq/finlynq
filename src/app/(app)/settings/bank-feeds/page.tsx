@@ -24,21 +24,11 @@ import { parseSaveError } from "@/lib/save-error";
 import { cn } from "@/lib/utils";
 import { formatCurrency } from "@/lib/currency";
 import { safeName } from "@/lib/safe-name";
-import { Landmark, Loader2, RefreshCw, CheckCircle2, ExternalLink, Link2, Plus, Clock, AlertTriangle } from "lucide-react";
-
-/** Mirrors SimplefinSyncStatus (src/lib/external-import/simplefin-sync-status.ts). */
-interface SyncStatus {
-  ok: boolean;
-  partial: boolean;
-  trigger: "auto" | "manual";
-  at: string;
-  message?: string;
-}
+import { Landmark, Loader2, RefreshCw, CheckCircle2, ExternalLink, Link2, Plus, Clock } from "lucide-react";
 
 interface SimplefinStatus {
   connected: boolean;
   lastSyncAt: string | null;
-  lastSync: SyncStatus | null;
 }
 
 interface PendingCharge {
@@ -350,36 +340,6 @@ export default function BankFeedsSettingsPage() {
                   </Button>
                 </div>
               </div>
-
-              {/* ── Last sync (automatic or manual) failed or reported problems ── */}
-              {status.lastSync && !status.lastSync.ok && (
-                <div
-                  role="status"
-                  className="flex items-start gap-2 rounded-lg border border-amber-600/30 bg-amber-50 dark:bg-amber-950/30 px-3 py-2 text-xs text-amber-700 dark:text-amber-400"
-                >
-                  <AlertTriangle className="h-3.5 w-3.5 shrink-0 mt-0.5" />
-                  <span>
-                    {status.lastSync.trigger === "auto" ? "Automatic sync" : "Sync"}{" "}
-                    {status.lastSync.partial ? "finished with problems" : "failed"} on{" "}
-                    {formatDateTime(status.lastSync.at)}.
-                    {status.lastSync.message ? ` ${status.lastSync.message}` : ""}
-                    {!preview && (
-                      <>
-                        {" "}
-                        <button
-                          type="button"
-                          onClick={handleDetect}
-                          disabled={detecting}
-                          className="underline underline-offset-2 hover:text-amber-900 dark:hover:text-amber-300 disabled:opacity-50"
-                        >
-                          Sync now
-                        </button>{" "}
-                        to try again.
-                      </>
-                    )}
-                  </span>
-                </div>
-              )}
 
               {detectError && <p className="text-sm text-destructive">{detectError}</p>}
               {stageError && <p className="text-sm text-destructive">{stageError}</p>}
