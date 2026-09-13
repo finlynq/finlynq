@@ -1,25 +1,15 @@
 /**
- * Next.js instrumentation hook — runs once when the server starts.
+ * Node.js-runtime server boot — imported ONLY from src/instrumentation.ts,
+ * inside its NEXT_RUNTIME === "nodejs" branch. Never import this module from
+ * anywhere else: it pulls in pg and other Node-only modules that crash the
+ * edge runtime.
  *
- * Responsible for bootstrapping the PostgreSQL adapter when DATABASE_URL
- * is set (managed hosted edition). In self-hosted mode (no DATABASE_URL),
- * this is a no-op and the existing SQLite connection flow handles initialization.
- *
- * This is the ONLY instrumentation hook — register every server-boot job HERE.
- * A second copy at `src/instrumentation.ts` used to exist and was never loaded,
- * so the portfolio-snapshots cron registered only there never ran. Next also
- * compiles this file for the edge runtime, so the NEXT_RUNTIME guard below must
- * stay ahead of every import (a Node-only import in an unguarded hook crashes
- * it and 500s every request). tests/instrumentation-single-hook.test.ts pins
- * both rules.
- *
- * Docs: https://nextjs.org/docs/app/building-your-application/optimizing/instrumentation
+ * Bootstraps the PostgreSQL adapter when DATABASE_URL is set (managed hosted
+ * edition) and registers every background job. In self-hosted mode (no
+ * DATABASE_URL) it is a no-op and the SQLite flow initializes on first unlock.
  */
 
-export async function register() {
-  // Only runs in the Node.js runtime (not Edge), where native pg is available.
-  if (process.env.NEXT_RUNTIME !== "nodejs") return;
-
+export async function registerNodeJobs(): Promise<void> {
   const databaseUrl = process.env.PF_DATABASE_URL || process.env.DATABASE_URL;
   if (!databaseUrl) {
     // Self-hosted mode — SQLite adapter is initialized on first unlock via the UI.
@@ -29,7 +19,7 @@ export async function register() {
   console.log("[instrumentation] DATABASE_URL detected — initializing PostgreSQL adapter");
 
   try {
-    const { PostgresAdapter, setAdapter, setDialect } = await import("./src/db/index");
+    const { PostgresAdapter, setAdapter, setDialect } = await import("./db/index");
 
     const adapter = new PostgresAdapter();
     await adapter.initialize({
@@ -51,7 +41,7 @@ export async function register() {
     // the page). In-memory + ~1/min DB persist; cleared on restart but the DB
     // rows persist. Best-effort — never block startup.
     try {
-      const { startSystemMetricsSampler } = await import("./src/lib/admin/system-metrics");
+      const { startSystemMetricsSampler } = await import("./lib/admin/system-metrics");
       startSystemMetricsSampler();
     } catch (err) {
       console.error("[instrumentation] Failed to start system-metrics sampler:", err);
@@ -63,7 +53,7 @@ export async function register() {
     // Same pattern for email-import staging + admin inbox trash.
     try {
       const { startEmailCleanupTimer, cleanupExpiredEmailArtifacts } = await import(
-        "./src/lib/email-import/cleanup"
+        "./lib/email-import/cleanup"
       );
       cleanupExpiredEmailArtifacts().catch((err) => {
         console.error("[instrumentation] initial email-import sweep failed:", err);
@@ -78,7 +68,7 @@ export async function register() {
     // src/lib/cron/settle-future-fx.ts.
     try {
       const { startSettleFutureFxTimer, settleFutureFxRates } = await import(
-        "./src/lib/cron/settle-future-fx"
+        "./lib/cron/settle-future-fx"
       );
       settleFutureFxRates().catch((err) => {
         console.error("[instrumentation] initial settle-future-fx sweep failed:", err);
@@ -93,7 +83,7 @@ export async function register() {
     // filters on freshness, so this is purely a table-growth bound.
     try {
       const { startMcpIdempotencySweepTimer, sweepMcpIdempotencyKeys } = await import(
-        "./src/lib/cron/sweep-mcp-idempotency"
+        "./lib/cron/sweep-mcp-idempotency"
       );
       sweepMcpIdempotencyKeys().catch((err) => {
         console.error("[instrumentation] initial sweep-mcp-idempotency failed:", err);
@@ -110,7 +100,7 @@ export async function register() {
     // sweep doesn't need to be more aggressive.
     try {
       const { startRevokedJtisSweepTimer, sweepRevokedJtis } = await import(
-        "./src/lib/cron/sweep-revoked-jtis"
+        "./lib/cron/sweep-revoked-jtis"
       );
       sweepRevokedJtis().catch((err) => {
         console.error("[instrumentation] initial sweep-revoked-jtis failed:", err);
@@ -127,7 +117,7 @@ export async function register() {
     // leftover test clients once their tokens lapse. DEK-free hard delete.
     try {
       const { startExpireDcrClientsTimer, expireInactiveDcrClients } = await import(
-        "./src/lib/cron/expire-dcr-clients"
+        "./lib/cron/expire-dcr-clients"
       );
       expireInactiveDcrClients().catch((err) => {
         console.error("[instrumentation] initial expire-dcr-clients sweep failed:", err);
@@ -138,14 +128,16 @@ export async function register() {
     }
 
     // Nightly portfolio snapshots (plan/portfolio-lots-and-performance.md
-    // Phase 3). 24h setInterval; the first run fires 24h after boot. The
-    // investment pass is inert without a DEK (buildDailySnapshot no-ops); the
-    // cash pass is DEK-free real work — rolls today's cash snapshot forward and
-    // refreshes a stale recent window. There is intentionally NO background
-    // snapshot-DRAIN cron: back-dated investment edits are rebuilt by the
-    // DEK-bearing chart-load self-heal + the manual rebuild button.
+    // Phase 3). Registered only in the old unloaded src hook before PR #346,
+    // so it had never run. 24h setInterval; the first run fires 24h after
+    // boot. The investment pass is inert without a DEK (buildDailySnapshot
+    // no-ops); the cash pass is DEK-free real work — rolls today's cash
+    // snapshot forward and refreshes a stale recent window. There is
+    // intentionally NO background snapshot-DRAIN cron: back-dated investment
+    // edits are rebuilt by the DEK-bearing chart-load self-heal + the manual
+    // rebuild button.
     try {
-      const { runSnapshotsCron } = await import("./src/lib/cron/portfolio-snapshots");
+      const { runSnapshotsCron } = await import("./lib/cron/portfolio-snapshots");
       const ONE_DAY = 24 * 60 * 60 * 1000;
       const timer: NodeJS.Timeout = setInterval(() => {
         runSnapshotsCron().catch((err) => {

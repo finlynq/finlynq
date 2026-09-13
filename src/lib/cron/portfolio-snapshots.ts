@@ -1,7 +1,7 @@
 /**
  * Cron job — roll portfolio snapshots forward for every enrolled user.
  *
- * Started by the root instrumentation.ts with a 24h setInterval. First run
+ * Started by src/instrumentation-node.ts with a 24h setInterval. First run
  * fires 24h after server start; for the 21:00-UTC schedule called out
  * in the plan, follow up with a setTimeout-then-setInterval seed.
  *
