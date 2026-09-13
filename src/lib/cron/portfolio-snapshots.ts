@@ -1,9 +1,12 @@
 /**
  * Cron job — roll portfolio snapshots forward for every enrolled user.
  *
- * Started by src/instrumentation.ts with a 24h setInterval. First run
- * fires 24h after server start; for the 21:00-UTC schedule called out
- * in the plan, follow up with a setTimeout-then-setInterval seed.
+ * NOT CURRENTLY SCHEDULED. It was only ever registered in a src hook that
+ * Next never loaded, so it has never run in any deployment; PR #346 left it
+ * unwired by owner decision (2026-09-13). Net-worth history stays current via
+ * the chart-load self-heal + manual rebuild. Scheduling it is its own change
+ * (register it in src/instrumentation-node.ts); for the 21:00-UTC schedule
+ * called out in the plan, seed with setTimeout-then-setInterval.
  *
  * Two passes:
  *   - INVESTMENT (DEK-bearing only): buildDailySnapshot no-ops without a DEK

@@ -104,12 +104,13 @@ export function registerAccountsTools(server: McpServer, ctx: PgToolContext) {
     accountId?: number;
     account?: string;
     name?: string;
+    type?: "A" | "L";
     group?: string;
     currency?: string;
     note?: string;
     alias?: string;
   }): Promise<ToolResult> {
-    const { accountId, account, name, group, currency, note, alias } = args;
+    const { accountId, account, name, type, group, currency, note, alias } = args;
     if (accountId == null && (account == null || account === "")) {
       return err("Pass `accountId` (numeric) or `account` (name/alias) to identify the account.");
     }
@@ -171,6 +172,7 @@ export function registerAccountsTools(server: McpServer, ctx: PgToolContext) {
       const n = encryptName(dek, name);
       updates.push(sql`name_ct = ${n.ct}`, sql`name_lookup = ${n.lookup}`);
     }
+    if (type !== undefined) updates.push(sql`type = ${type}`);
     if (group !== undefined) updates.push(sql`"group" = ${group}`);
     if (currency !== undefined) updates.push(sql`currency = ${currency}`);
     if (note !== undefined) updates.push(sql`note = ${encNote(note)}`);
@@ -392,7 +394,7 @@ export function registerAccountsTools(server: McpServer, ctx: PgToolContext) {
   registerManageTool(
     server,
     "manage_accounts",
-    "Manage financial accounts: `op` selects add / update / delete / set_mode. add: create an account (name/type A|L, optional currency/group/alias). update: change name/group/currency/note/alias (exact `accountId` or fuzzy `account`). delete: only possible while nothing references the account — transactions, holdings, loans, goals, subscriptions, recurring transactions, splits, snapshots and staged imports each block it, and the call is refused naming the counts (archive the account in the web app instead). TWO-STEP when a token is required (preview cascade counts, then commit); a clean empty account deletes directly. set_mode: set the import pipeline mode (auto|approve|manual).",
+    "Manage financial accounts: `op` selects add / update / delete / set_mode. add: create an account (name/type A|L, optional currency/group/alias). update: change name/type/group/currency/note/alias (exact `accountId` or fuzzy `account`). delete: only possible while nothing references the account — transactions, holdings, loans, goals, subscriptions, recurring transactions, splits, snapshots and staged imports each block it, and the call is refused naming the counts (archive the account in the web app instead). TWO-STEP when a token is required (preview cascade counts, then commit); a clean empty account deletes directly. set_mode: set the import pipeline mode (auto|approve|manual).",
     z.discriminatedUnion("op", [
       z.object({
         op: z.literal("add"),
@@ -408,6 +410,7 @@ export function registerAccountsTools(server: McpServer, ctx: PgToolContext) {
         accountId: z.number().int().positive().optional().describe("Account FK (accounts.id). Exact match — preferred. The only path that works without an unlocked DEK."),
         account: z.string().optional().describe("Current account name or alias (fuzzy matched against name; exact match on alias). Requires an unlocked DEK. Pass `accountId` instead when no DEK is available."),
         name: z.string().optional().describe("New name"),
+        type: z.enum(["A", "L"]).optional().describe("New account type: 'A' for asset, 'L' for liability. Does not change `group` — pass that separately if the new type should also move it (e.g. to \"Liability\")."),
         group: z.string().optional().describe("New group"),
         currency: supportedCurrencyEnum.optional().describe("New ISO 4217 currency code (issue #206: full SUPPORTED_CURRENCIES list)."),
         note: z.string().optional().describe("New note"),
