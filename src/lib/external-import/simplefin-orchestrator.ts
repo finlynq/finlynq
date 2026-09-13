@@ -49,8 +49,6 @@ const SYNC_LOOKBACK_DAYS = 90;
 const AUTO_SYNC_MIN_INTERVAL_MS = 12 * 60 * 60 * 1000;
 /** Plaintext settings key holding the last auto-sync timestamp (ISO). */
 const AUTOSYNC_AT_KEY = "connector:simplefin:autosync_at";
-/** Plaintext settings key holding the last auto-sync ATTEMPT's outcome (JSON). */
-const AUTOSYNC_STATUS_KEY = "connector:simplefin:autosync_status";
 
 export class SimplefinNotConnectedError extends Error {
   constructor() {
@@ -132,17 +130,6 @@ export interface SimplefinStatus {
   connected: boolean;
   /** ISO timestamp of the most recent connector staging run, or null. */
   lastSyncAt: string | null;
-  /** Outcome of the most recent login-triggered auto-sync ATTEMPT, or null if none yet. */
-  lastAutoSync: AutoSyncStatus | null;
-}
-
-/** Outcome of a single login-triggered auto-sync attempt (success or failure). */
-export interface AutoSyncStatus {
-  ok: boolean;
-  /** ISO timestamp of the attempt. */
-  at: string;
-  /** Error message, present only when ok is false. */
-  message?: string;
 }
 
 // ─── Account cache ──────────────────────────────────────────────────────────
@@ -475,8 +462,7 @@ export async function getSimpleFinStatus(userId: string): Promise<SimplefinStatu
         row.receivedAt instanceof Date ? row.receivedAt.toISOString() : String(row.receivedAt);
     }
   }
-  const lastAutoSync = connected ? await getAutoSyncStatus(userId) : null;
-  return { connected, lastSyncAt, lastAutoSync };
+  return { connected, lastSyncAt };
 }
 
 /** Remove the stored access URL + account map. Does not need the DEK. */
@@ -508,43 +494,12 @@ async function setAutoSyncAt(userId: string, iso: string): Promise<void> {
   `);
 }
 
-/** Read the outcome of the last auto-sync ATTEMPT (success or failure), or null. */
-async function getAutoSyncStatus(userId: string): Promise<AutoSyncStatus | null> {
-  const row = await db
-    .select({ value: schema.settings.value })
-    .from(schema.settings)
-    .where(and(eq(schema.settings.key, AUTOSYNC_STATUS_KEY), eq(schema.settings.userId, userId)))
-    .get();
-  if (!row?.value) return null;
-  try {
-    return JSON.parse(row.value) as AutoSyncStatus;
-  } catch {
-    return null;
-  }
-}
-
-/** Upsert the outcome of the most recent auto-sync attempt (plaintext JSON). */
-async function setAutoSyncStatus(userId: string, status: AutoSyncStatus): Promise<void> {
-  const value = JSON.stringify(status);
-  await db.execute(sql`
-    INSERT INTO settings (key, user_id, value)
-    VALUES (${AUTOSYNC_STATUS_KEY}, ${userId}, ${value})
-    ON CONFLICT (key, user_id) DO UPDATE SET value = EXCLUDED.value
-  `);
-}
-
 /**
  * Sync SimpleFIN in the background iff connected AND the last auto-sync was more
  * than ~12h ago. Only touches ALREADY-MAPPED accounts (empty choices), each
  * advancing per its own mode via the shared pipeline. Returns null when skipped.
- *
- * The throttle timestamp is stamped only AFTER a successful run — a failed
- * attempt (bad/expired credentials, a transient network error, SimpleFIN
- * outage) does NOT burn the 12h window, so the very next login retries
- * instead of silently waiting out the full throttle on a run that never
- * actually synced anything. Either way — success or failure — the attempt's
- * outcome is recorded via setAutoSyncStatus() so it can be surfaced in
- * Settings → Bank Feeds instead of only reaching a server-side console.warn.
+ * The timestamp is stamped BEFORE the sync so a slow/failing run doesn't let the
+ * next login re-fire immediately.
  */
 export async function maybeAutoSyncSimpleFin(
   userId: string,
@@ -553,20 +508,8 @@ export async function maybeAutoSyncSimpleFin(
   if (!(await hasConnectorCredentials(userId, CONNECTOR_ID))) return null;
   const last = await getAutoSyncAt(userId);
   if (Date.now() - last < AUTO_SYNC_MIN_INTERVAL_MS) return null;
-  try {
-    const result = await syncSimpleFin(userId, dek, {});
-    const now = new Date().toISOString();
-    await setAutoSyncAt(userId, now);
-    await setAutoSyncStatus(userId, { ok: true, at: now });
-    return result;
-  } catch (err) {
-    await setAutoSyncStatus(userId, {
-      ok: false,
-      at: new Date().toISOString(),
-      message: err instanceof Error ? err.message : "Sync failed",
-    });
-    throw err;
-  }
+  await setAutoSyncAt(userId, new Date().toISOString());
+  return syncSimpleFin(userId, dek, {});
 }
 
 /**
