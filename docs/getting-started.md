@@ -57,9 +57,17 @@ You can generate a strong random value with `openssl rand -base64 48`. Keep thes
 Apply the database schema, then start the app:
 
 ```bash
-npm run db:push     # create/update tables in your database
+npm run db:migrate  # create/update tables in your database
 npm run dev         # start the dev server at http://localhost:3000
 ```
+
+`db:migrate` runs `scripts/run-migrations.mjs` — the same runner the Docker image uses. Against an empty database it applies the schema baseline (`scripts/baseline/0001_schema_baseline.sql`) and then every tracked migration in `scripts/migrations/`; against an existing one it applies only the migrations not yet recorded in `schema_migrations`. It reads `DATABASE_URL` (or `PF_DATABASE_URL`) from the environment, so export it first if it only lives in `.env.local`:
+
+```bash
+DATABASE_URL=postgresql://finlynq:password@localhost:5432/finlynq npm run db:migrate
+```
+
+> **Do not use `npm run db:push` to create your database.** That command is `drizzle-kit push`, which diffs the ORM schema in `src/db/schema-pg.ts` against your database. The ORM schema does not express the CHECK constraints or most of the partial and unique indexes the app actually relies on, so a `db:push` database is missing them — writes that Postgres should reject succeed instead, and code that depends on a unique index for `ON CONFLICT` fails at runtime. It also leaves no migration file behind. It is for throwaway scratch databases only. See [Schema migrations](./migrations.md) for the full picture.
 
 Open [http://localhost:3000](http://localhost:3000) and create your account.
 

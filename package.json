@@ -17,6 +17,7 @@
     "build:mcp": "npx tsx mcp-server/index.ts",
     "db:generate": "drizzle-kit generate --config=drizzle-pg.config.ts",
     "db:push": "drizzle-kit push --config=drizzle-pg.config.ts",
+    "db:migrate": "node scripts/run-migrations.mjs",
     "seed:demo": "npx tsx scripts/seed-demo.ts",
     "indexnow": "npx tsx scripts/indexnow-submit.ts",
     "audit:invariants": "npx tsx scripts/audit-invariants.ts",
