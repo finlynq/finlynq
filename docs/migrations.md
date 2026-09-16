@@ -24,7 +24,13 @@ agree. **If you change one, change the other.**
 | Runner | Used by | Mechanism |
 |---|---|---|
 | `deploy.sh` (migration section) | prod + dev VPS | bash + `psql` |
-| `scripts/run-migrations.mjs` | the Docker image | node + `pg` |
+| `scripts/run-migrations.mjs` | the Docker image, and a no-Docker self-host or contributor checkout via `npm run db:migrate` | node + `pg` |
+
+`npm run db:migrate` is just `node scripts/run-migrations.mjs`. It needs nothing
+beyond `pg` (a regular dependency) and `DATABASE_URL` / `PF_DATABASE_URL` in the
+environment, so it runs from a plain `npm install` checkout — that is the
+documented from-zero path in [getting-started.md](./getting-started.md) and
+[CONTRIBUTING.md](../CONTRIBUTING.md).
 
 Order of operations, identical in both:
 
@@ -76,7 +82,8 @@ Add one file to `scripts/migrations/`. That is the whole procedure.
 
 ## Never use `db:push` on a real environment
 
-`npm run db:push` is `drizzle-kit push` — it diffs `schema-pg.ts` against the
+Use `npm run db:migrate` instead — including for a local dev database. `npm run
+db:push` is `drizzle-kit push` — it diffs `schema-pg.ts` against the
 live database and applies the delta, **leaving no migration file behind**. That
 is precisely how prod acquired 14 tables no migration creates. Scratch databases
 only.

@@ -9,7 +9,7 @@ Thank you for your interest in contributing! Finlynq is a community project and 
 3. Install dependencies: `cd finlynq && npm install`
 4. Set up Postgres locally, or use Docker: `docker compose up db -d`
 5. Copy `.env.example` to `.env.local` and fill in your values
-6. Apply the schema: `npm run db:push`
+6. Apply the schema: `npm run db:migrate` (baseline + tracked migrations — **not** `db:push`, which skips the CHECK constraints and several unique/partial indexes the app depends on, so bugs that Postgres would catch in production pass silently on your machine)
 7. Start the dev server: `npm run dev`
 
 ## Branch Strategy
