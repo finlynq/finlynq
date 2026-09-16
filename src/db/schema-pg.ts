@@ -1353,7 +1353,26 @@ export const bankTransactions = pgTable("bank_transactions", {
   uploadBatchId: uuid("upload_batch_id").references(() => bankUploadBatches.id, {
     onDelete: "set null",
   }),
-});
+}, (table) => ({
+  // upsertBankTransaction (src/lib/bank-ledger.ts) does `ON CONFLICT (user_id,
+  // account_id, import_hash, occurrence_index)` and a separate manual
+  // fit_id-arbitrated UPDATE-before-INSERT — Postgres requires an actual
+  // unique index/constraint matching the ON CONFLICT target columns or the
+  // INSERT throws `42P10 no unique or exclusion constraint matching the ON
+  // CONFLICT specification`. These were referenced in that file's comments
+  // (uq_bank_tx_hash / uq_bank_tx_fit) but never actually declared here —
+  // every promote silently 0'd out (every row's insert threw, caught per-row,
+  // "sent 0 rows" with no bank_transactions ever written) until this was added.
+  uqBankTxHash: uniqueIndex("uq_bank_tx_hash").on(
+    table.userId,
+    table.accountId,
+    table.importHash,
+    table.occurrenceIndex,
+  ),
+  uqBankTxFit: uniqueIndex("uq_bank_tx_fit")
+    .on(table.userId, table.accountId, table.fitId)
+    .where(sql`${table.fitId} IS NOT NULL`),
+}));
 
 // ─── simplefin_pending_transactions — refreshed snapshot of PENDING feed rows ──
 //
