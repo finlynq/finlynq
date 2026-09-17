@@ -80,10 +80,23 @@ jobs:
         # FINLYNQ-260 follow-up — `createdb` above only provisions an empty
         # database. The real-Postgres aggregator harness
         # (tests/helpers/portfolio-fixtures.ts) TRUNCATEs/seeds tables that
-        # don't exist without a schema push, which fails any un-quarantined
-        # DB-backed test (e.g. tests/mcp/readonly-contract.test.ts). Push the
-        # Drizzle schema before vitest runs.
-        run: npx drizzle-kit push --config=drizzle-pg.config.ts --force
+        # don't exist without a schema, which fails any un-quarantined
+        # DB-backed test (e.g. tests/mcp/readonly-contract.test.ts).
+        #
+        # 2026-09-17 — this was `drizzle-kit push --force`, which builds ONLY
+        # what `src/db/schema-pg.ts` declares. That is a different schema from
+        # the one every real deployment has, and the gap was measured at 94
+        # index shapes, 53 CHECK constraints, 6 foreign keys and 4 columns
+        # (GH #348 / #352). The suite was therefore green against a database
+        # that could not reproduce a whole class of production failure: an
+        # `ON CONFLICT` with no backing unique index (42P10) or a write that
+        # violates a CHECK (23514), both of which our callsites swallow.
+        # `npm run db:migrate` is `scripts/run-migrations.mjs` — the SAME
+        # runner `deploy.sh` and the Docker entrypoint call. `createdb` leaves
+        # the database empty, so its baseline guard fires and it applies
+        # `scripts/baseline/0001_schema_baseline.sql` then every migration not
+        # yet in `schema_migrations`. It needs only `pg` + DATABASE_URL.
+        run: npm run db:migrate
         env:
           DATABASE_URL: postgresql://postgres:postgres@localhost:5432/finlynq_test
 
