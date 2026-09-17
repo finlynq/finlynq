@@ -216,12 +216,12 @@ export const transactions = pgTable("transactions", {
   index("transactions_related_holding_idx").on(t.relatedHoldingId)
     .where(sql`(related_holding_id IS NOT NULL)`),
   index("transactions_swap_link_id_idx").on(t.swapLinkId).where(sql`(swap_link_id IS NOT NULL)`),
-  index("transactions_user_created_at_idx").on(t.userId, t.createdAt.desc()),
+  index("transactions_user_created_at_idx").on(t.userId, t.createdAt.desc().nullsFirst()),
   index("transactions_user_kind_date_idx").on(t.userId, t.kind, t.date)
     .where(sql`(kind IS NOT NULL)`),
   index("transactions_user_portfolio_holding_id_idx").on(t.userId, t.portfolioHoldingId)
     .where(sql`(portfolio_holding_id IS NOT NULL)`),
-  index("transactions_user_updated_at_idx").on(t.userId, t.updatedAt.desc()),
+  index("transactions_user_updated_at_idx").on(t.userId, t.updatedAt.desc().nullsFirst()),
 ]);
 
 // tx_currency_audit — flagged rows where transactions.currency != accounts.currency
@@ -633,7 +633,7 @@ export const fxRates = pgTable("fx_rates", {
   // the `.catch(() => {})` around it swallows the error, so a db:push-built
   // database silently caches no FX rates at all.
   unique("fx_rates_currency_date_key").on(t.currency, t.date),
-  index("fx_rates_currency_date_idx").on(t.currency, t.date.desc()),
+  index("fx_rates_currency_date_idx").on(t.currency, t.date.desc().nullsFirst()),
 ]);
 
 // Per-user manual rate pins. Used for currencies the app doesn't auto-fetch
@@ -799,7 +799,7 @@ export const feedback = pgTable(
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => [
-    index("feedback_status_idx").on(t.status, t.createdAt.desc()),
+    index("feedback_status_idx").on(t.status, t.createdAt.desc().nullsFirst()),
     index("feedback_user_idx").on(t.userId),
   ],
 );
@@ -887,7 +887,7 @@ export const transactionRules = pgTable("transaction_rules", {
     .on(
       t.userId,
       t.isActive,
-      t.priority.desc(),
+      t.priority.desc().nullsFirst(),
     ),
 ]);
 
@@ -1440,7 +1440,7 @@ export const bankUploadBatches = pgTable("bank_upload_batches", {
     .on(
       t.userId,
       t.accountId,
-      t.uploadedAt.desc(),
+      t.uploadedAt.desc().nullsFirst(),
     ),
   index("idx_bank_upload_batches_user_tier").on(t.userId, t.encryptionTier),
 ]);
@@ -1536,7 +1536,7 @@ export const bankTransactions = pgTable("bank_transactions", {
   idxBankTxAccountDate: index("idx_bank_tx_account_date").on(
     table.userId,
     table.accountId,
-    table.date.desc(),
+    table.date.desc().nullsFirst(),
   ),
   // Batch drill-down ("what did this upload write?").
   idxBankTransactionsUploadBatch: index("idx_bank_transactions_upload_batch")
@@ -1715,7 +1715,7 @@ export const incomingEmails = pgTable("incoming_emails", {
   triagedAt: timestamp("triaged_at", { withTimezone: true }),
   triagedBy: text("triaged_by").references(() => users.id),
 }, (t) => [
-  index("idx_incoming_emails_category_received").on(t.category, t.receivedAt.desc()),
+  index("idx_incoming_emails_category_received").on(t.category, t.receivedAt.desc().nullsFirst()),
   index("idx_incoming_emails_trash_expires").on(t.expiresAt)
     .where(sql`(category = 'trash'::text)`),
 ]);
@@ -1807,7 +1807,7 @@ export const emailInbox = pgTable(
     index("email_inbox_user_action_idx").on(
       t.userId,
       t.action,
-      t.receivedAt.desc(),
+      t.receivedAt.desc().nullsFirst(),
     ),
   ],
 );
@@ -1889,7 +1889,7 @@ export const emailImportRules = pgTable(
     index("email_import_rules_user_active_idx").on(
       t.userId,
       t.isActive,
-      t.priority.desc(),
+      t.priority.desc().nullsFirst(),
     ),
   ],
 );
@@ -1938,8 +1938,8 @@ export const adminAudit = pgTable("admin_audit", {
   ip: text("ip"),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 }, (t) => [
-  index("admin_audit_admin_user_id_idx").on(t.adminUserId, t.createdAt.desc()),
-  index("admin_audit_target_user_id_idx").on(t.targetUserId, t.createdAt.desc()),
+  index("admin_audit_admin_user_id_idx").on(t.adminUserId, t.createdAt.desc().nullsFirst()),
+  index("admin_audit_target_user_id_idx").on(t.targetUserId, t.createdAt.desc().nullsFirst()),
 ]);
 
 // ─── Revoked JWT jtis ───────────────────────────────────────────────────────
@@ -2009,7 +2009,7 @@ export const webhooks = pgTable("webhooks", {
   lastFailedAt: timestamp("last_failed_at", { withTimezone: true }),
 }, (t) => [
   index("idx_webhooks_user_id").on(t.userId),
-  index("idx_webhooks_user_id_created_at_desc").on(t.userId, t.createdAt.desc()),
+  index("idx_webhooks_user_id_created_at_desc").on(t.userId, t.createdAt.desc().nullsFirst()),
 ]);
 
 // `event` mirrors the same v1 closed list as `webhooks.event_filter`'s
@@ -2036,7 +2036,7 @@ export const webhookDeliveries = pgTable("webhook_deliveries", {
   index("idx_webhook_deliveries_webhook_id_attempted_at_desc")
     .on(
       t.webhookId,
-      t.attemptedAt.desc(),
+      t.attemptedAt.desc().nullsFirst(),
     ),
 ]);
 
@@ -2101,7 +2101,7 @@ export const bankDailyBalances = pgTable("bank_daily_balances", {
   index("bank_daily_balances_account_date_desc_idx").on(
     table.userId,
     table.accountId,
-    table.date.desc(),
+    table.date.desc().nullsFirst(),
   ),
   index("idx_bank_daily_balances_upload_batch").on(table.uploadBatchId)
     .where(sql`(upload_batch_id IS NOT NULL)`),
@@ -2411,7 +2411,7 @@ export const backfillRuns = pgTable("backfill_runs", {
     .defaultNow(),
   appliedAt: timestamp("applied_at", { withTimezone: true }),
 }, (t) => [
-  index("backfill_runs_user_created_idx").on(t.userId, t.createdAt.desc()),
+  index("backfill_runs_user_created_idx").on(t.userId, t.createdAt.desc().nullsFirst()),
 ]);
 
 // ─── backfill_proposals — proposed canonical reshapes for review
