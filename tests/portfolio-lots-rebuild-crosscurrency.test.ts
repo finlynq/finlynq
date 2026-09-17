@@ -124,7 +124,13 @@ describeDb("buildLotsForUser — cross-currency link_id cash transfer", () => {
       amount: 10_000,
       quantity: 10_000,
       portfolioHoldingId: usdSleeve,
-      kind: "brokerage_deposit",
+      // `brokerage_deposit_in` — the real vocabulary member. This fixture said
+      // `brokerage_deposit`, which `transactions_kind_check` does not allow;
+      // it only ever inserted because CI built its database with
+      // `drizzle-kit push`, which carried no CHECK constraints. Nothing here
+      // depends on the value: the row is an unlinked inflow (qty > 0), and the
+      // lot engine opens a lot off sign and link-absence, not off `kind`.
+      kind: "brokerage_deposit_in",
       date: "2026-01-01",
     });
 
