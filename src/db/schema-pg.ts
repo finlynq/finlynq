@@ -18,9 +18,13 @@ import {
   timestamp,
   boolean,
   uniqueIndex,
+  unique,
   index,
   uuid,
   jsonb,
+  bigint,
+  real,
+  smallint,
 } from "drizzle-orm/pg-core";
 import { sql } from "drizzle-orm";
 
@@ -69,7 +73,10 @@ export const accounts = pgTable("accounts", {
   nameLookup: text("name_lookup"),
   aliasCt: text("alias_ct"),
   aliasLookup: text("alias_lookup"),
-});
+}, (t) => [
+  uniqueIndex("accounts_user_name_lookup_uniq").on(t.userId, t.nameLookup),
+  index("idx_accounts_user_id").on(t.userId),
+]);
 
 export const categories = pgTable("categories", {
   id: serial("id").primaryKey(),
@@ -81,7 +88,10 @@ export const categories = pgTable("categories", {
   note: text("note").default(""),
   nameCt: text("name_ct"),
   nameLookup: text("name_lookup"),
-});
+}, (t) => [
+  uniqueIndex("categories_user_name_lookup_uniq").on(t.userId, t.nameLookup),
+  index("idx_categories_user_id").on(t.userId),
+]);
 
 export const transactions = pgTable("transactions", {
   id: serial("id").primaryKey(),
@@ -187,8 +197,32 @@ export const transactions = pgTable("transactions", {
   // account-move, transactions.account_id may diverge from
   // bank_transactions.account_id — that's intentional, the FK is lineage
   // only. Do NOT auto-relink. See docs/architecture/bank-ledger.md.
-  bankTransactionId: uuid("bank_transaction_id"),
-});
+  bankTransactionId: uuid("bank_transaction_id").references(
+    () => bankTransactions.id,
+    { onDelete: "set null" },
+  ),
+}, (t) => [
+  index("idx_transactions_bank_tx").on(t.bankTransactionId)
+    .where(sql`(bank_transaction_id IS NOT NULL)`),
+  index("idx_transactions_link_id").on(t.linkId).where(sql`(link_id IS NOT NULL)`),
+  index("idx_transactions_trade_link_id").on(t.userId, t.tradeLinkId)
+    .where(sql`(trade_link_id IS NOT NULL)`),
+  index("idx_transactions_user_date").on(t.userId, t.date),
+  index("idx_transactions_user_id").on(t.userId),
+  index("idx_transactions_user_import_hash").on(t.userId, t.importHash)
+    .where(sql`(import_hash IS NOT NULL)`),
+  uniqueIndex("transactions_one_opening_balance_per_account").on(t.userId, t.accountId)
+    .where(sql`(kind = 'opening_balance'::text)`),
+  index("transactions_related_holding_idx").on(t.relatedHoldingId)
+    .where(sql`(related_holding_id IS NOT NULL)`),
+  index("transactions_swap_link_id_idx").on(t.swapLinkId).where(sql`(swap_link_id IS NOT NULL)`),
+  index("transactions_user_created_at_idx").on(t.userId, t.createdAt.desc().nullsFirst()),
+  index("transactions_user_kind_date_idx").on(t.userId, t.kind, t.date)
+    .where(sql`(kind IS NOT NULL)`),
+  index("transactions_user_portfolio_holding_id_idx").on(t.userId, t.portfolioHoldingId)
+    .where(sql`(portfolio_holding_id IS NOT NULL)`),
+  index("transactions_user_updated_at_idx").on(t.userId, t.updatedAt.desc().nullsFirst()),
+]);
 
 // tx_currency_audit — flagged rows where transactions.currency != accounts.currency
 // at the time the Phase 2 migration ran. The audit UI lets the user
@@ -205,7 +239,9 @@ export const txCurrencyAudit = pgTable("tx_currency_audit", {
   flaggedAt: timestamp("flagged_at", { withTimezone: true }).notNull().defaultNow(),
   resolvedAt: timestamp("resolved_at", { withTimezone: true }),
   resolution: text("resolution"), // 'converted' | 'kept' | 'edited'
-});
+}, (t) => [
+  index("tx_currency_audit_user_unresolved_idx").on(t.userId).where(sql`(resolved_at IS NULL)`),
+]);
 
 // Securities master (Tier 2, 2026-06-16). The centralized "identity" entity:
 // one row per (user, ticker/cluster). A `portfolio_holdings` row is the
@@ -290,7 +326,28 @@ export const portfolioHoldings = pgTable("portfolio_holdings", {
   nameLookup: text("name_lookup"),
   symbolCt: text("symbol_ct"),
   symbolLookup: text("symbol_lookup"),
-});
+}, (t) => [
+  index("idx_portfolio_holdings_user_id").on(t.userId),
+  uniqueIndex("portfolio_holdings_one_cash_per_account_currency")
+    .on(
+      t.userId,
+      t.accountId,
+      t.currency,
+    )
+    .where(sql`(is_cash = true)`),
+  index("portfolio_holdings_security_idx").on(t.securityId),
+  uniqueIndex("portfolio_holdings_user_account_lookup_uniq")
+    .on(
+      t.userId,
+      t.accountId,
+      t.nameLookup,
+    )
+    .where(sql`((name_lookup IS NOT NULL) AND (account_id IS NOT NULL))`),
+  index("portfolio_holdings_user_name_lookup_idx").on(t.userId, t.nameLookup)
+    .where(sql`(name_lookup IS NOT NULL)`),
+  index("portfolio_holdings_user_symbol_lookup_idx").on(t.userId, t.symbolLookup)
+    .where(sql`(symbol_lookup IS NOT NULL)`),
+]);
 
 // Holding ↔ account many-to-many (2026-04-30). Issue #26 (Section G).
 //
@@ -347,7 +404,10 @@ export const budgets = pgTable("budgets", {
   month: text("month").notNull(),
   amount: doublePrecision("amount").notNull().default(0),
   currency: text("currency").notNull().default("CAD"),
-});
+}, (t) => [
+  uniqueIndex("budgets_user_category_month_unique").on(t.userId, t.categoryId, t.month),
+  index("idx_budgets_user_id").on(t.userId),
+]);
 
 export const loans = pgTable("loans", {
   id: serial("id").primaryKey(),
@@ -377,7 +437,10 @@ export const loans = pgTable("loans", {
   // Stream D (2026-04-24) — dual-write.
   nameCt: text("name_ct"),
   nameLookup: text("name_lookup"),
-});
+}, (t) => [
+  index("idx_loans_user_id").on(t.userId),
+  uniqueIndex("loans_user_name_lookup_uniq").on(t.userId, t.nameLookup),
+]);
 
 export const snapshots = pgTable("snapshots", {
   id: serial("id").primaryKey(),
@@ -386,7 +449,9 @@ export const snapshots = pgTable("snapshots", {
   date: text("date").notNull(),
   value: doublePrecision("value").notNull(),
   note: text("note").default(""),
-});
+}, (t) => [
+  index("idx_snapshots_user_id").on(t.userId),
+]);
 
 export const goals = pgTable("goals", {
   id: serial("id").primaryKey(),
@@ -408,7 +473,10 @@ export const goals = pgTable("goals", {
   // Stream D (2026-04-24) — dual-write.
   nameCt: text("name_ct"),
   nameLookup: text("name_lookup"),
-});
+}, (t) => [
+  uniqueIndex("goals_user_name_lookup_uniq").on(t.userId, t.nameLookup),
+  index("idx_goals_user_id").on(t.userId),
+]);
 
 // Multi-account goal linking (issue #130, 2026-05-03). JOIN grain is
 // `(goal_id, account_id, user_id)` — mirror the holding_accounts pattern
@@ -419,7 +487,18 @@ export const goalAccounts = pgTable("goal_accounts", {
   userId: text("user_id").notNull(),
   goalId: integer("goal_id").notNull().references(() => goals.id, { onDelete: "cascade" }),
   accountId: integer("account_id").notNull().references(() => accounts.id, { onDelete: "cascade" }),
-});
+}, (t) => [
+  // ON CONFLICT (goal_id, account_id, user_id) target — goals POST/PUT
+  // re-point a goal's account set through an upsert. Without this the
+  // upsert raises 42P10 on a db:push-built database.
+  unique("goal_accounts_goal_id_account_id_user_id_key").on(
+    t.goalId,
+    t.accountId,
+    t.userId,
+  ),
+  index("goal_accounts_user_account").on(t.userId, t.accountId),
+  index("goal_accounts_user_goal").on(t.userId, t.goalId),
+]);
 
 export const targetAllocations = pgTable("target_allocations", {
   id: serial("id").primaryKey(),
@@ -427,7 +506,9 @@ export const targetAllocations = pgTable("target_allocations", {
   name: text("name").notNull(),
   targetPct: doublePrecision("target_pct").notNull(),
   category: text("category").notNull(),
-});
+}, (t) => [
+  uniqueIndex("target_allocations_user_name_unique").on(t.userId, t.name),
+]);
 
 export const recurringTransactions = pgTable("recurring_transactions", {
   id: serial("id").primaryKey(),
@@ -440,7 +521,9 @@ export const recurringTransactions = pgTable("recurring_transactions", {
   nextDate: text("next_date"),
   active: integer("active").notNull().default(1),
   note: text("note").default(""),
-});
+}, (t) => [
+  index("idx_recurring_transactions_user_id").on(t.userId),
+]);
 
 // Global cache — market data (Yahoo Finance, CoinGecko) is identical across users,
 // so rows are shared. Not included in per-user wipe/export/import flows.
@@ -464,7 +547,9 @@ export const priceCache = pgTable("price_cache", {
   // UPDATE ... WHERE symbol AND date (the (symbol,date) index is non-unique +
   // prod has duplicate rows) — never an ON CONFLICT upsert.
   fetchedAt: timestamp("fetched_at", { withTimezone: true }).notNull().defaultNow(),
-});
+}, (t) => [
+  index("idx_price_cache_symbol_date").on(t.symbol, t.date),
+]);
 
 // Operator diagnostics log — global, plaintext, NOT per-user (like price_cache /
 // announcements). Persists slow queries (≥ PF_SLOW_QUERY_MS), DB errors, API 5xx
@@ -504,10 +589,12 @@ export const opRollup = pgTable(
   {
     op: text("op").notNull(),
     bucket: timestamp("bucket", { withTimezone: true }).notNull(), // hour-aligned
-    count: integer("count").notNull().default(0),
-    totalMs: integer("total_ms").notNull().default(0),
-    slowCount: integer("slow_count").notNull().default(0),
-    errorCount: integer("error_count").notNull().default(0),
+    // bigint in SQL (see the baseline) — these are monotonic counters and an
+    // int4 would wrap. Declared with mode "number" so reads stay numeric.
+    count: bigint("count", { mode: "number" }).notNull().default(0),
+    totalMs: bigint("total_ms", { mode: "number" }).notNull().default(0),
+    slowCount: bigint("slow_count", { mode: "number" }).notNull().default(0),
+    errorCount: bigint("error_count", { mode: "number" }).notNull().default(0),
   },
   (t) => [primaryKey({ columns: [t.op, t.bucket] }), index("op_rollup_bucket_idx").on(t.bucket)],
 );
@@ -519,9 +606,10 @@ export const systemMetricsSample = pgTable(
   {
     id: serial("id").primaryKey(),
     at: timestamp("at", { withTimezone: true }).notNull().defaultNow(),
-    cpuPct: doublePrecision("cpu_pct"),
-    load1: doublePrecision("load1"),
-    procCpuPct: doublePrecision("proc_cpu_pct"),
+    // float4 in SQL (see the baseline) — sampled percentages, not money.
+    cpuPct: real("cpu_pct"),
+    load1: real("load1"),
+    procCpuPct: real("proc_cpu_pct"),
     memUsedMb: integer("mem_used_mb"),
     memTotalMb: integer("mem_total_mb"),
   },
@@ -539,7 +627,14 @@ export const fxRates = pgTable("fx_rates", {
   rateToUsd: doublePrecision("rate_to_usd").notNull(),       // 1 unit of `currency` in USD
   source: text("source").notNull().default("yahoo"),         // 'yahoo' | 'coingecko' | 'fallback' | 'manual'
   fetchedAt: timestamp("fetched_at", { withTimezone: true }).notNull().defaultNow(),
-});
+}, (t) => [
+  // ON CONFLICT (currency, date) target — cacheRate() in fx-service.ts
+  // upserts every fetched rate. Without this the upsert raises 42P10 and
+  // the `.catch(() => {})` around it swallows the error, so a db:push-built
+  // database silently caches no FX rates at all.
+  unique("fx_rates_currency_date_key").on(t.currency, t.date),
+  index("fx_rates_currency_date_idx").on(t.currency, t.date.desc().nullsFirst()),
+]);
 
 // Per-user manual rate pins. Used for currencies the app doesn't auto-fetch
 // (override fallback) AND for users who want to pin a rate that differs from
@@ -556,7 +651,9 @@ export const fxOverrides = pgTable("fx_overrides", {
   rateToUsd: doublePrecision("rate_to_usd").notNull(),
   note: text("note").notNull().default(""),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
-});
+}, (t) => [
+  index("fx_overrides_user_currency_idx").on(t.userId, t.currency, t.dateFrom),
+]);
 
 // Per-user manual price marks for manually-priced securities
 // (securities.price_source = 'manual'). Each row is an effective-from price
@@ -594,7 +691,9 @@ export const notifications = pgTable("notifications", {
   read: integer("read").notNull().default(0),
   createdAt: text("created_at").notNull(),
   metadata: text("metadata").default(""),
-});
+}, (t) => [
+  index("idx_notifications_user_id").on(t.userId),
+]);
 
 // ─── Announcements (admin broadcast) ────────────────────────────────────────
 // Admin-authored news/update items broadcast to ALL users. Plaintext by
@@ -700,7 +799,7 @@ export const feedback = pgTable(
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => [
-    index("feedback_status_idx").on(t.status, t.createdAt),
+    index("feedback_status_idx").on(t.status, t.createdAt.desc().nullsFirst()),
     index("feedback_user_idx").on(t.userId),
   ],
 );
@@ -749,7 +848,10 @@ export const subscriptions = pgTable("subscriptions", {
   // Stream D (2026-04-24) — dual-write.
   nameCt: text("name_ct"),
   nameLookup: text("name_lookup"),
-});
+}, (t) => [
+  index("idx_subscriptions_user_id").on(t.userId),
+  uniqueIndex("subscriptions_user_name_lookup_uniq").on(t.userId, t.nameLookup),
+]);
 
 export const settings = pgTable(
   "settings",
@@ -779,7 +881,15 @@ export const transactionRules = pgTable("transaction_rules", {
   priority: integer("priority").notNull().default(0),
   createdAt: text("created_at").notNull(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
-});
+}, (t) => [
+  index("idx_transaction_rules_user_id").on(t.userId),
+  index("transaction_rules_user_active_priority_idx")
+    .on(
+      t.userId,
+      t.isActive,
+      t.priority.desc().nullsFirst(),
+    ),
+]);
 
 export const budgetTemplates = pgTable("budget_templates", {
   id: serial("id").primaryKey(),
@@ -790,7 +900,9 @@ export const budgetTemplates = pgTable("budget_templates", {
     .notNull(),
   amount: doublePrecision("amount").notNull(),
   createdAt: text("created_at").notNull(),
-});
+}, (t) => [
+  index("idx_budget_templates_user_id").on(t.userId),
+]);
 
 // ─── Authentication Tables (Phase 2: NS-32) ────────────────────────────────
 
@@ -834,6 +946,11 @@ export const users = pgTable(
     // and stamps this once done. Mirrors `portfolio_names_canonicalized_at`.
     // Migration: 20260622_securities_phase_a.sql.
     securitiesBackfilledAt: timestamp("securities_backfilled_at", { withTimezone: true }),
+    // Stream D one-time migration stamps. Present in the SQL schema since the
+    // plaintext-column drop / name canonicalization passes; declared here so a
+    // `drizzle-kit push` database matches the migration-built one.
+    plaintextNulledAt: text("plaintext_nulled_at"),
+    portfolioNamesCanonicalizedAt: text("portfolio_names_canonicalized_at"),
     // Envelope encryption: per-user DEK wrapped with a password-derived KEK.
     // All fields are base64-encoded. See src/lib/crypto/envelope.ts.
     // Nullable during migration — accounts created before encryption rollout
@@ -849,7 +966,8 @@ export const users = pgTable(
     // scripts/rewrap-peppers.ts re-wraps a user's DEK with the new pepper, it
     // bumps this column. The login flow reads it and passes through to
     // deriveKEK so unrotated rows still unwrap with the old pepper.
-    pepperVersion: integer("pepper_version").notNull().default(1),
+    // smallint in SQL (see the baseline).
+    pepperVersion: smallint("pepper_version").notNull().default(1),
     // FINLYNQ-183 (2026-06-17): the former `base_currency` column was dropped.
     // The app now has ONE user-facing currency (`settings.display_currency`),
     // which also serves as the realized-gain accounting basis. The physical
@@ -870,6 +988,11 @@ export const users = pgTable(
     usernameLowerUnique: uniqueIndex("users_username_lower_unique")
       .on(sql`lower(${table.username})`)
       .where(sql`${table.username} IS NOT NULL`),
+    // Pepper-rotation sweep: "which rows are still on an old pepper?".
+    // 999 is the sentinel for "never needs re-wrap".
+    pepperVersionIdx: index("users_pepper_version_idx")
+      .on(table.pepperVersion)
+      .where(sql`${table.pepperVersion} < 999`),
   })
 );
 
@@ -893,7 +1016,10 @@ export const contributionRoom = pgTable("contribution_room", {
   room: doublePrecision("room").notNull(),
   used: doublePrecision("used").default(0),
   note: text("note").default(""),
-});
+}, (t) => [
+  uniqueIndex("contribution_room_user_type_year_unique").on(t.userId, t.type, t.year),
+  index("idx_contribution_room_user_id").on(t.userId),
+]);
 
 // Import Templates — saved CSV column mappings for re-use
 export const importTemplates = pgTable("import_templates", {
@@ -953,7 +1079,9 @@ export const oauthClients = pgTable("oauth_clients", {
   responseTypes: text("response_types").default('["code"]'),
   tokenEndpointAuthMethod: text("token_endpoint_auth_method").default("none"),
   createdAt: text("created_at").notNull(),
-});
+}, (t) => [
+  index("idx_oauth_clients_client_id").on(t.clientId),
+]);
 
 /** Short-lived authorization codes issued during the OAuth authorize flow */
 export const oauthAuthorizationCodes = pgTable("oauth_authorization_codes", {
@@ -965,12 +1093,17 @@ export const oauthAuthorizationCodes = pgTable("oauth_authorization_codes", {
   codeChallengeMethod: text("code_challenge_method").notNull().default("S256"),
   redirectUri: text("redirect_uri").notNull(),
   clientId: text("client_id").notNull(),
+  // Granted OAuth scope, normalized at the authorize boundary. See
+  // normalizeRequestedScopeLenient in src/lib/oauth.ts.
+  scope: text("scope").notNull().default("mcp:read mcp:write"),
   expiresAt: text("expires_at").notNull(),
   used: integer("used").notNull().default(0),
   createdAt: text("created_at").notNull(),
   // Session DEK wrapped with secretWrapKey(code). Null for pre-encryption auth flows.
   dekWrapped: text("dek_wrapped"),
-});
+}, (t) => [
+  index("idx_oauth_codes_code").on(t.code),
+]);
 
 /** Long-lived access + refresh token pairs issued after code exchange */
 export const oauthAccessTokens = pgTable("oauth_access_tokens", {
@@ -981,6 +1114,9 @@ export const oauthAccessTokens = pgTable("oauth_access_tokens", {
   // Stored as authLookupHash(refreshToken) — raw token never in DB.
   refreshToken: text("refresh_token").notNull().unique(),
   clientId: text("client_id").notNull(),
+  // Granted OAuth scope — the MCP scope gate in src/app/api/mcp/route.ts
+  // reads it to decide which tools this grant may call.
+  scope: text("scope").notNull().default("mcp:read mcp:write"),
   expiresAt: text("expires_at").notNull(),        // 1 hour
   refreshExpiresAt: text("refresh_expires_at").notNull(), // 30 days
   createdAt: text("created_at").notNull(),
@@ -998,7 +1134,11 @@ export const oauthAccessTokens = pgTable("oauth_access_tokens", {
   // DB-side, >15 min). Drives the admin OAuth-grants panel's last-used column
   // + active/dormant flag. NULL = never validated since the column was added.
   lastUsedAt: timestamp("last_used_at", { withTimezone: true }),
-});
+}, (t) => [
+  index("idx_oauth_access_tokens_live").on(t.token).where(sql`(revoked_at IS NULL)`),
+  index("idx_oauth_tokens_refresh").on(t.refreshToken),
+  index("idx_oauth_tokens_token").on(t.token),
+]);
 
 // ─── (MCP Uploads table removed) ───────────────────────────────────────────
 //
@@ -1100,7 +1240,13 @@ export const stagedImports = pgTable("staged_imports", {
   // pre-FINLYNQ-271 row. DISTINCT from `import_hash` (row-level, over the
   // plaintext payee) — never conflate the two.
   contentHash: text("content_hash"),
-});
+}, (t) => [
+  index("idx_staged_imports_expires_at").on(t.expiresAt).where(sql`(status = 'pending'::text)`),
+  index("idx_staged_imports_user_status").on(t.userId, t.status),
+  index("idx_staged_imports_user_tier").on(t.userId, t.encryptionTier),
+  index("staged_imports_user_hash_idx").on(t.userId, t.contentHash)
+    .where(sql`(content_hash IS NOT NULL)`),
+]);
 
 export const stagedTransactions = pgTable("staged_transactions", {
   id: text("id").primaryKey(), // UUID
@@ -1196,7 +1342,13 @@ export const stagedTransactions = pgTable("staged_transactions", {
     () => transactions.id,
     { onDelete: "set null" },
   ),
-});
+}, (t) => [
+  index("idx_staged_transactions_import").on(t.stagedImportId),
+  index("idx_staged_transactions_user").on(t.userId),
+  index("idx_staged_tx_import_dedup").on(t.stagedImportId, t.dedupStatus),
+  index("idx_staged_tx_user_row_status").on(t.userId, t.rowStatus),
+  index("idx_staged_tx_user_tier").on(t.userId, t.encryptionTier),
+]);
 
 // ─── bank_transactions — persistent bank-side ledger (2026-05-22)
 //
@@ -1283,7 +1435,15 @@ export const bankUploadBatches = pgTable("bank_upload_batches", {
   // land at 'user' tier. 'service' exists only for the login-sweep upgrade of
   // pre-FINLYNQ-120 plaintext rows. Read paths branch per-row.
   encryptionTier: text("encryption_tier").notNull().default("service"),
-});
+}, (t) => [
+  index("idx_bank_upload_batches_user_account_date")
+    .on(
+      t.userId,
+      t.accountId,
+      t.uploadedAt.desc().nullsFirst(),
+    ),
+  index("idx_bank_upload_batches_user_tier").on(t.userId, t.encryptionTier),
+]);
 
 export const bankTransactions = pgTable("bank_transactions", {
   id: uuid("id").primaryKey().defaultRandom(),
@@ -1353,7 +1513,36 @@ export const bankTransactions = pgTable("bank_transactions", {
   uploadBatchId: uuid("upload_batch_id").references(() => bankUploadBatches.id, {
     onDelete: "set null",
   }),
-});
+}, (table) => ({
+  // upsertBankTransaction (src/lib/bank-ledger.ts) does `ON CONFLICT (user_id,
+  // account_id, import_hash, occurrence_index)` and a separate manual
+  // fit_id-arbitrated UPDATE-before-INSERT — Postgres requires an actual
+  // unique index/constraint matching the ON CONFLICT target columns or the
+  // INSERT throws `42P10 no unique or exclusion constraint matching the ON
+  // CONFLICT specification`. These were referenced in that file's comments
+  // (uq_bank_tx_hash / uq_bank_tx_fit) but never actually declared here —
+  // every promote silently 0'd out (every row's insert threw, caught per-row,
+  // "sent 0 rows" with no bank_transactions ever written) until this was added.
+  uqBankTxHash: uniqueIndex("uq_bank_tx_hash").on(
+    table.userId,
+    table.accountId,
+    table.importHash,
+    table.occurrenceIndex,
+  ),
+  uqBankTxFit: uniqueIndex("uq_bank_tx_fit")
+    .on(table.userId, table.accountId, table.fitId)
+    .where(sql`${table.fitId} IS NOT NULL`),
+  // Ledger list hot path: newest-first rows for one account.
+  idxBankTxAccountDate: index("idx_bank_tx_account_date").on(
+    table.userId,
+    table.accountId,
+    table.date.desc().nullsFirst(),
+  ),
+  // Batch drill-down ("what did this upload write?").
+  idxBankTransactionsUploadBatch: index("idx_bank_transactions_upload_batch")
+    .on(table.uploadBatchId)
+    .where(sql`${table.uploadBatchId} IS NOT NULL`),
+}));
 
 // ─── simplefin_pending_transactions — refreshed snapshot of PENDING feed rows ──
 //
@@ -1380,7 +1569,9 @@ export const simplefinPendingTransactions = pgTable("simplefin_pending_transacti
   description: text("description"),
   encryptionTier: text("encryption_tier").notNull().default("user"),
   syncedAt: timestamp("synced_at", { withTimezone: true }).notNull().defaultNow(),
-});
+}, (t) => [
+  index("simplefin_pending_user_account_idx").on(t.userId, t.accountId),
+]);
 
 // ─── transaction_bank_links — many-to-many between transactions and bank_transactions
 //
@@ -1494,6 +1685,9 @@ export const transactionReconciliationFlags = pgTable(
       .notNull()
       .defaultNow(),
   },
+  (t) => [
+    index("idx_tx_reconciliation_flags_user_tx").on(t.userId, t.transactionId),
+  ],
 );
 
 // ─── Email Import — Admin Inbox + Trash (Phase A) ──────────────────────────
@@ -1520,7 +1714,11 @@ export const incomingEmails = pgTable("incoming_emails", {
   expiresAt: timestamp("expires_at", { withTimezone: true }),
   triagedAt: timestamp("triaged_at", { withTimezone: true }),
   triagedBy: text("triaged_by").references(() => users.id),
-});
+}, (t) => [
+  index("idx_incoming_emails_category_received").on(t.category, t.receivedAt.desc().nullsFirst()),
+  index("idx_incoming_emails_trash_expires").on(t.expiresAt)
+    .where(sql`(category = 'trash'::text)`),
+]);
 
 // Admin replies sent from /admin/inbox, persisted so the conversation thread
 // (their inbound + our outbound) is visible in-app. Plaintext + no user_id,
@@ -1537,7 +1735,10 @@ export const incomingEmailReplies = pgTable("incoming_email_replies", {
   sentBy: text("sent_by").references(() => users.id),
   resendId: text("resend_id"),
   sentAt: timestamp("sent_at", { withTimezone: true }).notNull().defaultNow(),
-});
+}, (t) => [
+  index("idx_incoming_email_replies_email").on(t.incomingEmailId),
+  index("idx_incoming_email_replies_to").on(sql`lower(to_address)`),
+]);
 
 // ─── Email-to-Transaction Inbox (Epic B2, 2026-06-05) ──────────────────────
 //
@@ -1591,7 +1792,9 @@ export const emailInbox = pgTable(
     }),
     // The email rule that matched at auto-record time. FK added in SQL after
     // both tables exist; SET NULL on rule delete.
-    matchedRuleId: integer("matched_rule_id"),
+    matchedRuleId: integer("matched_rule_id").references(() => emailImportRules.id, {
+      onDelete: "set null",
+    }),
     // 'high' | 'low' | NULL — body-parse confidence. low/NULL never auto-record.
     parseConfidence: text("parse_confidence"),
     // Materialized transaction id once recorded. SET NULL on tx delete.
@@ -1601,7 +1804,11 @@ export const emailInbox = pgTable(
     ),
   },
   (t) => [
-    index("email_inbox_user_action_idx").on(t.userId, t.action, t.receivedAt),
+    index("email_inbox_user_action_idx").on(
+      t.userId,
+      t.action,
+      t.receivedAt.desc().nullsFirst(),
+    ),
   ],
 );
 
@@ -1682,7 +1889,7 @@ export const emailImportRules = pgTable(
     index("email_import_rules_user_active_idx").on(
       t.userId,
       t.isActive,
-      t.priority,
+      t.priority.desc().nullsFirst(),
     ),
   ],
 );
@@ -1709,6 +1916,8 @@ export const mcpIdempotencyKeys = pgTable("mcp_idempotency_keys", {
 }, (t) => ({
   userIdKeyUnique: uniqueIndex("mcp_idempotency_keys_user_id_key_unique")
     .on(t.userId, t.key),
+  // Sweep support: the expiry cron deletes by age.
+  createdAtIdx: index("mcp_idempotency_keys_created_at_idx").on(t.createdAt),
 }));
 
 // ─── Admin Audit Log (Finding #16) ──────────────────────────────────────────
@@ -1728,7 +1937,10 @@ export const adminAudit = pgTable("admin_audit", {
   afterJson: text("after_json"),
   ip: text("ip"),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
-});
+}, (t) => [
+  index("admin_audit_admin_user_id_idx").on(t.adminUserId, t.createdAt.desc().nullsFirst()),
+  index("admin_audit_target_user_id_idx").on(t.targetUserId, t.createdAt.desc().nullsFirst()),
+]);
 
 // ─── Revoked JWT jtis ───────────────────────────────────────────────────────
 //
@@ -1742,7 +1954,9 @@ export const adminAudit = pgTable("admin_audit", {
 export const revokedJtis = pgTable("revoked_jtis", {
   jti: text("jti").primaryKey(),
   expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
-});
+}, (t) => [
+  index("revoked_jtis_expires_at_idx").on(t.expiresAt),
+]);
 
 // ─── Webhooks — schema for the v1 webhook delivery surface (FINLYNQ-60) ────
 //
@@ -1793,7 +2007,10 @@ export const webhooks = pgTable("webhooks", {
   // Surfaced as a warning dot on the settings UI after a delivery's retry
   // budget is exhausted (3 attempts at 1m/5m/25m per webhook-events.md).
   lastFailedAt: timestamp("last_failed_at", { withTimezone: true }),
-});
+}, (t) => [
+  index("idx_webhooks_user_id").on(t.userId),
+  index("idx_webhooks_user_id_created_at_desc").on(t.userId, t.createdAt.desc().nullsFirst()),
+]);
 
 // `event` mirrors the same v1 closed list as `webhooks.event_filter`'s
 // element type (enforced by `webhook_deliveries_event_check` in SQL).
@@ -1815,7 +2032,13 @@ export const webhookDeliveries = pgTable("webhook_deliveries", {
   attemptedAt: timestamp("attempted_at", { withTimezone: true })
     .notNull()
     .defaultNow(),
-});
+}, (t) => [
+  index("idx_webhook_deliveries_webhook_id_attempted_at_desc")
+    .on(
+      t.webhookId,
+      t.attemptedAt.desc().nullsFirst(),
+    ),
+]);
 
 // ─── bank_daily_balances — per-day bank-reported anchor balances (2026-05-24)
 //
@@ -1878,8 +2101,10 @@ export const bankDailyBalances = pgTable("bank_daily_balances", {
   index("bank_daily_balances_account_date_desc_idx").on(
     table.userId,
     table.accountId,
-    table.date,
+    table.date.desc().nullsFirst(),
   ),
+  index("idx_bank_daily_balances_upload_batch").on(table.uploadBatchId)
+    .where(sql`(upload_batch_id IS NOT NULL)`),
 ]);
 
 // ─── holding_lots — per-lot cost basis tracking (Phase 1, 2026-05-25)
@@ -1948,6 +2173,15 @@ export const holdingLots = pgTable(
     // Reverse-by-tx hot path: reverseLotsForDelete maps a deleted
     // transaction back to its lot.
     index("holding_lots_open_tx_idx").on(table.openTxId),
+    index("holding_lots_user_holding_acct_side_open_idx")
+      .on(
+        table.userId,
+        table.holdingId,
+        table.accountId,
+        table.side,
+        table.status,
+      )
+      .where(sql`(status = 'open'::text)`),
   ],
 );
 
@@ -2044,7 +2278,15 @@ export const portfolioSnapshots = pgTable("portfolio_snapshots", {
   gapsFilled: boolean("gaps_filled").notNull().default(false),
   source: text("source").notNull().default("cron"),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
-});
+}, (t) => [
+  uniqueIndex("portfolio_snapshots_user_date_acct_idx")
+    .on(
+      t.userId,
+      t.snapDate,
+      sql`COALESCE(account_id, '-1'::integer)`,
+    ),
+  index("portfolio_snapshots_user_date_idx").on(t.userId, t.snapDate),
+]);
 
 // ─── portfolio_snapshot_dirty — auto-rebuild work queue (2026-06-02)
 //
@@ -2168,7 +2410,9 @@ export const backfillRuns = pgTable("backfill_runs", {
     .notNull()
     .defaultNow(),
   appliedAt: timestamp("applied_at", { withTimezone: true }),
-});
+}, (t) => [
+  index("backfill_runs_user_created_idx").on(t.userId, t.createdAt.desc().nullsFirst()),
+]);
 
 // ─── backfill_proposals — proposed canonical reshapes for review
 //
@@ -2246,7 +2490,10 @@ export const backfillProposals = pgTable("backfill_proposals", {
   // Paired-kind partner row when the user picks an existing unmatched
   // candidate via the CounterpartPicker. NULL when chosenKind is
   // pair-less OR when counterpartMode='synth_new'.
-  chosenCounterpartTxId: integer("chosen_counterpart_tx_id"),
+  chosenCounterpartTxId: integer("chosen_counterpart_tx_id").references(
+    () => transactions.id,
+    { onDelete: "set null" },
+  ),
   // 'link_existing' | 'synth_new'. Captures the partner-vs-synth toggle.
   // NULL for pair-less chosenKind.
   chosenCounterpartMode: text("chosen_counterpart_mode"),
@@ -2254,20 +2501,32 @@ export const backfillProposals = pgTable("backfill_proposals", {
   // `portfolio_expense` — apply swaps the row onto the matching cash
   // sleeve and stamps `related_holding_id` to this id. Mirror of the
   // `cash_dividend` branch of `dividend_reinvestment`. NULL otherwise.
-  chosenRelatedHoldingId: integer("chosen_related_holding_id"),
+  chosenRelatedHoldingId: integer("chosen_related_holding_id").references(
+    () => portfolioHoldings.id,
+    { onDelete: "set null" },
+  ),
   // The category the user picked for a pair-less income override
   // (chosenKind ∈ dividend/interest/portfolio_income/portfolio_expense).
   // Apply stamps it on the row so it lands in the right report. NULL =
   // apply resolves-or-creates the canonical category for dividend/interest.
   // Migration 20260614. NULL for every non-income-override proposal.
-  chosenCategoryId: integer("chosen_category_id"),
+  chosenCategoryId: integer("chosen_category_id").references(() => categories.id, {
+    onDelete: "set null",
+  }),
   // 'pending' | 'approved' | 'rejected' | 'applied' | 'undone' | 'refused_with_reason'
   status: text("status").notNull().default("pending"),
   appliedAt: timestamp("applied_at", { withTimezone: true }),
   createdAt: timestamp("created_at", { withTimezone: true })
     .notNull()
     .defaultNow(),
-});
+}, (t) => [
+  index("backfill_proposals_chosen_counterpart_idx").on(t.chosenCounterpartTxId)
+    .where(sql`(chosen_counterpart_tx_id IS NOT NULL)`),
+  index("backfill_proposals_chosen_holding_idx").on(t.chosenHoldingId)
+    .where(sql`(chosen_holding_id IS NOT NULL)`),
+  index("backfill_proposals_run_status_idx").on(t.runId, t.status),
+  index("backfill_proposals_user_idx").on(t.userId),
+]);
 
 // ─── backfill_audit — snapshot of pre-apply row state for undo
 //
@@ -2288,4 +2547,6 @@ export const backfillAudit = pgTable("backfill_audit", {
   createdAt: timestamp("created_at", { withTimezone: true })
     .notNull()
     .defaultNow(),
-});
+}, (t) => [
+  index("backfill_audit_proposal_idx").on(t.proposalId),
+]);

@@ -79,6 +79,35 @@ Add one file to `scripts/migrations/`. That is the whole procedure.
 - **Do not regenerate the baseline.** A new migration is simply absent from the
   baseline's subsumed list, so it runs normally on a fresh database. That is the
   designed behaviour.
+- **If the migration creates an index, declare it in `src/db/schema-pg.ts` in
+  the SAME commit.** `tests/schema-index-parity.test.ts` fails the build
+  otherwise. The name and the uniqueness must match; put it in the pgTable's
+  third argument as `index("<name>")` / `uniqueIndex("<name>")`, using
+  `sql\`…\`` for an expression column or a partial `.where(…)` predicate, the
+  way `users_email_lower_unique` already does. The reason is below.
+
+## `schema-pg.ts` must declare every index the migrations create
+
+The migration chain is the source of truth for the schema, but it is not the
+only thing that builds one. `drizzle-kit push` (`npm run db:push`, and
+`.github/workflows/ci.yml` when it builds the scratch test database) creates
+**only what `schema-pg.ts` declares**. Anything the migrations create and the
+ORM file omits is simply absent there.
+
+That is not only a performance question. A missing UNIQUE index breaks every
+`INSERT … ON CONFLICT (<those columns>)`: Postgres raises `42P10`, "no unique or
+exclusion constraint matching the ON CONFLICT specification". Our upsert
+callsites generally sit inside a `try/catch` or a `.catch(() => {})`, so the
+write does not happen and nothing is reported. Two external bug reports, GH #348
+(`uq_bank_tx_hash` / `uq_bank_tx_fit` — every statement promote wrote zero
+`bank_transactions` rows) and GH #352 (`portfolio_snapshots_user_date_acct_idx`
+— net-worth snapshots never persisted), were both this.
+
+A full audit on 2026-09-17 built one database each way and diffed the catalogs.
+`schema-pg.ts` was missing **94 index shapes**, 53 CHECK constraints, 6 foreign
+keys and 4 columns. The indexes, FKs and columns are now declared;
+`tests/schema-index-parity.test.ts` is a pure static gate that keeps the index
+set from drifting again. CHECK constraints are still undeclared — see below.
 
 ## Never use `db:push` on a real environment
 
@@ -88,12 +117,15 @@ live database and applies the delta, **leaving no migration file behind**. That
 is precisely how prod acquired 14 tables no migration creates. Scratch databases
 only.
 
-It also expresses far less than the schema actually contains: `schema-pg.ts`
-declares **0 CHECK constraints and 2 partial indexes**, where prod has **52 and
-27**. Anything generated from the ORM schema silently drops the
-`opening_balance` 1:1 partial unique index, `accounts_mode_check`, the
-`transactions.source` 7-value CHECK, and ~48 others. This is also why the
-baseline is a `pg_dump` capture rather than `drizzle-kit generate` output.
+It also expresses less than the schema actually contains. As of 2026-09-17 the
+index gap is closed and gated by a test (above), but `schema-pg.ts` still
+declares **0 of the schema's 53 CHECK constraints** — `accounts_mode_check`, the
+`transactions.source` 10-value CHECK, the `transactions.kind` CHECK, the
+`holding_lots` quantity invariants and 49 others are SQL-only. It also cannot
+express `staged_transactions.peer_staged_id`'s `DEFERRABLE INITIALLY DEFERRED`
+foreign key. A `db:push` database therefore accepts writes Postgres should
+reject. This is also why the baseline is a `pg_dump` capture rather than
+`drizzle-kit generate` output.
 
 ## Regenerating the baseline
 
