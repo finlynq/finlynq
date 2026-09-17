@@ -20,6 +20,7 @@ import {
   uniqueIndex,
   unique,
   index,
+  check,
   uuid,
   jsonb,
   bigint,
@@ -76,6 +77,12 @@ export const accounts = pgTable("accounts", {
 }, (t) => [
   uniqueIndex("accounts_user_name_lookup_uniq").on(t.userId, t.nameLookup),
   index("idx_accounts_user_id").on(t.userId),
+  // ─── CHECK constraints — mirror of the migration chain ───
+  // Adding one in a migration means declaring it here in the SAME commit;
+  // tests/schema-check-parity.test.ts fails the build otherwise.
+  check("accounts_csv_mapping_mode_check", sql`${t.csvMappingMode} IN ('confirm','auto')`),
+  check("accounts_mode_check", sql`${t.mode} IN ('auto','approve','manual')`),
+  check("accounts_ofx_payee_source_check", sql`${t.ofxPayeeSource} IN ('name','memo')`),
 ]);
 
 export const categories = pgTable("categories", {
@@ -222,6 +229,20 @@ export const transactions = pgTable("transactions", {
   index("transactions_user_portfolio_holding_id_idx").on(t.userId, t.portfolioHoldingId)
     .where(sql`(portfolio_holding_id IS NOT NULL)`),
   index("transactions_user_updated_at_idx").on(t.userId, t.updatedAt.desc().nullsFirst()),
+  // ─── CHECK constraints — mirror of the migration chain ───
+  // Adding one in a migration means declaring it here in the SAME commit;
+  // tests/schema-check-parity.test.ts fails the build otherwise.
+  check("transactions_kind_check", sql`${t.kind} IS NULL OR ${t.kind} IN (
+      'buy','buy_cash_leg','sell','sell_cash_leg','in_kind_transfer_in',
+      'in_kind_transfer_out','fx_from','fx_to','fx_fee','portfolio_income',
+      'portfolio_expense','brokerage_deposit_out','brokerage_deposit_in',
+      'brokerage_withdrawal_out','brokerage_withdrawal_in','dividend','interest',
+      'opening_balance','balance_adjustment'
+    )`),
+  check("transactions_source_check", sql`${t.source} IN (
+      'manual','import','mcp_http','mcp_stdio','connector','sample_data',
+      'backup_restore','reconcile_link','backfill_synth','auto_rule'
+    )`),
 ]);
 
 // tx_currency_audit — flagged rows where transactions.currency != accounts.currency
@@ -293,6 +314,10 @@ export const securities = pgTable(
     // One security per (user, cluster). Backs the find-or-create re-select.
     uniqueIndex("securities_user_cluster_idx").on(t.userId, t.clusterKey),
     index("securities_user_idx").on(t.userId),
+    // ─── CHECK constraints — mirror of the migration chain ───
+    // Adding one in a migration means declaring it here in the SAME commit;
+    // tests/schema-check-parity.test.ts fails the build otherwise.
+    check("securities_price_source_check", sql`${t.priceSource} IN ('auto','manual')`),
   ],
 );
 
@@ -759,6 +784,10 @@ export const userPromptAcks = pgTable(
   (t) => [
     primaryKey({ columns: [t.userId, t.promptId, t.version] }),
     index("user_prompt_acks_user_idx").on(t.userId),
+    // ─── CHECK constraints — mirror of the migration chain ───
+    // Adding one in a migration means declaring it here in the SAME commit;
+    // tests/schema-check-parity.test.ts fails the build otherwise.
+    check("user_prompt_acks_status_chk", sql`${t.status} IN ('answered','deferred','dismissed')`),
   ],
 );
 
@@ -1046,7 +1075,15 @@ export const importTemplates = pgTable("import_templates", {
   importMode: text("import_mode").notNull().default("detailed"),
   createdAt: text("created_at").notNull(),
   updatedAt: text("updated_at").notNull(),
-});
+}, (t) => [
+  // ─── CHECK constraints — mirror of the migration chain ───
+  // Adding one in a migration means declaring it here in the SAME commit;
+  // tests/schema-check-parity.test.ts fails the build otherwise.
+  check("import_templates_date_format_override_check", sql`${t.dateFormatOverride} IS NULL OR ${t.dateFormatOverride} IN ('DD/MM/YYYY','MM/DD/YYYY','YYYY-MM-DD')`),
+  check("import_templates_mode_check", sql`${t.importMode} IN ('simplified','detailed')`),
+  check("import_templates_skip_footer_rows_check", sql`${t.skipFooterRows} >= 0`),
+  check("import_templates_skip_header_rows_check", sql`${t.skipHeaderRows} >= 0`),
+]);
 
 // Transaction Splits — split a single transaction across multiple categories/accounts
 export const transactionSplits = pgTable("transaction_splits", {
@@ -1246,6 +1283,13 @@ export const stagedImports = pgTable("staged_imports", {
   index("idx_staged_imports_user_tier").on(t.userId, t.encryptionTier),
   index("staged_imports_user_hash_idx").on(t.userId, t.contentHash)
     .where(sql`(content_hash IS NOT NULL)`),
+  // ─── CHECK constraints — mirror of the migration chain ───
+  // Adding one in a migration means declaring it here in the SAME commit;
+  // tests/schema-check-parity.test.ts fails the build otherwise.
+  check("staged_imports_date_format_override_check", sql`${t.dateFormatOverride} IS NULL OR ${t.dateFormatOverride} IN ('DD/MM/YYYY','MM/DD/YYYY','YYYY-MM-DD')`),
+  check("staged_imports_encryption_tier_check", sql`${t.encryptionTier} IN ('service','user')`),
+  check("staged_imports_skip_footer_rows_check", sql`${t.skipFooterRows} >= 0`),
+  check("staged_imports_skip_header_rows_check", sql`${t.skipHeaderRows} >= 0`),
 ]);
 
 export const stagedTransactions = pgTable("staged_transactions", {
@@ -1348,6 +1392,14 @@ export const stagedTransactions = pgTable("staged_transactions", {
   index("idx_staged_tx_import_dedup").on(t.stagedImportId, t.dedupStatus),
   index("idx_staged_tx_user_row_status").on(t.userId, t.rowStatus),
   index("idx_staged_tx_user_tier").on(t.userId, t.encryptionTier),
+  // ─── CHECK constraints — mirror of the migration chain ───
+  // Adding one in a migration means declaring it here in the SAME commit;
+  // tests/schema-check-parity.test.ts fails the build otherwise.
+  check("staged_transactions_dedup_status_check", sql`${t.dedupStatus} IN ('new','existing','probable_duplicate')`),
+  check("staged_transactions_encryption_tier_check", sql`${t.encryptionTier} IN ('service','user')`),
+  check("staged_transactions_reconcile_state_check", sql`${t.reconcileState} IN ('unmatched','auto_suggested','linked','skipped_duplicate')`),
+  check("staged_transactions_row_status_check", sql`${t.rowStatus} IN ('pending','approved','rejected')`),
+  check("staged_transactions_tx_type_check", sql`${t.txType} IN ('E','I','R')`),
 ]);
 
 // ─── bank_transactions — persistent bank-side ledger (2026-05-22)
@@ -1443,6 +1495,12 @@ export const bankUploadBatches = pgTable("bank_upload_batches", {
       t.uploadedAt.desc().nullsFirst(),
     ),
   index("idx_bank_upload_batches_user_tier").on(t.userId, t.encryptionTier),
+  // ─── CHECK constraints — mirror of the migration chain ───
+  // Adding one in a migration means declaring it here in the SAME commit;
+  // tests/schema-check-parity.test.ts fails the build otherwise.
+  check("bank_upload_batches_encryption_tier_check", sql`${t.encryptionTier} IN ('service','user')`),
+  check("bank_upload_batches_mode_check", sql`${t.mode} IN ('simplified','detailed')`),
+  check("bank_upload_batches_source_check", sql`${t.source} IN ('upload','email','connector')`),
 ]);
 
 export const bankTransactions = pgTable("bank_transactions", {
@@ -1542,6 +1600,11 @@ export const bankTransactions = pgTable("bank_transactions", {
   idxBankTransactionsUploadBatch: index("idx_bank_transactions_upload_batch")
     .on(table.uploadBatchId)
     .where(sql`${table.uploadBatchId} IS NOT NULL`),
+  // ─── CHECK constraints — mirror of the migration chain ───
+  // Adding one in a migration means declaring it here in the SAME commit;
+  // tests/schema-check-parity.test.ts fails the build otherwise.
+  bankTransactionsEncryptionTierCheck: check("bank_transactions_encryption_tier_check", sql`${table.encryptionTier} IN ('service','user')`),
+  bankTransactionsSourceCheck: check("bank_transactions_source_check", sql`${table.source} IN ('import','connector','backup_restore')`),
 }));
 
 // ─── simplefin_pending_transactions — refreshed snapshot of PENDING feed rows ──
@@ -1687,6 +1750,10 @@ export const transactionReconciliationFlags = pgTable(
   },
   (t) => [
     index("idx_tx_reconciliation_flags_user_tx").on(t.userId, t.transactionId),
+    // ─── CHECK constraints — mirror of the migration chain ───
+    // Adding one in a migration means declaring it here in the SAME commit;
+    // tests/schema-check-parity.test.ts fails the build otherwise.
+    check("transaction_reconciliation_flags_flag_kind_check", sql`${t.flagKind} = 'missing_from_statement'`),
   ],
 );
 
@@ -1809,6 +1876,16 @@ export const emailInbox = pgTable(
       t.action,
       t.receivedAt.desc().nullsFirst(),
     ),
+    // ─── CHECK constraints — mirror of the migration chain ───
+    // Adding one in a migration means declaring it here in the SAME commit;
+    // tests/schema-check-parity.test.ts fails the build otherwise.
+    check("email_inbox_action_check", sql`${t.action} IN (
+        'pending','auto_recorded','duplicate_skipped','needs_review','unparseable',
+        'discarded','manually_recorded'
+      )`),
+    check("email_inbox_encryption_tier_check", sql`${t.encryptionTier} IN ('service','user')`),
+    check("email_inbox_parse_confidence_check", sql`${t.parseConfidence} IN ('high','low')`),
+    check("email_inbox_source_kind_check", sql`${t.sourceKind} IN ('attachment','body')`),
   ],
 );
 
@@ -1891,6 +1968,13 @@ export const emailImportRules = pgTable(
       t.isActive,
       t.priority.desc().nullsFirst(),
     ),
+    // ─── CHECK constraints — mirror of the migration chain ───
+    // Adding one in a migration means declaring it here in the SAME commit;
+    // tests/schema-check-parity.test.ts fails the build otherwise.
+    check("email_import_rules_date_source_check", sql`${t.dateSource} IN ('parsed','received')`),
+    check("email_import_rules_match_op_check", sql`${t.matchOp} IN ('contains','exact','regex')`),
+    check("email_import_rules_match_type_check", sql`${t.matchType} IN ('sender','subject')`),
+    check("email_import_rules_mode_check", sql`${t.mode} IN ('auto','review')`),
   ],
 );
 
@@ -2010,6 +2094,13 @@ export const webhooks = pgTable("webhooks", {
 }, (t) => [
   index("idx_webhooks_user_id").on(t.userId),
   index("idx_webhooks_user_id_created_at_desc").on(t.userId, t.createdAt.desc().nullsFirst()),
+  // ─── CHECK constraints — mirror of the migration chain ───
+  // Adding one in a migration means declaring it here in the SAME commit;
+  // tests/schema-check-parity.test.ts fails the build otherwise.
+  check("webhooks_event_filter_check", sql`array_length(${t.eventFilter}, 1) > 0 AND ${t.eventFilter} <@ ARRAY[
+      'transaction.created','transaction.updated','transaction.deleted',
+      'transfer.created','import.approved'
+    ]::text[]`),
 ]);
 
 // `event` mirrors the same v1 closed list as `webhooks.event_filter`'s
@@ -2038,6 +2129,13 @@ export const webhookDeliveries = pgTable("webhook_deliveries", {
       t.webhookId,
       t.attemptedAt.desc().nullsFirst(),
     ),
+  // ─── CHECK constraints — mirror of the migration chain ───
+  // Adding one in a migration means declaring it here in the SAME commit;
+  // tests/schema-check-parity.test.ts fails the build otherwise.
+  check("webhook_deliveries_event_check", sql`${t.event} IN (
+      'transaction.created','transaction.updated','transaction.deleted',
+      'transfer.created','import.approved'
+    )`),
 ]);
 
 // ─── bank_daily_balances — per-day bank-reported anchor balances (2026-05-24)
@@ -2105,6 +2203,13 @@ export const bankDailyBalances = pgTable("bank_daily_balances", {
   ),
   index("idx_bank_daily_balances_upload_batch").on(table.uploadBatchId)
     .where(sql`(upload_batch_id IS NOT NULL)`),
+  // ─── CHECK constraints — mirror of the migration chain ───
+  // Adding one in a migration means declaring it here in the SAME commit;
+  // tests/schema-check-parity.test.ts fails the build otherwise.
+  check("bank_daily_balances_source_check", sql`${table.source} IN (
+      'csv_column','ofx_ledgerbal','upload_form','email','connector','backup_restore',
+      'mcp_manual'
+    )`),
 ]);
 
 // ─── holding_lots — per-lot cost basis tracking (Phase 1, 2026-05-25)
@@ -2182,6 +2287,14 @@ export const holdingLots = pgTable(
         table.status,
       )
       .where(sql`(status = 'open'::text)`),
+    // ─── CHECK constraints — mirror of the migration chain ───
+    // Adding one in a migration means declaring it here in the SAME commit;
+    // tests/schema-check-parity.test.ts fails the build otherwise.
+    check("holding_lots_check", sql`${table.qtyRemaining} >= 0 AND ${table.qtyRemaining} <= ${table.qtyOriginal}`),
+    check("holding_lots_origin_check", sql`${table.origin} IN ('buy','reinvest_div','transfer_in','split_adj','backfill')`),
+    check("holding_lots_qty_original_check", sql`${table.qtyOriginal} > 0`),
+    check("holding_lots_side_check", sql`${table.side} IN ('long','short')`),
+    check("holding_lots_status_check", sql`${table.status} IN ('open','closed','transferred_out')`),
   ],
 );
 
@@ -2229,6 +2342,14 @@ export const holdingLotClosures = pgTable(
       table.lotId,
     ),
     index("holding_lot_closures_close_tx_idx").on(table.closeTxId),
+    // ─── CHECK constraints — mirror of the migration chain ───
+    // Adding one in a migration means declaring it here in the SAME commit;
+    // tests/schema-check-parity.test.ts fails the build otherwise.
+    check("holding_lot_closures_close_kind_check", sql`${table.closeKind} IN (
+        'sell','transfer_out','swap_out','fx_conversion','income_expense','buy_sell',
+        'short_open','short_close'
+      )`),
+    check("holding_lot_closures_qty_closed_check", sql`${table.qtyClosed} > 0`),
   ],
 );
 
@@ -2412,6 +2533,11 @@ export const backfillRuns = pgTable("backfill_runs", {
   appliedAt: timestamp("applied_at", { withTimezone: true }),
 }, (t) => [
   index("backfill_runs_user_created_idx").on(t.userId, t.createdAt.desc().nullsFirst()),
+  // ─── CHECK constraints — mirror of the migration chain ───
+  // Adding one in a migration means declaring it here in the SAME commit;
+  // tests/schema-check-parity.test.ts fails the build otherwise.
+  check("backfill_runs_mode_check", sql`${t.mode} IN ('refuse_orphans','synthesize_orphans')`),
+  check("backfill_runs_status_check", sql`${t.status} IN ('planning','ready','applied','partially_applied','cancelled','undone')`),
 ]);
 
 // ─── backfill_proposals — proposed canonical reshapes for review
@@ -2526,6 +2652,21 @@ export const backfillProposals = pgTable("backfill_proposals", {
     .where(sql`(chosen_holding_id IS NOT NULL)`),
   index("backfill_proposals_run_status_idx").on(t.runId, t.status),
   index("backfill_proposals_user_idx").on(t.userId),
+  // ─── CHECK constraints — mirror of the migration chain ───
+  // Adding one in a migration means declaring it here in the SAME commit;
+  // tests/schema-check-parity.test.ts fails the build otherwise.
+  check("backfill_proposals_chosen_counterpart_mode_check", sql`${t.chosenCounterpartMode} IS NULL OR ${t.chosenCounterpartMode} IN ('link_existing','synth_new')`),
+  check("backfill_proposals_chosen_kind_check", sql`${t.chosenKind} IS NULL OR ${t.chosenKind} IN (
+      'opening_balance','dividend','interest','portfolio_income','portfolio_expense',
+      'buy','sell','in_kind_transfer_in','in_kind_transfer_out','fx_from','fx_to',
+      'brokerage_deposit_in','brokerage_deposit_out','brokerage_withdrawal_in',
+      'brokerage_withdrawal_out'
+    )`),
+  check("backfill_proposals_confidence_check", sql`${t.confidence} IN ('high','medium','low','refused')`),
+  check("backfill_proposals_dividend_variant_check", sql`${t.dividendVariant} IS NULL OR ${t.dividendVariant} IN ('cash_dividend','drip')`),
+  check("backfill_proposals_lot_action_check", sql`${t.lotAction} IS NULL OR ${t.lotAction} IN ('open','close','transfer')`),
+  check("backfill_proposals_status_check", sql`${t.status} IN ('pending','approved','rejected','applied','undone','refused_with_reason')`),
+  check("backfill_proposals_variant_choice_check", sql`${t.variantChoice} IS NULL OR ${t.variantChoice} IN ('separate_fee_row','absorb_into_cost')`),
 ]);
 
 // ─── backfill_audit — snapshot of pre-apply row state for undo

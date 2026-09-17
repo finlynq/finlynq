@@ -105,9 +105,38 @@ write does not happen and nothing is reported. Two external bug reports, GH #348
 
 A full audit on 2026-09-17 built one database each way and diffed the catalogs.
 `schema-pg.ts` was missing **94 index shapes**, 53 CHECK constraints, 6 foreign
-keys and 4 columns. The indexes, FKs and columns are now declared;
-`tests/schema-index-parity.test.ts` is a pure static gate that keeps the index
-set from drifting again. CHECK constraints are still undeclared — see below.
+keys and 4 columns. All of them are now declared except one deliberate omission
+(`staged_transactions.peer_staged_id`, below); `tests/schema-index-parity.test.ts`
+and `tests/schema-check-parity.test.ts` are pure static gates that keep the index
+and CHECK sets from drifting again.
+
+## The same rule applies to CHECK constraints
+
+**Adding or changing a CHECK in a migration means declaring it in
+`schema-pg.ts` in the SAME commit**, with the same constraint name and the same
+predicate, as `check("<name>", sql`…`)` in the pgTable's third argument.
+
+A missing CHECK fails in the opposite direction to a missing index: the database
+silently ACCEPTS values it is supposed to reject. A stale one is worse, because
+it rejects values the application writes — the 23514 lands inside the same
+`try/catch` that swallows a 42P10, so the row just never appears. PR #349's
+first revision wrote `source: "auto_uncategorized"` into `transactions`, which
+`transactions_source_check` does not allow; it looked correct in development
+only because that database had been built with `db:push` and carried no CHECK
+constraints at all.
+
+`tests/schema-check-parity.test.ts` compares names in both directions and, for
+the enumerated `x IN (…)` constraints, the allowed-value SET — so dropping one
+value from a list fails the build. It also asserts that `SOURCES` in
+`src/lib/tx-source.ts` equals `transactions_source_check`'s values, since those
+are two allow-lists for one column and drift between them is invisible
+otherwise.
+
+Write the predicate as `IN (…)` rather than `= ANY (ARRAY[…])`: Postgres parses
+both to the same expression, and the short form is what the rest of the file
+uses. Verified on 2026-09-17 by building one database each way and diffing
+`pg_get_constraintdef` for all 53 — byte-identical, casts and parenthesisation
+included.
 
 ## Never use `db:push` on a real environment
 
@@ -118,14 +147,15 @@ is precisely how prod acquired 14 tables no migration creates. Scratch databases
 only.
 
 It also expresses less than the schema actually contains. As of 2026-09-17 the
-index gap is closed and gated by a test (above), but `schema-pg.ts` still
-declares **0 of the schema's 53 CHECK constraints** — `accounts_mode_check`, the
-`transactions.source` 10-value CHECK, the `transactions.kind` CHECK, the
-`holding_lots` quantity invariants and 49 others are SQL-only. It also cannot
-express `staged_transactions.peer_staged_id`'s `DEFERRABLE INITIALLY DEFERRED`
-foreign key. A `db:push` database therefore accepts writes Postgres should
-reject. This is also why the baseline is a `pg_dump` capture rather than
-`drizzle-kit generate` output.
+index and CHECK gaps are both closed and gated by tests (above), but
+`drizzle-kit push` still cannot express
+`staged_transactions.peer_staged_id`'s `DEFERRABLE INITIALLY DEFERRED` foreign
+key, and it leaves no migration file behind for anyone else. This is also why
+the baseline is a `pg_dump` capture rather than `drizzle-kit generate` output.
+
+CI no longer uses it either: `.github/workflows/ci.yml` builds its scratch test
+database with `npm run db:migrate`, the same runner `deploy.sh` and the Docker
+entrypoint call, so the tests run against the schema prod actually has.
 
 ## Regenerating the baseline
 
