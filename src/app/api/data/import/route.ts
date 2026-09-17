@@ -890,9 +890,15 @@ export async function POST(request: NextRequest) {
         await db
           .insert(schema.settings)
           .values({ key: key as string, value: value as string, userId })
+          // `settings` has exactly ONE unique constraint: the composite PK
+          // `settings_pkey (key, user_id)`. A key-only target matches no
+          // constraint, so Postgres raises 42P10 on EVERY database — and this
+          // is the LAST step of an untransacted restore, so the whole request
+          // 500s with every other table already committed.
+          // `userId` is part of the conflict key, never something to overwrite.
           .onConflictDoUpdate({
-            target: schema.settings.key,
-            set: { value: value as string, userId },
+            target: [schema.settings.key, schema.settings.userId],
+            set: { value: value as string },
           })
           ;
       }
