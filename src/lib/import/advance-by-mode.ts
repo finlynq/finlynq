@@ -20,34 +20,92 @@
  * auto rule-firing is `applyRulesToBankRows({autoMaterialize:true})` (the same
  * Auto-pilot chokepoint the upload route used). No new write logic here.
  *
- * 2026-09-17 fix: the rule-firing sweep below used to run ONLY when
- * `sendStagedRowsToBankLedger` found something NEW to promote in the current
- * batch. On a re-sync that finds nothing new — the common case for a live
- * bank feed re-pulling mostly-already-known transactions — the function
- * returned early and never re-checked for OLDER `bank_transactions` rows
- * still missing a `transaction_bank_links` row (stuck there for any reason —
- * a transient bug, a rule added after the fact). The sweep now always runs
- * for `mode=auto`, independent of whether the current batch had anything new,
- * capped at 500 rows per call (matches `/api/reconcile/apply-rules`'s own
- * cap) so it stays bounded on an account with a large backlog. Its outcome is
- * reported separately (`sweptStaleRows`) rather than folded into
- * `stage`/`bankBatchId`/`promoted` — those three keep describing ONLY what
- * the current batch did, unchanged, because two existing callers depend on
- * that: `staging/upload/route.ts`'s `reachedLedger` redirect check
+ * 2026-09-17 fix (GH #349, contributed by @amityweb): the rule-firing sweep
+ * below used to run ONLY when `sendStagedRowsToBankLedger` found something NEW
+ * to promote in the current batch. On a re-sync that finds nothing new — the
+ * common case for a live bank feed re-pulling mostly-already-known
+ * transactions — the function returned early and never re-checked for OLDER
+ * `bank_transactions` rows still missing a `transaction_bank_links` row (stuck
+ * there for any reason: a transient bug, or a rule the user added AFTER those
+ * rows arrived). GH #332 is the same rows seen from the other end — the Action
+ * Center counts them, but nothing was ever going to retry them. The sweep now
+ * always runs for `mode=auto`, independent of whether the current batch had
+ * anything new.
+ *
+ * Its outcome is reported separately (`sweptStaleRows`) rather than folded
+ * into `stage`/`bankBatchId`/`promoted` — those three keep describing ONLY
+ * what the current batch did, unchanged, because two existing callers depend
+ * on that: `staging/upload/route.ts`'s `reachedLedger` redirect check
  * (`stage !== "pending"`) and the Auto-pilot toast's `total: advance.promoted`
  * — both would misreport if a promote-nothing-new batch started claiming
  * `stage:"loaded"` or a nonzero `recorded` with `promoted:0`.
+ *
+ * TWO RULES GOVERN THE SWEEP, and both are load-bearing:
+ *
+ *   1. It is PAGED BY A PERSISTENT KEYSET CURSOR, not by a bare `LIMIT`.
+ *      A cap with no `ORDER BY` lets the planner hand back the same page every
+ *      sync, so rows past the cap are NEVER revisited — a rule added later
+ *      would reach the first 500 rows and no others, forever. The cursor
+ *      (`settings.auto_sweep_cursor:<accountId>`) advances past the last id
+ *      of each full page and resets when a page comes back short, so
+ *      successive syncs walk the whole account and wrap. A cap is still
+ *      wanted: `POST /api/import/staging/upload` AWAITS this function, and
+ *      every matched row costs a `transactions` INSERT, so an uncapped pass
+ *      over a large backlog would turn one upload into a multi-minute
+ *      request. Measured on the dev clone of prod, the largest single account
+ *      holds 8,423 unlinked bank rows.
+ *
+ *   2. Stale rows run CATEGORIZE-ONLY. `record_investment_op` and
+ *      `create_transfer` write into somewhere other than the bank row's own
+ *      account, which the `possible_ledger_duplicate` guard never scans.
+ *      Firing those retroactively at rows the user already saw and left alone
+ *      would create portfolio ops and transfer pairs behind their back, so
+ *      those rows come back `skipReason:'sweep_side_effect_skipped'` and stay
+ *      unlinked. The CURRENT batch keeps today's full behaviour.
  */
 
 import { db, schema } from "@/db";
-import { and, eq, isNull, notInArray } from "drizzle-orm";
+import { and, asc, eq, gt, isNull, ne, or, sql } from "drizzle-orm";
 import { sendStagedRowsToBankLedger } from "@/lib/import/send-to-bank-ledger";
 import { applyRulesToBankRows } from "@/lib/reconcile/match-engine";
 
-/** Cap per sweep call — mirrors /api/reconcile/apply-rules's own cap so an
- *  account with a large stuck backlog can't turn one sync into an unbounded
- *  rule-firing pass. Anything left over is picked up on the next sync. */
-const SWEEP_MAX_ROWS = 500;
+/** Rows visited per sweep call — mirrors /api/reconcile/apply-rules's own cap.
+ *  The cursor below guarantees the NEXT call starts where this one stopped, so
+ *  the cap bounds one call's work without bounding total coverage. */
+const SWEEP_PAGE_SIZE = 500;
+
+/** Per-account keyset cursor: the last `bank_transactions.id` the sweep
+ *  visited. Empty/absent = start from the beginning. */
+const sweepCursorKey = (accountId: number) => `auto_sweep_cursor:${accountId}`;
+
+async function readSweepCursor(userId: string, accountId: number): Promise<string> {
+  const rows = await db
+    .select({ value: schema.settings.value })
+    .from(schema.settings)
+    .where(
+      and(
+        eq(schema.settings.userId, userId),
+        eq(schema.settings.key, sweepCursorKey(accountId)),
+      ),
+    )
+    .all();
+  return rows[0]?.value ?? "";
+}
+
+/** `""` means "wrapped — start from the beginning next time". */
+async function writeSweepCursor(
+  userId: string,
+  accountId: number,
+  cursor: string,
+): Promise<void> {
+  await db
+    .insert(schema.settings)
+    .values({ key: sweepCursorKey(accountId), userId, value: cursor })
+    .onConflictDoUpdate({
+      target: [schema.settings.key, schema.settings.userId],
+      set: { value: cursor },
+    });
+}
 
 export type AdvanceStage = "pending" | "loaded" | "recorded";
 export type AccountMode = "manual" | "approve" | "auto";
@@ -70,7 +128,8 @@ export interface AdvanceByModeResult {
   possibleDuplicates: number;
   /** Older, previously-unlinked bank rows on this account (NOT part of the
    *  current batch) that the retroactive sweep additionally rule-matched and
-   *  materialized this call, up to SWEEP_MAX_ROWS. Always 0 outside auto mode. */
+   *  materialized this call, from a page of at most SWEEP_PAGE_SIZE. Always 0
+   *  outside auto mode. */
   sweptStaleRows: number;
 }
 
@@ -145,21 +204,36 @@ export async function advanceStagedImportByMode(
     ? await db
         .select({ id: schema.bankTransactions.id })
         .from(schema.bankTransactions)
-        .where(eq(schema.bankTransactions.uploadBatchId, promote.batchId))
+        .where(and(
+          // Tenancy: the batch id is minted for this user, so this is hygiene
+          // rather than a hole — but every read of `bank_transactions` in this
+          // file filters on `user_id`, and this one must not be the exception.
+          eq(schema.bankTransactions.userId, userId),
+          eq(schema.bankTransactions.uploadBatchId, promote.batchId),
+        ))
         .all()
     : [];
   const batchIds = batchBankRows.map((r) => r.id);
   const batchIdSet = new Set(batchIds);
 
-  // Every OTHER unlinked bank row on THIS account (not "every unlinked row
-  // for the user"), excluding the current batch, capped at SWEEP_MAX_ROWS so
-  // a large backlog can't turn one sync into an unbounded rule-firing pass —
-  // the current batch is never truncated by this cap since it's queried
-  // separately above. Joining on `user_id` too (not just
-  // `bank_transaction_id`) so the anti-join can use
-  // `transaction_bank_links_user_bank_idx` — every index on that table leads
-  // with `user_id`, so a bank-id-only join condition can't use one.
-  const staleRowsQuery = db
+  // One page of OTHER unlinked bank rows on THIS account (not "every unlinked
+  // row for the user"), walked in id order from the persisted cursor.
+  //
+  // Excluding the current batch is `upload_batch_id IS DISTINCT FROM <batchId>`,
+  // NOT `id NOT IN (<every batch id>)`: the column is nullable
+  // (`schema-pg.ts` bankTransactions.uploadBatchId) and `upsertBankTransaction`
+  // never rewrites it on a re-seen row (`bank-ledger.ts`, the ON CONFLICT DO
+  // UPDATE sets last_seen_at/seen_count/source_filenames and leaves batch id
+  // alone), so a row's batch id is stable and the predicate is exactly
+  // equivalent — without binding one parameter per batch row. `IS DISTINCT
+  // FROM` is what handles the NULLs: plain `<>` would drop every legacy row
+  // that has no batch id at all, which is most of the backlog.
+  //
+  // Joining on `user_id` too (not just `bank_transaction_id`) so the anti-join
+  // can use `transaction_bank_links_user_bank_idx` — every index on that table
+  // leads with `user_id`, so a bank-id-only join condition can't use one.
+  const cursor = await readSweepCursor(userId, accountId);
+  const staleBankRows = await db
     .select({ id: schema.bankTransactions.id })
     .from(schema.bankTransactions)
     .leftJoin(
@@ -173,17 +247,40 @@ export async function advanceStagedImportByMode(
       eq(schema.bankTransactions.userId, userId),
       eq(schema.bankTransactions.accountId, accountId),
       isNull(schema.transactionBankLinks.id),
-      batchIds.length > 0 ? notInArray(schema.bankTransactions.id, batchIds) : undefined,
+      promote.ok
+        ? or(
+            isNull(schema.bankTransactions.uploadBatchId),
+            ne(schema.bankTransactions.uploadBatchId, promote.batchId),
+          )
+        : undefined,
+      cursor ? gt(schema.bankTransactions.id, sql`${cursor}::uuid`) : undefined,
     ))
-    .limit(SWEEP_MAX_ROWS);
-  const staleBankRows = await staleRowsQuery.all();
+    .orderBy(asc(schema.bankTransactions.id))
+    .limit(SWEEP_PAGE_SIZE)
+    .all();
   const staleIds = staleBankRows.map((r) => r.id);
+
+  // Advance the cursor past this page, or wrap when the page came back short
+  // (end of the account reached). Written BEFORE the rule pass so a crash
+  // mid-materialize can't re-run the same page forever; the pass is idempotent
+  // (`applyRulesToBankRows` skips already-linked rows) and anything missed is
+  // picked up on the next wrap.
+  await writeSweepCursor(
+    userId,
+    accountId,
+    staleIds.length === SWEEP_PAGE_SIZE ? staleIds[staleIds.length - 1] : "",
+  );
 
   const allIds = [...batchIds, ...staleIds];
   if (allIds.length === 0) return promote.ok ? loaded : base;
 
+  // ONE call, not two: `computeReconcileForAccount` runs once per account per
+  // call (match-engine.ts), so splitting batch and stale rows into separate
+  // calls would double the most expensive thing in the pass. The per-row
+  // `categorizeOnly` set is what keeps their behaviour different.
   const applied = await applyRulesToBankRows(userId, allIds, dek, {
     autoMaterialize: true,
+    categorizeOnly: new Set(staleIds),
   });
 
   // Split the combined result back into "this batch" vs "stale sweep" so the
@@ -214,7 +311,13 @@ export async function advanceStagedImportByMode(
 
   return {
     ...loaded,
-    stage: batchRecorded > 0 ? "recorded" : "loaded",
+    // Pre-PR semantics, restored verbatim: "recorded" means the rules pass RAN
+    // over this batch's rows, not that any of them matched. A batch that
+    // promoted nothing kept "loaded" because the old code returned early on an
+    // empty id list. Making it depend on the match count instead would be a
+    // silent contract change for every caller reading `stage`, and this PR is
+    // supposed to leave the batch's own reporting untouched.
+    stage: batchIds.length > 0 ? "recorded" : "loaded",
     recorded: batchRecorded,
     rulesFired: batchRulesFired,
     possibleDuplicates: batchPossibleDuplicates,

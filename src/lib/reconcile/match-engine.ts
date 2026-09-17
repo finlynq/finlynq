@@ -930,6 +930,30 @@ export interface ApplyRulesToBankRowsOptions {
    *  that bank row with source='auto_rule'. When false, the helper just
    *  reports which rows matched without writing anything (planning mode). */
   autoMaterialize?: boolean;
+  /**
+   * Suppress the two SIDE-EFFECT action kinds — `record_investment_op` and
+   * `create_transfer` — so a matched row can only be filed as a plain
+   * categorized transaction. Those two write somewhere OTHER than the bank
+   * row's own account (a portfolio position + cash sleeve; a transfer pair
+   * into a destination account), and the `possible_ledger_duplicate` guard
+   * only scans the bank row's own account, so it cannot see a duplicate at
+   * the far end.
+   *
+   * That is tolerable for rows a user just imported and is watching, but not
+   * for the retroactive sweep in `advanceStagedImportByMode`, which fires
+   * rules at OLD rows the user has already seen and left alone. A row
+   * suppressed this way comes back `matched: true` with
+   * `skipReason: 'sweep_side_effect_skipped'` and stays UNLINKED, so it keeps
+   * showing up in the Action Center for the user to handle deliberately.
+   *
+   * Pass a `Set` of `bank_transactions.id` to suppress only those rows —
+   * `true` applies to the whole call. The per-row form exists so one call can
+   * mix a freshly-promoted batch (full behaviour) with a stale sweep
+   * (categorize-only): `computeReconcileForAccount` runs once per account PER
+   * CALL, so splitting them into two calls would double the most expensive
+   * thing this function does.
+   */
+  categorizeOnly?: boolean | ReadonlySet<string>;
 }
 
 export interface ApplyRulesPerRowResult {
@@ -992,6 +1016,10 @@ export async function applyRulesToBankRows(
   opts?: ApplyRulesToBankRowsOptions,
 ): Promise<ApplyRulesToBankRowsResult> {
   const autoMaterialize = opts?.autoMaterialize === true;
+  const categorizeOnlyOpt = opts?.categorizeOnly;
+  const isCategorizeOnly = (bankRowId: string): boolean =>
+    categorizeOnlyOpt === true ||
+    (typeof categorizeOnlyOpt === "object" && categorizeOnlyOpt.has(bankRowId));
   const perRow: ApplyRulesPerRowResult[] = [];
   if (bankRowIds.length === 0) {
     return { materialized: 0, rulesFired: 0, possibleDuplicates: 0, perRow };
@@ -1222,6 +1250,17 @@ export async function applyRulesToBankRows(
         perRow.push({ bankRowId: bank.id, matched: true });
         continue;
       }
+      if (isCategorizeOnly(bank.id)) {
+        // Retroactive sweep — recording a portfolio op against an old row
+        // writes into a position + cash sleeve the duplicate guard never
+        // looked at. Leave it unlinked for the user.
+        perRow.push({
+          bankRowId: bank.id,
+          matched: true,
+          skipReason: "sweep_side_effect_skipped",
+        });
+        continue;
+      }
       // dek is non-null here — guarded by the autoMaterialize=>dek check.
       let firstTxId: number | undefined;
       let lastFailCode: string | undefined;
@@ -1263,6 +1302,17 @@ export async function applyRulesToBankRows(
       // immediately (mirrors the Manual materialize-dialog fix). Outflow
       // rows only; the helper refuses inflow / self / investment-dest.
       const transferDest = pickTransferDestFromActions(match.actions);
+      if (autoMaterialize && transferDest != null && isCategorizeOnly(bank.id)) {
+        // Retroactive sweep — a transfer pair writes a leg into the
+        // DESTINATION account, which `possible_ledger_duplicate` never
+        // scanned. Leave it unlinked for the user.
+        perRow.push({
+          bankRowId: bank.id,
+          matched: true,
+          skipReason: "sweep_side_effect_skipped",
+        });
+        continue;
+      }
       if (autoMaterialize && transferDest != null) {
         // dek is non-null here — guarded by the autoMaterialize=>dek check
         // at the top of the function.

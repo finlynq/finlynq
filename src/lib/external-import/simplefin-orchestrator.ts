@@ -119,6 +119,10 @@ export interface SimplefinStagedResult {
   stage: AdvanceStage;
   /** Rows recorded as transactions (auto only). */
   recorded: number;
+  /** GH #349 — older, previously-unlinked bank rows on this account that the
+   *  retroactive catch-up sweep recorded this sync. NOT part of `recorded`,
+   *  which counts only rows this sync pulled. Always 0 outside auto mode. */
+  sweptStaleRows: number;
 }
 
 export interface SimplefinSyncResult {
@@ -435,6 +439,7 @@ export async function syncSimpleFin(
       mode: advance.mode,
       stage: advance.stage,
       recorded: advance.recorded,
+      sweptStaleRows: advance.sweptStaleRows,
     });
    } catch (err) {
       errors.push(
@@ -599,8 +604,9 @@ export function enqueueAutoSyncSimpleFin(userId: string, dek: Buffer): void {
       const res = await maybeAutoSyncSimpleFin(userId, dek);
       if (res && res.staged.length > 0) {
         const recorded = res.staged.reduce((n, s) => n + s.recorded, 0);
+        const swept = res.staged.reduce((n, s) => n + s.sweptStaleRows, 0);
         console.log(
-          `[simplefin-autosync] user=${userId} accounts=${res.staged.length} recorded=${recorded}`,
+          `[simplefin-autosync] user=${userId} accounts=${res.staged.length} recorded=${recorded} swept=${swept}`,
         );
       }
     } catch (err) {

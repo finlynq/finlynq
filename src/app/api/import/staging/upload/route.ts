@@ -441,6 +441,13 @@ export async function POST(request: NextRequest) {
                 ),
                 possibleDuplicates: advance.possibleDuplicates,
                 total: advance.promoted,
+                // GH #349 — older unlinked bank rows on this account the
+                // retroactive sweep caught up this call. Additive and
+                // separate from the four counters above, which describe ONLY
+                // this batch. Reported in the response rather than folded
+                // into the toast's "N of M" arithmetic, which would be
+                // wrong: these rows were never part of M.
+                sweptStaleRows: advance.sweptStaleRows,
               },
             }
           : {}),
