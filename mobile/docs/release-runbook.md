@@ -106,3 +106,8 @@ npx eas build --platform ios --profile production --auto-submit --non-interactiv
   on a server without it, `/api/subscriptions` + `/api/recurring` are dev-mode gated and the screen
   shows "Subscriptions need a newer Finlynq server" for anyone not in dev mode. Promote the web
   change (dev → main) before moving this build past internal testing.
+- **1.0.18 / vc26 (Android + iOS)** adds **category reports**: Reports → Categories (month by
+  category vs a usual month) → a category's detail (6/12/24-month bars with average + budget,
+  top payees, recent transactions); Income statement category rows tap through too. Needs the
+  web release with `GET /api/reports/categories` + `/api/reports/category` (PR #356) on the
+  target backend; older servers show "Category reports need a newer Finlynq server".
