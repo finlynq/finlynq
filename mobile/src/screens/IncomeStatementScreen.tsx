@@ -18,13 +18,17 @@ import type { IncomeStatement, IncomeStatementRow } from "../../../shared/types"
 type Props = NativeStackScreenProps<MoreStackParamList, "IncomeStatement">;
 
 const toRows = (rows: IncomeStatementRow[]): GroupedRow[] =>
-  rows.map((r) => ({ name: r.categoryName, group: r.categoryGroup, total: r.total, count: r.count }));
+  rows.map((r) => ({ name: r.categoryName, group: r.categoryGroup, total: r.total, count: r.count, categoryId: r.categoryId }));
 
 export default function IncomeStatementScreen({ navigation, route }: Props) {
   const { colors } = useTheme();
   const { startDate, endDate, isBusiness, displayCurrency, rangeLabel } = route.params;
 
   const [data, setData] = useState<IncomeStatement | null>(null);
+  // Tapping a category opens its month-by-month detail.
+  const openCategory = (row: GroupedRow) => {
+    if (row.categoryId != null) navigation.navigate("CategoryDetail", { categoryId: row.categoryId, name: row.name });
+  };
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
@@ -116,10 +120,10 @@ export default function IncomeStatementScreen({ navigation, route }: Props) {
             </View>
 
             <Text style={[styles.sectionTitle, { color: colors.foreground }]}>Income</Text>
-            <GroupedCategoryTable rows={toRows(data.income)} currency={ccy} tone="pos" emptyText="No income in this range." />
+            <GroupedCategoryTable rows={toRows(data.income)} currency={ccy} tone="pos" emptyText="No income in this range." onPressItem={openCategory} />
 
             <Text style={[styles.sectionTitle, { color: colors.foreground, marginTop: 20 }]}>Expenses</Text>
-            <GroupedCategoryTable rows={toRows(data.expenses)} currency={ccy} tone="neg" emptyText="No expenses in this range." />
+            <GroupedCategoryTable rows={toRows(data.expenses)} currency={ccy} tone="neg" emptyText="No expenses in this range." onPressItem={openCategory} />
 
             {hasUnreal && unreal && (
               <>

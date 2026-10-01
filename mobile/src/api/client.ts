@@ -376,6 +376,8 @@ import type {
   Subscription,
   SubscriptionFormData,
   RecurringResponse,
+  CategoryOverviewResponse,
+  CategoryDetailResponse,
 } from "../../../shared/types";
 
 // Shared report query params. The date range + business + display currency are
@@ -595,6 +597,19 @@ export const endpoints = {
   // The user's active currency set — the picker source for a record's currency.
   getActiveCurrencies: () =>
     api.get<{ active: string[] }>("/api/settings/active-currencies"),
+
+  // Category reports (2026-10). ENVELOPED `{ success, data }` (apiHandler);
+  // request() passes the envelope through, so res.data is the payload. Both
+  // 404 on a server older than the 2026-10 web release.
+  getCategoryOverview: (p: { month?: string; type?: "E" | "I"; months?: number }) => {
+    const q = new URLSearchParams();
+    if (p.month) q.set("month", p.month);
+    if (p.type) q.set("type", p.type);
+    q.set("months", String(p.months ?? 12));
+    return api.get<CategoryOverviewResponse>(`/api/reports/categories?${q.toString()}`);
+  },
+  getCategoryDetail: (categoryId: number, months = 12) =>
+    api.get<CategoryDetailResponse>(`/api/reports/category?categoryId=${categoryId}&months=${months}`),
 
   // Goals — bare array of Goal + server-computed progress fields.
   getGoals: () => api.get<GoalWithProgress[]>("/api/goals"),

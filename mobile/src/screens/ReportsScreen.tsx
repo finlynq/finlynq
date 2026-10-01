@@ -112,6 +112,12 @@ export default function ReportsScreen() {
 
   const links: { icon: IconName; label: string; sub: string; onPress: () => void }[] = [
     {
+      icon: "categories",
+      label: "Categories",
+      sub: "Where your money goes, month by month",
+      onPress: () => navigation.navigate("CategoryReports"),
+    },
+    {
       icon: "reports",
       label: "Income statement",
       sub: "Income & expenses by category",

@@ -14,6 +14,8 @@ export interface GroupedRow {
   group: string;
   total: number;
   count: number;
+  /** When set (and `onPressItem` is passed), the row opens that category. */
+  categoryId?: number | null;
 }
 
 interface Props {
@@ -21,6 +23,8 @@ interface Props {
   currency: string;
   tone: "pos" | "neg";
   emptyText?: string;
+  /** Makes category rows that carry a `categoryId` tappable. */
+  onPressItem?: (row: GroupedRow) => void;
 }
 
 interface GroupBucket {
@@ -29,7 +33,7 @@ interface GroupBucket {
   total: number;
 }
 
-export function GroupedCategoryTable({ rows, currency, tone, emptyText }: Props) {
+export function GroupedCategoryTable({ rows, currency, tone, emptyText, onPressItem }: Props) {
   const { colors } = useTheme();
   const toneColor = tone === "pos" ? colors.pos : colors.neg;
 
@@ -97,10 +101,15 @@ export function GroupedCategoryTable({ rows, currency, tone, emptyText }: Props)
             {open &&
               g.items.map((item) => {
                 const pct = sectionTotal > 0 ? (item.total / sectionTotal) * 100 : 0;
+                const tappable = !!onPressItem && item.categoryId != null;
                 return (
-                  <View
+                  <TouchableOpacity
                     key={`${g.name}:${item.name}`}
                     style={[styles.itemRow, { borderTopColor: colors.border }]}
+                    disabled={!tappable}
+                    activeOpacity={0.7}
+                    onPress={() => onPressItem?.(item)}
+                    accessibilityRole={tappable ? "button" : undefined}
                   >
                     <View style={styles.itemTextWrap}>
                       <Text style={[styles.itemName, { color: colors.foreground }]} numberOfLines={1}>
@@ -113,7 +122,8 @@ export function GroupedCategoryTable({ rows, currency, tone, emptyText }: Props)
                     <Text style={[styles.itemAmount, { color: colors.foreground }]}>
                       {formatCurrency(item.total, currency, { decimals: 0 })}
                     </Text>
-                  </View>
+                    {tappable && <Icon name="chevronRight" size={14} color={colors.mutedForeground} />}
+                  </TouchableOpacity>
                 );
               })}
           </View>

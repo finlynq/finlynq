@@ -1156,3 +1156,68 @@ export interface BankRowCommitBody {
   payee?: string;
   accountId?: number;
 }
+
+// ─── Category reports (2026-10) ─────────────────────────────────────────────
+// GET /api/reports/categories + /api/reports/category. Both routes return the
+// apiHandler envelope `{ success, data }`, which request() passes through, so
+// `res.data` is the payload below. Amounts are in `displayCurrency`, oriented
+// POSITIVE in the category's direction (spend for expenses, receipts for income).
+
+export interface CategoryOverviewRow {
+  id: number;
+  name: string | null;
+  group: string;
+  amount: number;
+  /** Share of the month's total, 0..1. */
+  share: number;
+  /** Usual month: average of complete months before `month`, from first activity. */
+  average: number | null;
+  /** (amount − average) ÷ average. */
+  change: number | null;
+  budget: number | null;
+  /** Window months oldest → newest, selected month last. */
+  trend: number[];
+}
+
+export interface CategoryOverviewResponse {
+  type: "E" | "I";
+  displayCurrency: string;
+  month: string;
+  partial: boolean;
+  windowMonths: string[];
+  windowMonthsCount: number;
+  total: number;
+  averageTotal: number | null;
+  categories: CategoryOverviewRow[];
+}
+
+export interface CategoryDetailMonth {
+  month: string;
+  amount: number;
+  count: number;
+  budget: number | null;
+  partial: boolean;
+}
+
+export interface CategoryDetailResponse {
+  category: { id: number; name: string | null; type: "E" | "I" | "R"; group: string };
+  windowMonths: number;
+  displayCurrency: string;
+  payeesLocked: boolean;
+  months: CategoryDetailMonth[];
+  stats: {
+    thisMonth: number;
+    lastMonth: number;
+    sameMonthLastYear: number;
+    averageMonthly: number | null;
+    medianMonthly: number | null;
+    highestMonth: { month: string; amount: number } | null;
+    total: number;
+    transactionCount: number;
+    averageTransaction: number | null;
+    shareOfType: number | null;
+  };
+  hasBudget: boolean;
+  topPayees: { payee: string; amount: number; count: number; share: number }[];
+  recent: { id: number; date: string; payee: string | null; amount: number; currency: string; accountName: string | null }[];
+}

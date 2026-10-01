@@ -21,6 +21,8 @@ import InboxScreen from "../screens/InboxScreen";
 import ReconcileThresholdsScreen from "../screens/ReconcileThresholdsScreen";
 import SubscriptionsScreen from "../screens/SubscriptionsScreen";
 import AddSubscriptionScreen from "../screens/AddSubscriptionScreen";
+import CategoryReportsScreen from "../screens/CategoryReportsScreen";
+import CategoryDetailScreen from "../screens/CategoryDetailScreen";
 import type { Category, GoalWithProgress, Subscription, SubscriptionFormData } from "../../../shared/types";
 
 /** Date range + display currency threaded from the Reports hub to a detail
@@ -59,6 +61,9 @@ export type MoreStackParamList = {
   Trends: ReportRangeRouteParams;
   CashFlowSankey: ReportRangeRouteParams;
   YearOverYear: { displayCurrency: string };
+  // Category reports (2026-10): month-by-category overview + one category.
+  CategoryReports: { type?: "E" | "I" } | undefined;
+  CategoryDetail: { categoryId: number; name?: string };
 };
 
 const Stack = createNativeStackNavigator<MoreStackParamList>();
@@ -70,6 +75,8 @@ export default function MoreStack() {
       <Stack.Screen name="Budgets" component={BudgetsScreen} />
       <Stack.Screen name="Goals" component={GoalsScreen} />
       <Stack.Screen name="Subscriptions" component={SubscriptionsScreen} />
+      <Stack.Screen name="CategoryReports" component={CategoryReportsScreen} />
+      <Stack.Screen name="CategoryDetail" component={CategoryDetailScreen} />
       <Stack.Screen name="Categories" component={CategoriesScreen} />
       <Stack.Screen name="Import" component={ImportScreen} />
       <Stack.Screen name="Inbox" component={InboxScreen} />
