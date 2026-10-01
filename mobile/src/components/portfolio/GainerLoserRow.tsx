@@ -1,30 +1,30 @@
-// One "top mover" row — up/down chip + symbol/name + signed day-change $ (primary)
-// + signed %change (secondary), both colored by sign (FINLYNQ-238 — was muted-grey $).
+// One "top mover" row — up/down chip + name/ticker + signed day-change $ (primary)
+// + signed %change (secondary), both colored by sign (FINLYNQ-238).
+//
+// Renders the server's consolidated `Mover` (FINLYNQ-190: one row per ticker
+// across accounts). `dayChangeDisplay` is already in the overview's display
+// currency, so it's formatted with that — never re-derived from a per-account
+// change × qty. Tone follows the SIGN of the $ move; `changePct` can be null
+// (no prior-day value), in which case the % line is omitted.
 import React from "react";
 import { View, Text, StyleSheet } from "react-native";
 import { useTheme } from "../../theme";
 import { Icon } from "../icon";
-import { formatCurrency, safeName } from "../../lib/format";
+import { safeName } from "../../lib/format";
 import { holdingDescription } from "../../lib/portfolio/holdings";
-import type { EnrichedHolding } from "../../../../shared/types";
+import { signedMoney } from "../../lib/portfolio/format";
+import type { Mover } from "../../../../shared/types";
 
-export function GainerLoserRow({
-  holding,
-  currency,
-}: {
-  holding: EnrichedHolding;
-  currency: string;
-}) {
+export function GainerLoserRow({ mover, currency }: { mover: Mover; currency: string }) {
   const { colors } = useTheme();
-  const pct = holding.changePct ?? 0;
-  const up = pct >= 0;
-  const tone = up ? colors.pos : colors.neg;
-  // Day-change dollar estimate in the holding's own quote currency.
-  const dayChange = (holding.change ?? 0) * (holding.quantity ?? 0);
+  const dayChange = mover.dayChangeDisplay ?? 0;
+  const up = dayChange >= 0;
+  const tone = dayChange > 0 ? colors.pos : dayChange < 0 ? colors.neg : colors.mutedForeground;
   // FINLYNQ-242: description leads, ticker is the subtitle; fall back to the
-  // ticker as the primary line when no distinct description exists.
-  const desc = holdingDescription({ description: holding.quoteName, name: holding.name, symbol: holding.symbol });
-  const ticker = safeName(holding.symbol || holding.name, "—");
+  // ticker as the primary line when the name just echoes it.
+  const desc = holdingDescription({ name: mover.name, symbol: mover.symbol });
+  const ticker = safeName(mover.symbol || mover.name, "—");
+  const pct = mover.changePct;
   return (
     <View style={[styles.row, { borderBottomColor: colors.border }]}>
       <View
@@ -47,13 +47,15 @@ export function GainerLoserRow({
       </View>
       <View style={styles.right}>
         <Text style={[styles.change, { color: tone }]}>
-          {dayChange >= 0 ? "+" : ""}
-          {formatCurrency(dayChange, holding.quoteCurrency ?? currency, { decimals: 0 })}
+          {/* Cents for small moves so a real $0.42 move never reads "+$0". */}
+          {signedMoney(dayChange, currency, Math.abs(dayChange) < 10 ? 2 : 0)}
         </Text>
-        <Text style={[styles.pct, { color: tone }]}>
-          {up ? "+" : ""}
-          {pct.toFixed(1)}%
-        </Text>
+        {pct != null && (
+          <Text style={[styles.pct, { color: tone }]}>
+            {pct >= 0 ? "+" : ""}
+            {pct.toFixed(1)}%
+          </Text>
+        )}
       </View>
     </View>
   );

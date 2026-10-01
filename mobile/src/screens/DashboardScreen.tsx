@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from "react";
+import React, { useCallback, useEffect, useRef, useState } from "react";
 import {
   View,
   Text,
@@ -6,28 +6,72 @@ import {
   StyleSheet,
   RefreshControl,
   ActivityIndicator,
+  TouchableOpacity,
+  Dimensions,
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
-import { useTheme } from "../theme";
+import {
+  useIsFocused,
+  useNavigation,
+  type NavigatorScreenParams,
+} from "@react-navigation/native";
+import { useTheme, type ThemeColors } from "../theme";
 import { endpoints } from "../api/client";
 import { logger } from "../lib/logger";
-import { formatCurrency as formatCurrencyBase } from "../lib/format";
-import type { DashboardData, HealthScoreData, BudgetWithSpending, Category } from "../../../shared/types";
+import { formatCurrency, safeName } from "../lib/format";
+import {
+  DEFAULT_DISPLAY_CURRENCY,
+  formatMonthLabel,
+  monthKey,
+  resolveSavingsRate,
+  sortBudgetsByRisk,
+} from "../lib/dashboard";
+import type {
+  ApiResponse,
+  DashboardData,
+  HealthScoreData,
+  BudgetWithSpending,
+  Transaction,
+} from "../../../shared/types";
+import type { MoreStackParamList } from "../navigation/MoreStack";
+import type { TransactionsStackParamList } from "../navigation/TransactionsStack";
 
-function formatCurrency(amount: number, currency = "USD"): string {
-  return formatCurrencyBase(amount, currency, { decimals: 0 });
+/** Summary tiles use whole units; transaction rows keep cents. */
+function formatWhole(amount: number, currency: string): string {
+  return formatCurrency(amount, currency, { decimals: 0 });
 }
 
-function getCurrentMonth(): string {
-  const d = new Date();
-  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
+/** Below this window width the health card moves to its own row so the
+ *  Net Worth / Assets / Liabilities figures get the full card width. */
+const NARROW_WIDTH = 400;
+
+const BUDGET_PREVIEW_COUNT = 5;
+
+// Palette-aligned via theme tokens (light AND dark): teal (good) / amber
+// (fair) / coral (needs work).
+function getHealthColor(score: number, colors: ThemeColors): string {
+  if (score >= 70) return colors.pos;
+  if (score >= 40) return colors.primary;
+  return colors.destructive;
 }
 
-function getHealthColor(score: number): string {
-  // Palette-aligned: teal (good) / amber (fair) / coral (needs work).
-  if (score >= 70) return "#1fb393";
-  if (score >= 40) return "#f5a623";
-  return "#db4f3f";
+// The Home tab is a direct tab screen; it deep-links into the More and
+// Transactions stacks. TabParamList types Transactions as `undefined`, so a
+// minimal typed cast keeps this off `any`.
+type DashboardNav = {
+  navigate: {
+    (tab: "More", params: NavigatorScreenParams<MoreStackParamList>): void;
+    (tab: "Transactions", params: NavigatorScreenParams<TransactionsStackParamList>): void;
+  };
+};
+
+/** Never let one rejected request take the other dashboard fetches down with it. */
+function settle<T>(p: Promise<ApiResponse<T>>): Promise<ApiResponse<T>> {
+  return p.catch((e: unknown) => {
+    const detail = e instanceof Error ? `${e.name}: ${e.message}` : String(e);
+    logger.error("dashboard", "request threw", { detail });
+    return { success: false as const, error: "Cannot connect to server" };
+  });
 }
 
 function HealthScoreRing({ score, grade, color }: { score: number; grade: string; color: string }) {
@@ -82,12 +126,14 @@ function BudgetProgressBar({
   label,
   spent,
   budget,
+  currency,
   colors,
 }: {
   label: string;
   spent: number;
   budget: number;
-  colors: ReturnType<typeof useTheme>["colors"];
+  currency: string;
+  colors: ThemeColors;
 }) {
   const pct = budget > 0 ? Math.min((spent / budget) * 100, 100) : 0;
   const isOver = spent > budget;
@@ -98,8 +144,13 @@ function BudgetProgressBar({
         <Text style={[budgetStyles.name, { color: colors.foreground }]} numberOfLines={1}>
           {label}
         </Text>
-        <Text style={[budgetStyles.amounts, { color: colors.mutedForeground }]}>
-          {formatCurrency(spent)} / {formatCurrency(budget)}
+        <Text
+          style={[
+            budgetStyles.amounts,
+            { color: isOver ? colors.destructive : colors.mutedForeground },
+          ]}
+        >
+          {formatWhole(spent, currency)} / {formatWhole(budget, currency)}
         </Text>
       </View>
       <View style={[budgetStyles.bar, { backgroundColor: colors.secondary }]}>
@@ -118,62 +169,62 @@ function BudgetProgressBar({
 }
 
 export default function DashboardScreen() {
-  const theme = useTheme();
+  const { colors } = useTheme();
+  const isFocused = useIsFocused();
+  const navigation = useNavigation() as unknown as DashboardNav;
+  // Same convention as TrendBars / CategoryDetailScreen (the jest RN mock
+  // stubs Dimensions, not useWindowDimensions).
+  const narrow = Dimensions.get("window").width < NARROW_WIDTH;
+
   const [data, setData] = useState<DashboardData | null>(null);
   const [health, setHealth] = useState<HealthScoreData | null>(null);
   const [budgets, setBudgets] = useState<BudgetWithSpending[]>([]);
-  const [categories, setCategories] = useState<Category[]>([]);
+  // True only until the FIRST load settles; later refetches (focus, pull) keep
+  // the last good data on screen instead of flashing a full-screen spinner.
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // Drop responses from a superseded fetch (focus refetch racing a pull).
+  const fetchSeq = useRef(0);
 
-  const fetchAll = async (isRefresh = false) => {
+  const fetchAll = useCallback(async (isRefresh = false) => {
+    const seq = ++fetchSeq.current;
     if (isRefresh) setRefreshing(true);
-    else setLoading(true);
     try {
-      const [dashRes, healthRes, budgetRes, catRes] = await Promise.all([
-        endpoints.getDashboard(),
-        endpoints.getHealthScore(),
-        endpoints.getBudgets(getCurrentMonth()),
-        endpoints.getCategories(),
+      const [dashRes, healthRes, budgetRes] = await Promise.all([
+        settle(endpoints.getDashboard()),
+        settle(endpoints.getHealthScore()),
+        settle(endpoints.getBudgets(monthKey())),
       ]);
+      if (seq !== fetchSeq.current) return;
 
       if (dashRes.success) {
         setData(dashRes.data);
         setError(null);
       } else {
+        // Keep the last good data (if any) — the error renders as a banner.
         logger.warn("dashboard", "dashboard fetch failed", { error: dashRes.error });
-        setError(dashRes.error);
+        setError(dashRes.error || "Couldn't load your dashboard");
       }
-
       if (healthRes.success) setHealth(healthRes.data);
       else logger.warn("dashboard", "health-score fetch failed", { error: healthRes.error });
       if (budgetRes.success) setBudgets(budgetRes.data);
       else logger.warn("dashboard", "budgets fetch failed", { error: budgetRes.error });
-      // /api/budgets returns categoryNameCt (ciphertext) undecrypted, so resolve
-      // the display name from the decrypted categories list by id (mirrors
-      // BudgetsScreen). Without this the budget progress shows "Category #1014".
-      if (catRes.success) setCategories(catRes.data);
-      else logger.warn("dashboard", "categories fetch failed", { error: catRes.error });
-    } catch (e) {
-      const detail = e instanceof Error ? `${e.name}: ${e.message}` : String(e);
-      logger.error("dashboard", "fetchAll threw", { detail });
-      setError("Cannot connect to server");
     } finally {
-      setLoading(false);
-      setRefreshing(false);
+      if (seq === fetchSeq.current) {
+        setLoading(false);
+        setRefreshing(false);
+      }
     }
-  };
-
-  useEffect(() => {
-    fetchAll();
   }, []);
 
-  const colors = theme.colors;
-  const categoryLabel = (catId: number) =>
-    categories.find((c) => c.id === catId)?.name || `Category #${catId}`;
+  // Refetch every time Home regains focus — a transaction added on another tab
+  // must show up here without a manual pull.
+  useEffect(() => {
+    if (isFocused) fetchAll();
+  }, [isFocused, fetchAll]);
 
-  if (loading) {
+  if (loading && !data) {
     return (
       <View style={[styles.center, { backgroundColor: colors.background }]}>
         <ActivityIndicator size="large" color={colors.primary} />
@@ -181,15 +232,43 @@ export default function DashboardScreen() {
     );
   }
 
-  if (error) {
-    return (
-      <View style={[styles.center, { backgroundColor: colors.background }]}>
-        <Text style={{ color: colors.destructive, fontSize: 15 }}>{error}</Text>
-      </View>
-    );
-  }
+  const currency = data?.displayCurrency || DEFAULT_DISPLAY_CURRENCY;
+  const healthColor = health ? getHealthColor(health.score, colors) : colors.primary;
+  const monthTitle = data?.referenceMonth ? formatMonthLabel(data.referenceMonth) : "This Month";
+  const savings = resolveSavingsRate(health, data);
+  const sortedBudgets = sortBudgetsByRisk(budgets);
+  const budgetCurrency =
+    (budgets[0] as (BudgetWithSpending & { displayCurrency?: string }) | undefined)
+      ?.displayCurrency || currency;
 
-  const healthColor = health ? getHealthColor(health.score) : colors.primary;
+  const goTo = {
+    categoryReports: (type: "E" | "I") =>
+      navigation.navigate("More", { screen: "CategoryReports", params: { type }, initial: false }),
+    budgets: () => navigation.navigate("More", { screen: "Budgets", initial: false }),
+    transaction: (transaction: Transaction) =>
+      navigation.navigate("Transactions", {
+        screen: "TransactionDetail",
+        params: { transaction },
+        initial: false,
+      }),
+  };
+
+  const errorBanner = error ? (
+    <View
+      style={[styles.banner, { backgroundColor: colors.card, borderColor: colors.destructive }]}
+    >
+      <Text style={[styles.bannerText, { color: colors.destructive }]}>
+        {data ? `${error} — showing your last loaded data.` : error}
+      </Text>
+      <TouchableOpacity
+        style={[styles.retryBtn, { borderColor: colors.border }]}
+        onPress={() => fetchAll(true)}
+        accessibilityRole="button"
+      >
+        <Text style={[styles.retryText, { color: colors.primary }]}>Retry</Text>
+      </TouchableOpacity>
+    </View>
+  ) : null;
 
   return (
     <SafeAreaView style={[styles.safe, { backgroundColor: colors.background }]} edges={["top"]}>
@@ -201,144 +280,205 @@ export default function DashboardScreen() {
       >
         <Text style={[styles.header, { color: colors.foreground }]}>Dashboard</Text>
 
-        {/* Net Worth + Health Score Row */}
-        <View style={styles.heroRow}>
-          {/* Net Worth Card */}
-          <View
-            style={[
-              styles.card,
-              styles.heroCard,
-              { backgroundColor: colors.card, borderColor: colors.border },
-            ]}
-          >
-            <Text style={[styles.cardLabel, { color: colors.mutedForeground }]}>Net Worth</Text>
-            <Text style={[styles.cardValue, { color: colors.foreground }]}>
-              {data ? formatCurrency(data.netWorth) : "--"}
-            </Text>
-            <View style={styles.row}>
-              <View style={styles.halfCol}>
-                <Text style={[styles.smallLabel, { color: colors.mutedForeground }]}>Assets</Text>
-                <Text style={[styles.smallValue, { color: colors.pos }]}>
-                  {data ? formatCurrency(data.totalAssets) : "--"}
-                </Text>
-              </View>
-              <View style={styles.halfCol}>
-                <Text style={[styles.smallLabel, { color: colors.mutedForeground }]}>
-                  Liabilities
-                </Text>
-                <Text style={[styles.smallValue, { color: colors.destructive }]}>
-                  {data ? formatCurrency(data.totalLiabilities) : "--"}
-                </Text>
-              </View>
-            </View>
-          </View>
+        {errorBanner}
 
-          {/* Health Score Card */}
-          {health && (
-            <View
-              style={[
-                styles.card,
-                styles.healthCard,
-                { backgroundColor: colors.card, borderColor: colors.border },
-              ]}
-            >
-              <Text style={[styles.cardLabel, { color: colors.mutedForeground }]}>
-                Health Score
-              </Text>
-              <HealthScoreRing score={health.score} grade={health.grade} color={healthColor} />
-            </View>
-          )}
-        </View>
-
-        {/* Monthly Summary */}
-        <View style={[styles.card, { backgroundColor: colors.card, borderColor: colors.border }]}>
-          <Text style={[styles.cardLabel, { color: colors.mutedForeground }]}>This Month</Text>
-          <View style={styles.row}>
-            <View style={styles.halfCol}>
-              <Text style={[styles.smallLabel, { color: colors.mutedForeground }]}>Income</Text>
-              <Text style={[styles.smallValue, { color: colors.pos }]}>
-                {data ? formatCurrency(data.monthlyIncome) : "--"}
-              </Text>
-            </View>
-            <View style={styles.halfCol}>
-              <Text style={[styles.smallLabel, { color: colors.mutedForeground }]}>Expenses</Text>
-              <Text style={[styles.smallValue, { color: colors.destructive }]}>
-                {data ? formatCurrency(data.monthlyExpenses) : "--"}
-              </Text>
-            </View>
-          </View>
-          {data && data.savingsRate > 0 && (
-            <View style={[styles.savingsBar, { backgroundColor: colors.secondary }]}>
+        {data && (
+          <>
+            {/* Net Worth + Health Score Row (stacked on narrow phones) */}
+            <View style={narrow ? styles.heroColumn : styles.heroRow}>
+              {/* Net Worth Card */}
               <View
                 style={[
-                  styles.savingsFill,
-                  {
-                    backgroundColor: colors.primary,
-                    width: `${Math.min(data.savingsRate, 100)}%`,
-                  },
-                ]}
-              />
-              <Text style={[styles.savingsText, { color: colors.mutedForeground }]}>
-                {data.savingsRate.toFixed(0)}% savings rate
-              </Text>
-            </View>
-          )}
-        </View>
-
-        {/* Budget Progress Summary */}
-        {budgets.length > 0 && (
-          <View
-            style={[styles.card, { backgroundColor: colors.card, borderColor: colors.border }]}
-          >
-            <Text style={[styles.cardLabel, { color: colors.mutedForeground }]}>
-              Budget Progress
-            </Text>
-            {budgets.slice(0, 5).map((b) => (
-              <BudgetProgressBar
-                key={b.id}
-                label={categoryLabel(b.categoryId)}
-                spent={b.convertedSpent ?? 0}
-                budget={b.convertedAmount ?? b.amount}
-                colors={colors}
-              />
-            ))}
-            {budgets.length > 5 && (
-              <Text style={[styles.moreText, { color: colors.mutedForeground }]}>
-                +{budgets.length - 5} more budgets
-              </Text>
-            )}
-          </View>
-        )}
-
-        {/* Recent Transactions */}
-        <View style={[styles.card, { backgroundColor: colors.card, borderColor: colors.border }]}>
-          <Text style={[styles.cardLabel, { color: colors.mutedForeground }]}>
-            Recent Transactions
-          </Text>
-          {data?.recentTransactions?.slice(0, 5).map((tx) => (
-            <View key={tx.id} style={[styles.txRow, { borderBottomColor: colors.border }]}>
-              <View style={styles.txLeft}>
-                <Text style={[styles.txPayee, { color: colors.foreground }]}>
-                  {tx.payee || tx.note || "Transaction"}
-                </Text>
-                <Text style={[styles.txDate, { color: colors.mutedForeground }]}>{tx.date}</Text>
-              </View>
-              <Text
-                style={[
-                  styles.txAmount,
-                  { color: tx.amount >= 0 ? colors.pos : colors.foreground },
+                  styles.card,
+                  narrow ? styles.heroCardNarrow : styles.heroCard,
+                  { backgroundColor: colors.card, borderColor: colors.border },
                 ]}
               >
-                {formatCurrency(tx.amount)}
-              </Text>
+                <Text style={[styles.cardLabel, { color: colors.mutedForeground }]}>Net Worth</Text>
+                <Text
+                  style={[styles.cardValue, { color: colors.foreground }]}
+                  numberOfLines={1}
+                  adjustsFontSizeToFit
+                  minimumFontScale={0.5}
+                >
+                  {formatWhole(data.netWorth, currency)}
+                </Text>
+                <View style={styles.row}>
+                  <View style={styles.halfCol}>
+                    <Text style={[styles.smallLabel, { color: colors.mutedForeground }]}>Assets</Text>
+                    <Text
+                      style={[styles.smallValue, { color: colors.pos }]}
+                      numberOfLines={1}
+                      adjustsFontSizeToFit
+                      minimumFontScale={0.5}
+                    >
+                      {formatWhole(data.totalAssets, currency)}
+                    </Text>
+                  </View>
+                  <View style={styles.halfCol}>
+                    <Text style={[styles.smallLabel, { color: colors.mutedForeground }]}>
+                      Liabilities
+                    </Text>
+                    <Text
+                      style={[styles.smallValue, { color: colors.destructive }]}
+                      numberOfLines={1}
+                      adjustsFontSizeToFit
+                      minimumFontScale={0.5}
+                    >
+                      {formatWhole(data.totalLiabilities, currency)}
+                    </Text>
+                  </View>
+                </View>
+              </View>
+
+              {/* Health Score Card */}
+              {health && (
+                <View
+                  style={[
+                    styles.card,
+                    narrow ? styles.healthCardNarrow : styles.healthCard,
+                    { backgroundColor: colors.card, borderColor: colors.border },
+                  ]}
+                >
+                  <Text style={[styles.cardLabel, { color: colors.mutedForeground }]}>
+                    Health Score
+                  </Text>
+                  <HealthScoreRing score={health.score} grade={health.grade} color={healthColor} />
+                </View>
+              )}
             </View>
-          ))}
-          {(!data?.recentTransactions || data.recentTransactions.length === 0) && (
-            <Text style={[styles.emptyText, { color: colors.mutedForeground }]}>
-              No recent transactions
-            </Text>
-          )}
-        </View>
+
+            {/* Monthly Summary — the last COMPLETE month, named explicitly */}
+            <View style={[styles.card, { backgroundColor: colors.card, borderColor: colors.border }]}>
+              <Text style={[styles.cardLabel, { color: colors.mutedForeground }]}>{monthTitle}</Text>
+              <View style={styles.row}>
+                <TouchableOpacity
+                  style={styles.halfCol}
+                  activeOpacity={0.7}
+                  onPress={() => goTo.categoryReports("I")}
+                  accessibilityRole="button"
+                  accessibilityLabel="Income by category"
+                >
+                  <Text style={[styles.smallLabel, { color: colors.mutedForeground }]}>Income ›</Text>
+                  <Text
+                    style={[styles.smallValue, { color: colors.pos }]}
+                    numberOfLines={1}
+                    adjustsFontSizeToFit
+                    minimumFontScale={0.5}
+                  >
+                    {formatWhole(data.monthlyIncome, currency)}
+                  </Text>
+                </TouchableOpacity>
+                <TouchableOpacity
+                  style={styles.halfCol}
+                  activeOpacity={0.7}
+                  onPress={() => goTo.categoryReports("E")}
+                  accessibilityRole="button"
+                  accessibilityLabel="Expenses by category"
+                >
+                  <Text style={[styles.smallLabel, { color: colors.mutedForeground }]}>Expenses ›</Text>
+                  <Text
+                    style={[styles.smallValue, { color: colors.destructive }]}
+                    numberOfLines={1}
+                    adjustsFontSizeToFit
+                    minimumFontScale={0.5}
+                  >
+                    {formatWhole(data.monthlyExpenses, currency)}
+                  </Text>
+                </TouchableOpacity>
+              </View>
+              {savings && (
+                <View style={[styles.savingsBar, { backgroundColor: colors.secondary }]}>
+                  <View
+                    style={[
+                      styles.savingsFill,
+                      {
+                        backgroundColor: colors.primary,
+                        width: `${Math.max(0, Math.min(savings.pct, 100))}%`,
+                      },
+                    ]}
+                  />
+                  <Text
+                    style={[
+                      styles.savingsText,
+                      { color: savings.pct < 0 ? colors.destructive : colors.mutedForeground },
+                    ]}
+                  >
+                    {savings.pct}% savings rate · {savings.period}
+                  </Text>
+                </View>
+              )}
+            </View>
+
+            {/* Budget Progress Summary — most at-risk first */}
+            {sortedBudgets.length > 0 && (
+              <TouchableOpacity
+                activeOpacity={0.8}
+                onPress={goTo.budgets}
+                accessibilityRole="button"
+                style={[styles.card, { backgroundColor: colors.card, borderColor: colors.border }]}
+              >
+                <View style={styles.cardHeaderRow}>
+                  <Text style={[styles.cardLabel, { color: colors.mutedForeground }]}>
+                    Budget Progress
+                  </Text>
+                  <Text style={[styles.linkText, { color: colors.primary }]}>See all ›</Text>
+                </View>
+                {sortedBudgets.slice(0, BUDGET_PREVIEW_COUNT).map((b) => (
+                  <BudgetProgressBar
+                    key={b.id}
+                    label={safeName(b.categoryName, `Category #${b.categoryId}`)}
+                    spent={b.convertedSpent ?? 0}
+                    budget={b.convertedAmount ?? b.amount}
+                    currency={budgetCurrency}
+                    colors={colors}
+                  />
+                ))}
+                {sortedBudgets.length > BUDGET_PREVIEW_COUNT && (
+                  <Text style={[styles.moreText, { color: colors.mutedForeground }]}>
+                    +{sortedBudgets.length - BUDGET_PREVIEW_COUNT} more budgets
+                  </Text>
+                )}
+              </TouchableOpacity>
+            )}
+
+            {/* Recent Transactions */}
+            <View style={[styles.card, { backgroundColor: colors.card, borderColor: colors.border }]}>
+              <Text style={[styles.cardLabel, { color: colors.mutedForeground }]}>
+                Recent Transactions
+              </Text>
+              {data.recentTransactions?.slice(0, 5).map((tx) => (
+                <TouchableOpacity
+                  key={tx.id}
+                  activeOpacity={0.7}
+                  onPress={() => goTo.transaction(tx)}
+                  style={[styles.txRow, { borderBottomColor: colors.border }]}
+                >
+                  <View style={styles.txLeft}>
+                    <Text style={[styles.txPayee, { color: colors.foreground }]} numberOfLines={1}>
+                      {safeName(tx.payee || tx.note, "Transaction")}
+                    </Text>
+                    <Text style={[styles.txDate, { color: colors.mutedForeground }]}>{tx.date}</Text>
+                  </View>
+                  <Text
+                    style={[
+                      styles.txAmount,
+                      { color: tx.amount >= 0 ? colors.pos : colors.foreground },
+                    ]}
+                  >
+                    {/* Each row in its OWN currency, with cents. */}
+                    {formatCurrency(tx.amount, tx.currency || currency)}
+                  </Text>
+                </TouchableOpacity>
+              ))}
+              {(!data.recentTransactions || data.recentTransactions.length === 0) && (
+                <Text style={[styles.emptyText, { color: colors.mutedForeground }]}>
+                  No recent transactions
+                </Text>
+              )}
+            </View>
+          </>
+        )}
       </ScrollView>
     </SafeAreaView>
   );
@@ -347,23 +487,32 @@ export default function DashboardScreen() {
 const styles = StyleSheet.create({
   safe: { flex: 1 },
   center: { flex: 1, alignItems: "center", justifyContent: "center" },
-  scroll: { padding: 16, paddingBottom: 32 },
+  scroll: { padding: 16, paddingBottom: 32, flexGrow: 1 },
   header: { fontSize: 28, fontWeight: "800", marginBottom: 16 },
   heroRow: { flexDirection: "row", gap: 12, marginBottom: 12 },
+  heroColumn: { flexDirection: "column", gap: 12, marginBottom: 12 },
   heroCard: { flex: 1, marginBottom: 0 },
+  heroCardNarrow: { marginBottom: 0 },
   healthCard: { width: 140, marginBottom: 0, alignItems: "center" },
+  healthCardNarrow: { marginBottom: 0, alignItems: "center" },
   card: {
     borderRadius: 12,
     borderWidth: StyleSheet.hairlineWidth,
     padding: 16,
     marginBottom: 12,
   },
+  cardHeaderRow: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "center",
+  },
+  linkText: { fontSize: 12, fontWeight: "600" },
   cardLabel: { fontSize: 13, fontWeight: "600", marginBottom: 4 },
-  cardValue: { fontSize: 28, fontWeight: "800", marginBottom: 12 },
+  cardValue: { fontSize: 28, fontWeight: "800", marginBottom: 12, fontVariant: ["tabular-nums"] },
   row: { flexDirection: "row", gap: 12 },
   halfCol: { flex: 1 },
   smallLabel: { fontSize: 12, marginBottom: 2 },
-  smallValue: { fontSize: 18, fontWeight: "700" },
+  smallValue: { fontSize: 18, fontWeight: "700", fontVariant: ["tabular-nums"] },
   savingsBar: {
     height: 24,
     borderRadius: 12,
@@ -373,6 +522,23 @@ const styles = StyleSheet.create({
   },
   savingsFill: { position: "absolute", left: 0, top: 0, bottom: 0, borderRadius: 12 },
   savingsText: { fontSize: 11, fontWeight: "600", textAlign: "center" },
+  banner: {
+    borderRadius: 12,
+    borderWidth: 1,
+    padding: 12,
+    marginBottom: 12,
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 12,
+  },
+  bannerText: { flex: 1, fontSize: 13, lineHeight: 18 },
+  retryBtn: {
+    borderWidth: StyleSheet.hairlineWidth,
+    borderRadius: 8,
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+  },
+  retryText: { fontSize: 13, fontWeight: "700" },
   txRow: {
     flexDirection: "row",
     justifyContent: "space-between",
@@ -383,7 +549,7 @@ const styles = StyleSheet.create({
   txLeft: { flex: 1, marginRight: 12 },
   txPayee: { fontSize: 14, fontWeight: "500" },
   txDate: { fontSize: 12, marginTop: 2 },
-  txAmount: { fontSize: 15, fontWeight: "600" },
+  txAmount: { fontSize: 15, fontWeight: "600", fontVariant: ["tabular-nums"] },
   emptyText: { fontSize: 14, textAlign: "center", paddingVertical: 16 },
   moreText: { fontSize: 12, textAlign: "center", marginTop: 8 },
 });

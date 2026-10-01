@@ -67,9 +67,14 @@ describe("goalFormFromGoal", () => {
     expect(f.name).toBe("");
     expect(f.targetAmount).toBe("");
     expect(f.type).toBe("savings");
-    expect(f.currency).toBe("CAD");
+    // Display-currency fallback is USD, never CAD.
+    expect(f.currency).toBe("USD");
     expect(f.priority).toBe(1);
     expect(f.linkedAccountIds).toEqual([]);
+  });
+
+  it("defaults a new goal to the given display currency", () => {
+    expect(goalFormFromGoal(null, "MXN").currency).toBe("MXN");
   });
 
   it("stringifies the target and prefers accountIds", () => {
@@ -117,6 +122,29 @@ describe("goalFormFromGoal", () => {
       monthlyNeeded: 0,
     } as GoalWithProgress;
     expect(goalFormFromGoal(goal).linkedAccountIds).toEqual([8]);
+    // A legacy goal saved without a currency takes the display currency…
+    expect(goalFormFromGoal(goal, "EUR").currency).toBe("EUR");
+  });
+
+  it("keeps an existing goal's own currency over the display currency", () => {
+    const goal = {
+      id: 5,
+      name: "Trip",
+      type: "savings",
+      targetAmount: 2000,
+      deadline: null,
+      accountId: null,
+      currency: "GBP",
+      priority: 1,
+      status: "active",
+      note: "",
+      currentAmount: 0,
+      progress: 0,
+      percentComplete: 0,
+      remaining: 2000,
+      monthlyNeeded: 0,
+    } as GoalWithProgress;
+    expect(goalFormFromGoal(goal, "EUR").currency).toBe("GBP");
   });
 });
 

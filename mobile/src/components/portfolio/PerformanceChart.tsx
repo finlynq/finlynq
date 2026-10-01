@@ -11,6 +11,9 @@ import type { PerformancePoint } from "../../../../shared/types";
 
 const HEIGHT = 130;
 
+export const PERFORMANCE_EMPTY_TEXT =
+  "Not enough history yet. Portfolio snapshots are built when the Net Worth chart is opened on the web (or by a balance-history rebuild), not nightly. Pull down to refresh afterwards.";
+
 export function PerformanceChart({
   series,
   width,
@@ -24,9 +27,11 @@ export function PerformanceChart({
   const w = width ?? Math.max(200, Dimensions.get("window").width - 64);
 
   if (series.length < 2) {
+    // Snapshots are NOT built by a nightly job: the server builds them when
+    // the Net Worth chart loads (self-heal) or on a manual history rebuild.
     return (
       <Text style={[styles.empty, { color: colors.mutedForeground }]}>
-        Not enough history yet — snapshots build nightly.
+        {PERFORMANCE_EMPTY_TEXT}
       </Text>
     );
   }

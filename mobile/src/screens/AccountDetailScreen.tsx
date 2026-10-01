@@ -9,38 +9,66 @@ import {
   Alert,
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
-import { useIsFocused } from "@react-navigation/native";
+import { useIsFocused, type NavigatorScreenParams } from "@react-navigation/native";
 import type { NativeStackScreenProps } from "@react-navigation/native-stack";
 import { useTheme } from "../theme";
 import { endpoints } from "../api/client";
 import { logger } from "../lib/logger";
 import { formatCurrency, safeName, safeAccountName, formatShortDate } from "../lib/format";
+import { OP_ORDER, OP_CONFIGS } from "../lib/portfolio/operations";
+import { accountMetaLine } from "../lib/account-sections";
 import { Icon } from "../components/icon";
 import { ModePicker } from "../components/inbox/ModePicker";
-import type { AccountDetailRow, Transaction } from "../../../shared/types";
+import { PickerSheet, type PickerOption } from "../components/picker-sheet";
+import type { AccountBalance, AccountDetailRow, PortfolioOpKey, Transaction } from "../../../shared/types";
 import type { AccountsStackParamList } from "../navigation/AccountsStack";
+import type { PortfolioStackParamList } from "../navigation/PortfolioStack";
 
 type Props = NativeStackScreenProps<AccountsStackParamList, "AccountDetail">;
 
+// Ops offered by "+ Investment transaction", in the Portfolio chooser's order.
+const OP_OPTIONS: PickerOption[] = OP_ORDER.map((op, i) => ({
+  id: i,
+  label: OP_CONFIGS[op].title,
+  sublabel: OP_CONFIGS[op].subtitle,
+}));
+
+/**
+ * The OperationForm preselect writes the id into `accountId` AND
+ * `sourceAccountId`. For a Brokerage Deposit the source slot is the BANK side,
+ * so preselecting this (investment) account there would put it in the wrong
+ * field — open Deposit unseeded instead.
+ */
+function preselectFor(op: PortfolioOpKey, accountId: number): number | undefined {
+  return op === "deposit" ? undefined : accountId;
+}
+
 export default function AccountDetailScreen({ route, navigation }: Props) {
   const { colors } = useTheme();
-  const { account } = route.params;
+  const accountId = route.params.account.accountId;
   const isFocused = useIsFocused();
+  // Balance row for the header. Seeded from the route param (instant paint),
+  // then re-fetched on focus / pull-to-refresh so a new transaction, an edit or
+  // a rename is reflected instead of showing the snapshot taken on the list.
+  const [balance, setBalance] = useState<AccountBalance>(route.params.account);
   const [transactions, setTransactions] = useState<Transaction[]>([]);
   const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
   // Full decrypted account row (mode/type/group/note/alias/archived) for the
   // manage footer — fetched separately from the balance row this screen is
   // handed. `null` until it loads (manage actions stay hidden meanwhile).
   const [detail, setDetail] = useState<AccountDetailRow | null>(null);
+  const [detailError, setDetailError] = useState<string | null>(null);
   const [working, setWorking] = useState(false);
+  const [opPickerOpen, setOpPickerOpen] = useState(false);
 
   // Extracted so we can call it on focus (re-sync after an edit in TransactionDetail).
   const fetchTransactions = useCallback(async () => {
     setLoading(true);
     try {
       const res = await endpoints.getTransactions(
-        `accountId=${account.accountId}&limit=50&sort=date&sortDir=desc`
+        `accountId=${accountId}&limit=50&sort=date&sortDir=desc`
       );
       if (res.success) {
         setTransactions(res.data);
@@ -56,20 +84,42 @@ export default function AccountDetailScreen({ route, navigation }: Props) {
     } finally {
       setLoading(false);
     }
-  }, [account.accountId]);
+  }, [accountId]);
 
-  // Load (and re-load on focus, so an edit/mode change is reflected on return)
-  // the full account row for the manage footer, and re-sync the transaction list
-  // so edits made in TransactionDetail are visible immediately on return.
+  // The full account row (archived INCLUDED — getAccountsDetailed asks for
+  // them, so an archived account opened via "Show archived" still loads) plus a
+  // fresh balance row for the header. A failure must surface an error + Retry,
+  // never leave the manage card spinning forever.
   const loadDetail = useCallback(async () => {
-    const res = await endpoints.getAccountsDetailed();
-    if (res.success) {
-      setDetail(res.data.find((a) => a.id === account.accountId) ?? null);
-    } else {
-      logger.warn("account-detail", "detail fetch failed", { error: res.error });
+    setDetailError(null);
+    try {
+      const [detailRes, balRes] = await Promise.all([
+        endpoints.getAccountsDetailed(),
+        endpoints.getAccountBalances(),
+      ]);
+      if (detailRes.success) {
+        const row = detailRes.data.find((a) => a.id === accountId) ?? null;
+        setDetail(row);
+        if (!row) setDetailError("Account not found. It may have been deleted.");
+      } else {
+        logger.warn("account-detail", "detail fetch failed", { error: detailRes.error });
+        setDetailError(detailRes.error || "Couldn't load account details");
+      }
+      if (balRes.success) {
+        const fresh = balRes.data.find((b) => b.accountId === accountId);
+        if (fresh) setBalance(fresh);
+      } else {
+        // Non-fatal: keep the last balance we have.
+        logger.warn("account-detail", "balance refresh failed", { error: balRes.error });
+      }
+    } catch (e) {
+      const d = e instanceof Error ? `${e.name}: ${e.message}` : String(e);
+      logger.error("account-detail", "detail fetch threw", { detail: d });
+      setDetailError("Cannot connect to server");
     }
-  }, [account.accountId]);
+  }, [accountId]);
 
+  // Load (and re-load on focus, so an edit/mode change is reflected on return).
   useEffect(() => {
     if (isFocused) {
       fetchTransactions();
@@ -77,18 +127,34 @@ export default function AccountDetailScreen({ route, navigation }: Props) {
     }
   }, [isFocused, fetchTransactions, loadDetail]);
 
+  const onRefresh = async () => {
+    setRefreshing(true);
+    try {
+      await Promise.all([fetchTransactions(), loadDetail()]);
+    } finally {
+      setRefreshing(false);
+    }
+  };
+
   // Big number = the account's NATIVE balance (matches the accounts list).
-  const currency = account.currency;
-  const value = account.balance;
+  const currency = balance.currency;
+  const value = balance.balance;
   // Grayed sub-line = the display-currency translation. Hide it when there's
   // nothing to convert or the account is already in the display currency.
-  const subCurrency = account.displayCurrency ?? account.currency;
-  const showConverted =
-    account.convertedBalance != null && account.currency !== subCurrency;
-  // Prefer the freshly-loaded detail name (reflects edits) over the route param.
+  const subCurrency = balance.displayCurrency ?? balance.currency;
+  const showConverted = balance.convertedBalance != null && balance.currency !== subCurrency;
+  const isInvestment = detail?.isInvestment ?? balance.isInvestment === true;
+  const isArchived = detail?.archived ?? balance.archived === true;
+  // Prefer the freshly-loaded detail name (reflects edits) over the balance row.
   const heroName = detail
     ? safeAccountName({ id: detail.id, name: detail.name, alias: detail.alias })
-    : safeName(account.accountName);
+    : safeAccountName({ id: balance.accountId, name: balance.accountName, alias: balance.alias });
+  const metaLine = accountMetaLine({
+    group: detail?.group ?? balance.accountGroup,
+    currency: detail?.currency ?? balance.currency,
+    type: detail?.type ?? balance.accountType,
+    archived: isArchived,
+  });
 
   const handleEdit = () => {
     if (detail) navigation.navigate("AddAccount", { account: detail });
@@ -98,7 +164,7 @@ export default function AccountDetailScreen({ route, navigation }: Props) {
     if (!detail) return;
     Alert.alert(
       "Archive account?",
-      "It will be hidden from your accounts list. You can unarchive it on the web app.",
+      "It will be hidden from your accounts list and from account pickers, but its balance still counts toward your net worth. Use \"Show archived\" on the Accounts screen to find it again; unarchive it on the web app.",
       [
         { text: "Cancel", style: "cancel" },
         {
@@ -160,19 +226,35 @@ export default function AccountDetailScreen({ route, navigation }: Props) {
     );
   };
 
-  // Cross-tab deep-link to the reconcile inbox (lives in the More stack). The
-  // parent tab navigator owns the More route; a minimal typed cast keeps this
-  // off `any` without importing the whole nested param map.
-  const goToReconcile = () => {
-    type RootTabNav = {
-      navigate: (
-        tab: "More",
-        params: { screen: "Inbox"; params: { accountId: number } },
-      ) => void;
+  // Cross-tab deep-links. The parent tab navigator owns the More / Portfolio
+  // routes; a minimal typed cast keeps this off `any` without importing the
+  // whole nested param map (TabParamList types Portfolio as `undefined`).
+  type RootTabNav = {
+    navigate: {
+      (tab: "More", params: { screen: "Inbox"; params: { accountId: number } }): void;
+      (tab: "Portfolio", params: NavigatorScreenParams<PortfolioStackParamList>): void;
     };
-    (navigation.getParent() as unknown as RootTabNav | undefined)?.navigate("More", {
+  };
+  const tabNav = () => navigation.getParent() as unknown as RootTabNav | undefined;
+
+  const goToReconcile = () => {
+    tabNav()?.navigate("More", {
       screen: "Inbox",
-      params: { accountId: account.accountId },
+      params: { accountId },
+    });
+  };
+
+  // Open the Portfolio tab's OperationForm for this account. `initial: false`
+  // keeps the portfolio overview underneath, so closing the form lands there
+  // rather than leaving a one-screen stack.
+  const openInvestmentOp = (id: number) => {
+    setOpPickerOpen(false);
+    const op = OP_ORDER[id];
+    if (!op) return;
+    tabNav()?.navigate("Portfolio", {
+      screen: "OperationForm",
+      params: { op, preselectAccountId: preselectFor(op, accountId) },
+      initial: false,
     });
   };
 
@@ -183,54 +265,74 @@ export default function AccountDetailScreen({ route, navigation }: Props) {
           <Icon name="back" size={20} color={colors.primary} />
           <Text style={[styles.backText, { color: colors.primary }]}>Accounts</Text>
         </TouchableOpacity>
-        {/* Investment accounts use the web portfolio flow; hide quick-add there. */}
-        {!account.isInvestment && (
-          <TouchableOpacity
-            style={[styles.addBtn, { backgroundColor: colors.primary }]}
-            onPress={() =>
-              navigation.navigate("AddTransaction", {
-                mode: "expense",
-                preselectedAccountId: account.accountId,
-              })
-            }
-          >
-            <Text style={[styles.addBtnText, { color: colors.primaryForeground }]}>
-              + Add transaction
-            </Text>
-          </TouchableOpacity>
-        )}
+        {/* Quick-add. Archived accounts are excluded from every create-mode
+            picker, so offering a quick-add here would land on a form that
+            can't select this account — hide it until the account is unarchived. */}
+        {!isArchived &&
+          (isInvestment ? (
+            <TouchableOpacity
+              style={[styles.addBtn, { backgroundColor: colors.primary }]}
+              onPress={() => setOpPickerOpen(true)}
+            >
+              <Text style={[styles.addBtnText, { color: colors.primaryForeground }]}>
+                + Investment transaction
+              </Text>
+            </TouchableOpacity>
+          ) : (
+            <TouchableOpacity
+              style={[styles.addBtn, { backgroundColor: colors.primary }]}
+              onPress={() =>
+                navigation.navigate("AddTransaction", {
+                  mode: "expense",
+                  preselectedAccountId: accountId,
+                })
+              }
+            >
+              <Text style={[styles.addBtnText, { color: colors.primaryForeground }]}>
+                + Add transaction
+              </Text>
+            </TouchableOpacity>
+          ))}
       </View>
 
       <FlatList
         data={transactions}
         keyExtractor={(item) => String(item.id)}
         contentContainerStyle={styles.list}
+        refreshing={refreshing}
+        onRefresh={onRefresh}
         ListHeaderComponent={
           <View style={[styles.hero, { backgroundColor: colors.card, borderColor: colors.border }]}>
             <Text style={[styles.accountName, { color: colors.foreground }]} numberOfLines={2}>
               {heroName}
             </Text>
-            <Text style={[styles.accountMeta, { color: colors.mutedForeground }]}>
-              {account.accountGroup} · {account.currency}
-              {account.accountType === "L" ? " · Liability" : ""}
-            </Text>
-            <Text style={[styles.heroValue, { color: colors.foreground }]}>
+            {metaLine ? (
+              <Text style={[styles.accountMeta, { color: colors.mutedForeground }]}>
+                {metaLine}
+              </Text>
+            ) : null}
+            <Text
+              style={[styles.heroValue, { color: colors.foreground }]}
+              numberOfLines={1}
+              adjustsFontSizeToFit
+              minimumFontScale={0.6}
+            >
               {formatCurrency(value, currency, { decimals: 2 })}
             </Text>
             {showConverted && (
               <Text style={[styles.heroValueSub, { color: colors.mutedForeground }]}>
-                {formatCurrency(account.convertedBalance!, subCurrency, { decimals: 2 })}
+                {formatCurrency(balance.convertedBalance!, subCurrency, { decimals: 2 })}
               </Text>
             )}
-            {account.isInvestment && (account.holdingsValue ?? 0) !== 0 && (
+            {isInvestment && (
               <Text style={[styles.holdingsHint, { color: colors.mutedForeground }]}>
-                Market value (holdings) ·{" "}
-                <Text style={{ color: colors.mutedForeground }}>manage on web</Text>
+                Market value of holdings, cash included
               </Text>
             )}
-            {/* Reconcile inbox — non-investment accounts only (the card lenses
-                refuse investment accounts server-side). */}
-            {!account.isInvestment && (
+            {/* Reconcile inbox — non-investment, non-archived accounts only (the
+                card lenses refuse investment accounts server-side, and archived
+                accounts have no reconcile work surfaced). */}
+            {!isInvestment && !isArchived && (
               <TouchableOpacity
                 style={[styles.reconcileBtn, { borderColor: colors.border }]}
                 onPress={goToReconcile}
@@ -311,12 +413,26 @@ export default function AccountDetailScreen({ route, navigation }: Props) {
           <View style={[styles.manageCard, { backgroundColor: colors.card, borderColor: colors.border }]}>
             <Text style={[styles.manageTitle, { color: colors.foreground }]}>Manage account</Text>
             {!detail ? (
-              <ActivityIndicator style={{ marginTop: 12 }} size="small" color={colors.primary} />
+              detailError ? (
+                <View>
+                  <Text style={[styles.archivedNote, { color: colors.destructive }]}>
+                    {detailError}
+                  </Text>
+                  <TouchableOpacity
+                    style={[styles.manageBtn, { borderColor: colors.border }]}
+                    onPress={loadDetail}
+                  >
+                    <Text style={[styles.manageBtnText, { color: colors.primary }]}>Retry</Text>
+                  </TouchableOpacity>
+                </View>
+              ) : (
+                <ActivityIndicator style={{ marginTop: 12 }} size="small" color={colors.primary} />
+              )
             ) : (
               <>
                 {/* Reconciliation mode — non-investment accounts only (the card
                     lenses refuse investment accounts server-side). */}
-                {!account.isInvestment && (
+                {!isInvestment && (
                   <View style={styles.modeBlock}>
                     <Text style={[styles.manageLabel, { color: colors.mutedForeground }]}>
                       Reconciliation mode
@@ -336,7 +452,8 @@ export default function AccountDetailScreen({ route, navigation }: Props) {
 
                 {detail.archived ? (
                   <Text style={[styles.archivedNote, { color: colors.mutedForeground }]}>
-                    This account is archived. Unarchive it on the web app.
+                    This account is archived: it is hidden from your accounts list and pickers but
+                    still counts toward your net worth. Unarchive it on the web app.
                   </Text>
                 ) : (
                   <TouchableOpacity
@@ -364,6 +481,15 @@ export default function AccountDetailScreen({ route, navigation }: Props) {
             )}
           </View>
         }
+      />
+
+      <PickerSheet
+        visible={opPickerOpen}
+        title="New investment transaction"
+        options={OP_OPTIONS}
+        selectedId={null}
+        onSelect={openInvestmentOp}
+        onClose={() => setOpPickerOpen(false)}
       />
     </SafeAreaView>
   );

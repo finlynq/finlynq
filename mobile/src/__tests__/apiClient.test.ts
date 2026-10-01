@@ -453,15 +453,16 @@ describe("API Client", () => {
       );
     });
 
-    it("getAccountsDetailed GETs /api/accounts", async () => {
+    it("getAccountsDetailed GETs /api/accounts including archived rows", async () => {
       mockFetch.mockResolvedValue({
         ok: true,
         status: 200,
         json: () => Promise.resolve([{ id: 1, mode: "manual" }]),
       });
       const res = await endpoints.getAccountsDetailed();
+      // includeArchived=1 so AccountDetail can load an archived account.
       expect(mockFetch).toHaveBeenCalledWith(
-        "http://localhost:3000/api/accounts",
+        "http://localhost:3000/api/accounts?includeArchived=1",
         expect.any(Object)
       );
       expect(res).toEqual({ success: true, data: [{ id: 1, mode: "manual" }] });

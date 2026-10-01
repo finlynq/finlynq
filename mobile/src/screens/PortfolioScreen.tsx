@@ -1,7 +1,7 @@
 // Portfolio overview (tab root) — hero + investment-returns grid + allocation
 // donuts + top movers + tappable holdings list. Reads GET /api/portfolio/overview
 // (bare JSON → request() wraps). Names routed through safeName() for cold DEK.
-import React, { useCallback, useEffect, useMemo, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   View,
   Text,
@@ -22,7 +22,8 @@ import { Icon } from "../components/icon";
 import { MetricGrid, type MetricItem } from "../components/portfolio/MetricGrid";
 import { AllocationDonut, type AllocationSlice } from "../components/portfolio/AllocationDonut";
 import { GainerLoserRow } from "../components/portfolio/GainerLoserRow";
-import { canonicalKeyOf, holdingDescription } from "../lib/portfolio/holdings";
+import { findHoldingInOverview, holdingDescription } from "../lib/portfolio/holdings";
+import { formatQty, signedMoney } from "../lib/portfolio/format";
 import type {
   PortfolioOverview,
   PortfolioHoldingSummary,
@@ -31,10 +32,14 @@ import type { PortfolioStackParamList } from "../navigation/PortfolioStack";
 
 type Props = NativeStackScreenProps<PortfolioStackParamList, "PortfolioOverview">;
 
+/** Allocation-by-type slices, in donut order (keys of overview.byType). */
+const ALLOCATION_TYPE_KEYS = ["etf", "stock", "crypto", "metal", "cash"] as const;
+
 const TYPE_LABELS: Record<string, string> = {
   etf: "ETF",
   stock: "Stock",
   crypto: "Crypto",
+  metal: "Metals",
   cash: "Cash",
 };
 
@@ -51,13 +56,18 @@ export default function PortfolioScreen({ navigation }: Props) {
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [allocMode, setAllocMode] = useState<"type" | "account">("type");
+  // Once an overview has rendered, focus-driven refetches run in the
+  // background: the content (and scroll position) stays put instead of being
+  // swapped for a full-screen spinner every time the tab regains focus.
+  const hasOverviewRef = useRef(false);
 
   const fetchOverview = useCallback(async (isRefresh = false) => {
     if (isRefresh) setRefreshing(true);
-    else setLoading(true);
+    else if (!hasOverviewRef.current) setLoading(true);
     try {
       const res = await endpoints.getPortfolioOverview();
       if (res.success) {
+        hasOverviewRef.current = true;
         setOverview(res.data);
         setError(null);
       } else {
@@ -77,14 +87,15 @@ export default function PortfolioScreen({ navigation }: Props) {
     if (isFocused) fetchOverview();
   }, [isFocused, fetchOverview]);
 
-  const currency = overview?.displayCurrency ?? "CAD";
+  // Server always sends displayCurrency; USD is the app-wide default (FINLYNQ-183).
+  const currency = overview?.displayCurrency ?? "USD";
   const summary = overview?.summary;
   const holdings = overview?.byHolding ?? [];
 
   const allocData: AllocationSlice[] = useMemo(() => {
     if (!overview) return [];
     if (allocMode === "type") {
-      return ["etf", "stock", "crypto", "cash"]
+      return ALLOCATION_TYPE_KEYS
         .map((k) => ({ label: TYPE_LABELS[k] ?? k, value: overview.byType?.[k]?.value ?? 0 }))
         .filter((s) => s.value > 0);
     }
@@ -99,25 +110,25 @@ export default function PortfolioScreen({ navigation }: Props) {
         { label: "Cost basis", value: formatCurrency(summary.totalCostBasisDisplay, currency, { decimals: 0 }) },
         {
           label: "Unrealized G/L",
-          value: signed(summary.totalUnrealizedGainDisplay, currency),
+          value: signedMoney(summary.totalUnrealizedGainDisplay, currency),
           tone: tone(summary.totalUnrealizedGainDisplay),
         },
         {
           label: "Realized G/L",
-          value: signed(summary.totalRealizedGainDisplay, currency),
+          value: signedMoney(summary.totalRealizedGainDisplay, currency),
           tone: tone(summary.totalRealizedGainDisplay),
         },
         { label: "Dividends", value: formatCurrency(summary.totalDividendsDisplay, currency, { decimals: 0 }) },
         {
           label: "Total return",
-          value: signed(summary.totalReturnDisplay, currency),
+          value: signedMoney(summary.totalReturnDisplay, currency),
           tone: tone(summary.totalReturnDisplay),
         },
       ]
     : [];
 
   const openHolding = (s: PortfolioHoldingSummary) => {
-    const members = (overview?.holdings ?? []).filter((h) => canonicalKeyOf(h) === s.key);
+    const members = overview ? findHoldingInOverview(overview, s.key)?.members ?? [] : [];
     navigation.navigate("HoldingDetail", { summary: s, members, displayCurrency: currency });
   };
 
@@ -134,6 +145,9 @@ export default function PortfolioScreen({ navigation }: Props) {
   const gainers = overview?.topGainers ?? [];
   const losers = overview?.topLosers ?? [];
   const movers = [...gainers, ...losers];
+  // Two rows can share a legacy canonical key during a partial securities
+  // backfill (one bucketed on security_id, one on the legacy string), so list
+  // keys always carry the index too.
 
   return (
     <SafeAreaView style={[styles.safe, { backgroundColor: colors.background }]} edges={["top"]}>
@@ -156,6 +170,12 @@ export default function PortfolioScreen({ navigation }: Props) {
           <Text style={[styles.empty, { color: colors.destructive }]}>{error}</Text>
         ) : (
           <>
+            {/* A failed background refresh keeps the last overview on screen. */}
+            {error ? (
+              <Text style={[styles.refreshError, { color: colors.destructive }]}>
+                Could not refresh: {error}
+              </Text>
+            ) : null}
             {/* Hero */}
             <View style={[styles.hero, { backgroundColor: colors.card, borderColor: colors.border }]}>
               <Text style={[styles.heroLabel, { color: colors.mutedForeground }]}>Total Value</Text>
@@ -166,13 +186,13 @@ export default function PortfolioScreen({ navigation }: Props) {
                 <View style={styles.heroStat}>
                   <Text style={[styles.heroStatLabel, { color: colors.mutedForeground }]}>Unrealized</Text>
                   <Text style={[styles.heroStatValue, { color: tone(gain) === "pos" ? colors.pos : tone(gain) === "neg" ? colors.neg : colors.foreground }]}>
-                    {signed(gain, currency)} · {pctLabel(summary?.totalUnrealizedGainPct ?? null)}
+                    {signedMoney(gain, currency)} · {pctLabel(summary?.totalUnrealizedGainPct ?? null)}
                   </Text>
                 </View>
                 <View style={styles.heroStat}>
                   <Text style={[styles.heroStatLabel, { color: colors.mutedForeground }]}>Day change</Text>
                   <Text style={[styles.heroStatValue, { color: day >= 0 ? colors.pos : colors.neg }]}>
-                    {signed(day, currency)} · {pctLabel(summary?.dayChangePct ?? null)}
+                    {signedMoney(day, currency)} · {pctLabel(summary?.dayChangePct ?? null)}
                   </Text>
                 </View>
               </View>
@@ -219,8 +239,8 @@ export default function PortfolioScreen({ navigation }: Props) {
               <>
                 <Text style={[styles.section, { color: colors.mutedForeground }]}>Top movers</Text>
                 <View style={[styles.card, { backgroundColor: colors.card, borderColor: colors.border, paddingVertical: 2 }]}>
-                  {movers.map((h) => (
-                    <GainerLoserRow key={`${h.id}-${h.symbol}`} holding={h} currency={currency} />
+                  {movers.map((m, i) => (
+                    <GainerLoserRow key={`${m.key}-${i}`} mover={m} currency={currency} />
                   ))}
                 </View>
               </>
@@ -232,7 +252,7 @@ export default function PortfolioScreen({ navigation }: Props) {
               {holdings.length === 0 ? (
                 <Text style={[styles.emptyInline, { color: colors.mutedForeground }]}>No holdings yet</Text>
               ) : (
-                holdings.map((h) => {
+                holdings.map((h, i) => {
                   const g = h.unrealizedGainPct;
                   const gColor = (g ?? 0) > 0 ? colors.pos : (g ?? 0) < 0 ? colors.neg : colors.mutedForeground;
                   // FINLYNQ-242: lead with the company/security description; the
@@ -247,7 +267,7 @@ export default function PortfolioScreen({ navigation }: Props) {
                   const showSubtitle = desc != null;
                   return (
                     <TouchableOpacity
-                      key={h.key}
+                      key={`${h.key}-${i}`}
                       style={[styles.holdingRow, { borderBottomColor: colors.border }]}
                       onPress={() => openHolding(h)}
                       activeOpacity={0.7}
@@ -257,7 +277,9 @@ export default function PortfolioScreen({ navigation }: Props) {
                           {primary}
                         </Text>
                         <Text style={[styles.holdingName, { color: colors.mutedForeground }]} numberOfLines={1}>
-                          {showSubtitle ? `${ticker} · ${h.totalQty} units` : `${h.totalQty} units`}
+                          {showSubtitle
+                            ? `${ticker} · ${formatQty(h.totalQty)} units`
+                            : `${formatQty(h.totalQty)} units`}
                         </Text>
                       </View>
                       <View style={styles.holdingRight}>
@@ -265,7 +287,7 @@ export default function PortfolioScreen({ navigation }: Props) {
                           {formatCurrency(h.marketValueDisplay, currency, { decimals: 0 })}
                         </Text>
                         <Text style={[styles.holdingGain, { color: gColor }]}>
-                          {signed(h.unrealizedGainDisplay, currency)}
+                          {signedMoney(h.unrealizedGainDisplay, currency)}
                         </Text>
                         <Text style={[styles.holdingPct, { color: gColor }]}>{pctLabel(g)}</Text>
                       </View>
@@ -284,9 +306,6 @@ export default function PortfolioScreen({ navigation }: Props) {
 
 function tone(v: number): MetricItem["tone"] {
   return v > 0 ? "pos" : v < 0 ? "neg" : "default";
-}
-function signed(v: number, currency: string): string {
-  return `${v >= 0 ? "+" : ""}${formatCurrency(v, currency, { decimals: 0 })}`;
 }
 
 function NavChip({ icon, label, onPress }: { icon: "performance" | "coins" | "dollar"; label: string; onPress: () => void }) {
@@ -362,5 +381,6 @@ const styles = StyleSheet.create({
   holdingGain: { fontSize: 12, fontWeight: "600", marginTop: 2, fontVariant: ["tabular-nums"] },
   holdingPct: { fontSize: 12, fontWeight: "600", marginTop: 1, fontVariant: ["tabular-nums"] },
   empty: { fontSize: 14, textAlign: "center", paddingVertical: 32 },
+  refreshError: { fontSize: 12, marginBottom: 8 },
   emptyInline: { fontSize: 14, textAlign: "center", paddingVertical: 20 },
 });

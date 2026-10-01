@@ -2,6 +2,12 @@
 // /reports `getPresetRange` exactly (MTD/QTD/YTD/last-month/-quarter/-year/12mo)
 // so mobile + web show identical ranges. No date library — plain Date math.
 // `now` is injectable so the preset math is deterministically unit-testable.
+//
+// Every date is the device's LOCAL calendar day. `toISOString()` is UTC, so
+// for a user ahead of UTC (e.g. UTC+10 at 08:00 on the 1st) it returned the
+// PREVIOUS day as "today" while the start was built from local components —
+// MTD/QTD/YTD came out with start > end.
+import { localDateISO } from "../subscriptions";
 
 export type DateRange = { start: string; end: string };
 
@@ -21,10 +27,6 @@ export const RANGE_PRESETS: PresetDef[] = [
   { key: "last-12", label: "12 mo" },
 ];
 
-function iso(d: Date): string {
-  return d.toISOString().split("T")[0];
-}
-
 function pad2(n: number): string {
   return String(n).padStart(2, "0");
 }
@@ -39,7 +41,7 @@ function lastDayOfMonth(year: number, month: number): number {
  * reports page `getPresetRange`. Unknown keys fall through to "last-12".
  */
 export function getPresetRange(preset: string, now: Date = new Date()): DateRange {
-  const end = iso(now);
+  const end = localDateISO(now);
   const y = now.getFullYear();
   const m = now.getMonth();
 
@@ -71,9 +73,12 @@ export function getPresetRange(preset: string, now: Date = new Date()): DateRang
       return { start: `${y - 1}-01-01`, end: `${y - 1}-12-31` };
     case "last-12":
     default: {
-      const past = new Date(now);
-      past.setFullYear(past.getFullYear() - 1);
-      return { start: iso(past), end };
+      // 12 COMPLETE months (web parity): first day of the month 12 months
+      // before the current one → last day of the previous month. Date's own
+      // month arithmetic handles the year roll-back.
+      const startD = new Date(y, m - 12, 1);
+      const endD = new Date(y, m, 0); // day 0 of this month = last day of the prior one
+      return { start: localDateISO(startD), end: localDateISO(endD) };
     }
   }
 }

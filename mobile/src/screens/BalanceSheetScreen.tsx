@@ -1,18 +1,30 @@
-// Balance sheet — assets, liabilities, net worth as of the range end date.
+// Balance sheet — assets, liabilities, net worth as of TODAY. The server's
+// balance-sheet route ignores endDate and always returns current balances
+// (investment accounts marked to market now), so this screen never claims a
+// historical date: it asks for today and labels the result "current balances".
 // Accounts grouped by account-group; each row shows the FX-converted balance
 // (display currency) plus the native balance when it differs. Reads
 // GET /api/reports?type=balance-sheet (bare JSON, balances converted server-side).
-import React, { useEffect, useMemo, useState } from "react";
-import { View, Text, ScrollView, StyleSheet, ActivityIndicator, TouchableOpacity } from "react-native";
+import React, { useCallback, useMemo } from "react";
+import {
+  View,
+  Text,
+  ScrollView,
+  StyleSheet,
+  ActivityIndicator,
+  TouchableOpacity,
+  RefreshControl,
+} from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import type { NativeStackScreenProps } from "@react-navigation/native-stack";
 import { useTheme } from "../theme";
 import { endpoints } from "../api/client";
-import { logger } from "../lib/logger";
 import { formatCurrency, safeName, formatShortDate } from "../lib/format";
+import { localDateISO } from "../lib/subscriptions";
+import { useReportData } from "../lib/reports/use-report-data";
 import { Icon } from "../components/icon";
 import type { MoreStackParamList } from "../navigation/MoreStack";
-import type { BalanceSheet, BalanceSheetRow } from "../../../shared/types";
+import type { BalanceSheetRow } from "../../../shared/types";
 
 type Props = NativeStackScreenProps<MoreStackParamList, "BalanceSheet">;
 
@@ -36,37 +48,12 @@ function groupRows(rows: BalanceSheetRow[]): AccountGroup[] {
 
 export default function BalanceSheetScreen({ navigation, route }: Props) {
   const { colors } = useTheme();
-  const { endDate, displayCurrency } = route.params;
+  // The route's endDate is deliberately unused: the server ignores it (always
+  // current balances), so asking for "today" keeps the request honest.
+  const { displayCurrency } = route.params;
 
-  const [data, setData] = useState<BalanceSheet | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
-
-  useEffect(() => {
-    let cancelled = false;
-    setLoading(true);
-    endpoints
-      .getBalanceSheet({ endDate })
-      .then((res) => {
-        if (cancelled) return;
-        if (res.success) {
-          setData(res.data);
-          setError(null);
-        } else {
-          logger.warn("balance-sheet", "fetch failed", { error: res.error });
-          setError(res.error);
-        }
-      })
-      .catch((e) => {
-        if (cancelled) return;
-        logger.error("balance-sheet", "fetch threw", { detail: String(e) });
-        setError("Cannot connect to server");
-      })
-      .finally(() => !cancelled && setLoading(false));
-    return () => {
-      cancelled = true;
-    };
-  }, [endDate]);
+  const fetcher = useCallback(() => endpoints.getBalanceSheet({ endDate: localDateISO() }), []);
+  const { data, loading, refreshing, error, refresh } = useReportData(fetcher, "balance-sheet");
 
   const ccy = data?.displayCurrency ?? displayCurrency;
   const assetGroups = useMemo(() => (data ? groupRows(data.assets) : []), [data]);
@@ -83,9 +70,15 @@ export default function BalanceSheetScreen({ navigation, route }: Props) {
         <View style={{ width: 70 }} />
       </View>
 
-      <ScrollView contentContainerStyle={styles.scroll}>
+      <ScrollView
+        contentContainerStyle={styles.scroll}
+        refreshControl={<RefreshControl refreshing={refreshing} onRefresh={refresh} tintColor={colors.primary} />}
+      >
         <Text style={[styles.rangeLabel, { color: colors.mutedForeground }]}>
-          As of {formatShortDate(endDate)}
+          Current balances · today, {formatShortDate(localDateISO())}
+        </Text>
+        <Text style={[styles.rangeNote, { color: colors.mutedForeground }]}>
+          {"Always today's balances; the report date range doesn't apply here."}
         </Text>
 
         {loading ? (
@@ -225,7 +218,8 @@ const styles = StyleSheet.create({
   backText: { fontSize: 15, fontWeight: "600" },
   title: { fontSize: 17, fontWeight: "700" },
   scroll: { padding: 16, paddingBottom: 32 },
-  rangeLabel: { fontSize: 13, fontWeight: "600", marginBottom: 14 },
+  rangeLabel: { fontSize: 13, fontWeight: "600" },
+  rangeNote: { fontSize: 12, marginTop: 2, marginBottom: 14, lineHeight: 17 },
   nwCard: { borderRadius: 12, borderWidth: StyleSheet.hairlineWidth, padding: 16 },
   nwLabel: { fontSize: 13, fontWeight: "600" },
   nwValue: { fontSize: 30, fontWeight: "800", fontVariant: ["tabular-nums"], marginTop: 2 },

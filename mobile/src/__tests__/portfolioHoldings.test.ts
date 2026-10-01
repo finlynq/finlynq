@@ -7,6 +7,7 @@ import {
   sleeveCurrencies,
   canonicalKeyOf,
   holdingDescription,
+  findHoldingInOverview,
 } from "../lib/portfolio/holdings";
 import type { AccountBalance, PortfolioHoldingRow, EnrichedHolding } from "../../../shared/types";
 
@@ -133,6 +134,59 @@ describe("canonicalKeyOf", () => {
     expect(canonicalKeyOf(enriched({ assetType: "stock", symbol: null, name: "My Thing" }))).toBe(
       "custom:my thing"
     );
+  });
+  it("keys the server's 'metal' assetType like canonical.ts (metal:<SYM>)", () => {
+    // The overview route reports XAU/XAG/XPT/XPD as assetType "metal" and
+    // clusters them as `metal:<SYM>` — they must not fall through to custom:.
+    expect(canonicalKeyOf(enriched({ assetType: "metal", symbol: "xau", name: "Gold" }))).toBe("metal:XAU");
+    expect(canonicalKeyOf(enriched({ assetType: "metal", symbol: "XPD" }))).toBe("metal:XPD");
+    // Defensive: a symbol-less metal row clusters by currency (server feeds "cash").
+    expect(canonicalKeyOf(enriched({ assetType: "metal", symbol: null, currency: "usd" }))).toBe("cash:USD");
+  });
+  it("keys an empty custom name as '?' (server uses name || '?')", () => {
+    expect(canonicalKeyOf(enriched({ assetType: "stock", symbol: null, name: "" }))).toBe("custom:?");
+    expect(canonicalKeyOf(enriched({ assetType: "stock", symbol: null, name: null }))).toBe("custom:?");
+  });
+});
+
+describe("findHoldingInOverview", () => {
+  const summary = (key: string, qty: number) => ({
+    key,
+    symbol: null,
+    name: key,
+    assetType: "stock",
+    totalQty: qty,
+    avgCostDisplay: null,
+    costBasisDisplay: 0,
+    marketValueDisplay: 0,
+    unrealizedGainDisplay: 0,
+    unrealizedGainPct: null,
+    realizedGainDisplay: 0,
+    dividendsDisplay: 0,
+    totalReturnDisplay: 0,
+    totalReturnPct: null,
+    pctOfPortfolio: null,
+    accountCount: 1,
+  });
+  const overview = {
+    byHolding: [summary("eq:NVDA", 10), summary("metal:XAU", 2), summary("eq:NVDA", 3)],
+    holdings: [
+      enriched({ id: 1, assetType: "stock", symbol: "NVDA", accountId: 1 }),
+      enriched({ id: 2, assetType: "metal", symbol: "XAU", accountId: 1 }),
+      enriched({ id: 3, assetType: "stock", symbol: "nvda", accountId: 2 }),
+    ],
+  };
+
+  it("returns the first matching row plus every member position", () => {
+    const found = findHoldingInOverview(overview, "eq:NVDA");
+    expect(found?.summary.totalQty).toBe(10);
+    expect(found?.members.map((m) => m.id)).toEqual([1, 3]);
+  });
+  it("recovers metal members", () => {
+    expect(findHoldingInOverview(overview, "metal:XAU")?.members.map((m) => m.id)).toEqual([2]);
+  });
+  it("returns null when the key is gone", () => {
+    expect(findHoldingInOverview(overview, "eq:AAPL")).toBeNull();
   });
 });
 

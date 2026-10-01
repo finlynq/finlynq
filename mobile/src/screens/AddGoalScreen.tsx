@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import {
   View,
   Text,
@@ -43,6 +43,47 @@ export default function AddGoalScreen() {
   const [priority, setPriority] = useState(init.priority);
   const [linkedAccountIds, setLinkedAccountIds] = useState<number[]>(init.linkedAccountIds);
   const [note, setNote] = useState(init.note);
+  const [currencies, setCurrencies] = useState<string[]>([...COMMON_CURRENCIES]);
+  // Set once the user picks a currency, so a late display-currency response
+  // never overwrites their choice.
+  const currencyTouched = useRef(false);
+  // A new goal (or a legacy one saved without a currency) starts in the
+  // user's display currency; `init` holds the USD fallback until it arrives.
+  const needsCurrencyDefault = !editGoal?.currency;
+
+  useEffect(() => {
+    if (!needsCurrencyDefault) return;
+    endpoints
+      .getDisplayCurrency()
+      .then((r) => {
+        if (r.success && r.data?.displayCurrency && !currencyTouched.current) {
+          setCurrency(r.data.displayCurrency);
+        }
+      })
+      .catch(() => {});
+  }, [needsCurrencyDefault]);
+
+  // The currency chips come from the user's own active set (falling back to
+  // the common list), always including the form's current value.
+  useEffect(() => {
+    endpoints
+      .getActiveCurrencies()
+      .then((r) => {
+        if (r.success && Array.isArray(r.data?.active) && r.data.active.length > 0) {
+          setCurrencies(r.data.active);
+        }
+      })
+      .catch(() => {});
+  }, []);
+
+  const currencyOptions = useMemo(
+    () => (currency && !currencies.includes(currency) ? [currency, ...currencies] : currencies),
+    [currencies, currency],
+  );
+  const pickCurrency = (c: string) => {
+    currencyTouched.current = true;
+    setCurrency(c);
+  };
 
   useEffect(() => {
     endpoints
@@ -244,7 +285,7 @@ export default function AddGoalScreen() {
             {/* Currency */}
             <View style={fieldStyles.container}>
               <Text style={[fieldStyles.label, { color: colors.mutedForeground }]}>CURRENCY</Text>
-              {renderChips(COMMON_CURRENCIES, currency, setCurrency)}
+              {renderChips(currencyOptions, currency, pickCurrency)}
             </View>
 
             {/* Priority */}

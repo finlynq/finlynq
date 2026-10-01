@@ -1,7 +1,13 @@
-// Realized gains — tax-year + term (short/long/all) filters + base-currency
-// toggle. Reads GET /api/portfolio/realized-gains (enveloped). Each row is one
-// lot closure.
-import React, { useEffect, useMemo, useState } from "react";
+// Realized gains — tax-year + term (short/long/all) filters + a "Show in
+// {currency}" toggle. Reads GET /api/portfolio/realized-gains (enveloped). Each
+// row is one lot closure.
+//
+// Mirrors the web report (FINLYNQ-183): the native view keeps every closure in
+// its own currency, so its total is shown PER CURRENCY from `totals.byCurrency`
+// (never one mixed-currency sum, FINLYNQ-123); the unified view (`?unified=1`)
+// converts each closure into the user's display currency at historical FX and
+// shows a single `totalRealizedGainInBase`.
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   View,
   Text,
@@ -10,6 +16,7 @@ import {
   ActivityIndicator,
   TouchableOpacity,
   Switch,
+  RefreshControl,
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import type { NativeStackScreenProps } from "@react-navigation/native-stack";
@@ -17,6 +24,7 @@ import { useTheme } from "../theme";
 import { endpoints } from "../api/client";
 import { logger } from "../lib/logger";
 import { formatCurrency, safeName, formatShortDate } from "../lib/format";
+import { currencyTotals, formatPerShare, formatQty, signedMoney } from "../lib/portfolio/format";
 import { Icon } from "../components/icon";
 import type { RealizedGainsResult, RealizedGainRow } from "../../../shared/types";
 import type { PortfolioStackParamList } from "../navigation/PortfolioStack";
@@ -31,27 +39,29 @@ function recentYears(): number[] {
 
 export default function RealizedGainsScreen({ navigation, route }: Props) {
   const { colors } = useTheme();
-  const displayCurrency = route.params?.displayCurrency ?? "CAD";
   const [year, setYear] = useState<number | null>(recentYears()[0]);
   const [term, setTerm] = useState<Term>("all");
-  const [base, setBase] = useState(false);
+  const [unified, setUnified] = useState(false);
   const [data, setData] = useState<RealizedGainsResult | null>(null);
   const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const seqRef = useRef(0);
 
   const years = useMemo(recentYears, []);
 
-  useEffect(() => {
-    let cancelled = false;
-    setLoading(true);
-    const params = new URLSearchParams();
-    params.set("term", term);
-    if (year != null) params.set("taxYear", String(year));
-    if (base) params.set("currency", "base");
-    endpoints
-      .getRealizedGains(params.toString())
-      .then((res) => {
-        if (cancelled) return;
+  const load = useCallback(
+    async (f: { year: number | null; term: Term; unified: boolean }, isRefresh: boolean) => {
+      const seq = ++seqRef.current;
+      if (isRefresh) setRefreshing(true);
+      else setLoading(true);
+      const params = new URLSearchParams();
+      if (f.year != null) params.set("taxYear", String(f.year));
+      params.set("term", f.term);
+      if (f.unified) params.set("unified", "1");
+      try {
+        const res = await endpoints.getRealizedGains(params.toString());
+        if (seq !== seqRef.current) return;
         if (res.success) {
           setData(res.data);
           setError(null);
@@ -59,26 +69,38 @@ export default function RealizedGainsScreen({ navigation, route }: Props) {
           logger.warn("realized-gains", "fetch failed", { error: res.error });
           setError(res.error);
         }
-      })
-      .catch((e) => {
-        if (cancelled) return;
+      } catch (e) {
+        if (seq !== seqRef.current) return;
         logger.error("realized-gains", "fetch threw", { detail: String(e) });
         setError("Cannot connect to server");
-      })
-      .finally(() => !cancelled && setLoading(false));
-    return () => {
-      cancelled = true;
-    };
-  }, [year, term, base]);
+      } finally {
+        if (isRefresh) setRefreshing(false);
+        if (seq === seqRef.current) setLoading(false);
+      }
+    },
+    []
+  );
+
+  useEffect(() => {
+    void load({ year, term, unified }, false);
+  }, [year, term, unified, load]);
 
   const rows = data?.rows ?? [];
-  const totalGain = base
-    ? data?.totalRealizedGainInBase ?? 0
-    : data?.totals.realizedGain ?? 0;
+  // The unified currency is the user's display currency; the server stamps it
+  // on each unified row's `baseCurrency`. USD is the app-wide default.
+  const unifiedCurrency =
+    rows.find((r) => r.baseCurrency)?.baseCurrency ?? route.params?.displayCurrency ?? "USD";
+  const showUnified = unified && data?.totalRealizedGainInBase != null;
+  const nativeTotals = currencyTotals(data?.totals.byCurrency, (v) => v.realizedGain);
   const holdingsCount = new Set(rows.map((r) => r.holdingId)).size;
-  const totalColor = totalGain > 0 ? colors.pos : totalGain < 0 ? colors.neg : colors.foreground;
+  const toneColor = (v: number) => (v > 0 ? colors.pos : v < 0 ? colors.neg : colors.foreground);
 
-  const rowGain = (r: RealizedGainRow) => (base ? r.realizedGainInBase ?? r.realizedGain : r.realizedGain);
+  // Unified rows carry realizedGainInBase in the display currency; otherwise
+  // (native view, or a row the server couldn't convert) use the native gain.
+  const rowGain = (r: RealizedGainRow): { value: number; currency: string } =>
+    unified && r.realizedGainInBase != null
+      ? { value: r.realizedGainInBase, currency: r.baseCurrency ?? unifiedCurrency }
+      : { value: r.realizedGain, currency: r.currency };
 
   return (
     <SafeAreaView style={[styles.safe, { backgroundColor: colors.background }]} edges={["top"]}>
@@ -91,7 +113,12 @@ export default function RealizedGainsScreen({ navigation, route }: Props) {
         <View style={{ width: 70 }} />
       </View>
 
-      <ScrollView contentContainerStyle={styles.scroll}>
+      <ScrollView
+        contentContainerStyle={styles.scroll}
+        refreshControl={
+          <RefreshControl refreshing={refreshing} onRefresh={() => void load({ year, term, unified }, true)} />
+        }
+      >
         {/* Year chips */}
         <View style={styles.chipRow}>
           <Chip label="All years" active={year == null} onPress={() => setYear(null)} />
@@ -110,17 +137,17 @@ export default function RealizedGainsScreen({ navigation, route }: Props) {
             />
           ))}
         </View>
-        {/* Base-currency toggle */}
+        {/* Unified display-currency toggle (FINLYNQ-183 wording) */}
         <View style={[styles.toggleRow, { borderBottomColor: colors.border }]}>
           <View style={{ flex: 1 }}>
-            <Text style={[styles.toggleTitle, { color: colors.foreground }]}>Show in base currency</Text>
+            <Text style={[styles.toggleTitle, { color: colors.foreground }]}>Show in {unifiedCurrency}</Text>
             <Text style={[styles.toggleSub, { color: colors.mutedForeground }]}>
-              Cross-currency gains via historical FX
+              Converts each closure at historical FX rates
             </Text>
           </View>
           <Switch
-            value={base}
-            onValueChange={setBase}
+            value={unified}
+            onValueChange={setUnified}
             trackColor={{ true: colors.primary, false: colors.border }}
           />
         </View>
@@ -135,10 +162,29 @@ export default function RealizedGainsScreen({ navigation, route }: Props) {
               <Text style={[styles.cardLabel, { color: colors.mutedForeground }]}>
                 Total realized {year != null ? `(${year})` : "(all years)"}
               </Text>
-              <Text style={[styles.cardValue, { color: totalColor }]}>
-                {totalGain >= 0 ? "+" : ""}
-                {formatCurrency(totalGain, displayCurrency, { decimals: 0 })}
-              </Text>
+              {showUnified ? (
+                <Text style={[styles.cardValue, { color: toneColor(data!.totalRealizedGainInBase!) }]}>
+                  {signedMoney(data!.totalRealizedGainInBase!, unifiedCurrency)}
+                </Text>
+              ) : nativeTotals.length === 0 ? (
+                <Text style={[styles.cardValue, { color: colors.foreground }]}>
+                  {formatCurrency(0, unifiedCurrency, { decimals: 0 })}
+                </Text>
+              ) : (
+                // Native view: one total per currency — never summed across them.
+                nativeTotals.map((t) => (
+                  <Text
+                    key={t.currency}
+                    style={[
+                      nativeTotals.length === 1 ? styles.cardValue : styles.cardValueMulti,
+                      { color: toneColor(t.amount) },
+                    ]}
+                  >
+                    {signedMoney(t.amount, t.currency)}
+                    {nativeTotals.length > 1 ? ` ${t.currency}` : ""}
+                  </Text>
+                ))
+              )}
               <Text style={[styles.cardHint, { color: colors.mutedForeground }]}>
                 {rows.length} closure{rows.length === 1 ? "" : "s"} · {holdingsCount} holding
                 {holdingsCount === 1 ? "" : "s"}
@@ -161,16 +207,14 @@ export default function RealizedGainsScreen({ navigation, route }: Props) {
                       <Text style={[styles.rowSym, { color: colors.foreground }]} numberOfLines={1}>
                         {safeName(r.holdingName, "Holding")}
                       </Text>
-                      <Text
-                        style={[styles.rowGain, { color: g >= 0 ? colors.pos : colors.neg }]}
-                      >
-                        {g >= 0 ? "+" : ""}
-                        {formatCurrency(g, base ? displayCurrency : r.currency, { decimals: 0 })}
+                      <Text style={[styles.rowGain, { color: g.value >= 0 ? colors.pos : colors.neg }]}>
+                        {signedMoney(g.value, g.currency, 2)}
                       </Text>
                     </View>
                     <Text style={[styles.rowMeta, { color: colors.mutedForeground }]} numberOfLines={1}>
-                      {formatShortDate(r.closeDate)} · {r.qtyClosed}u · {r.costPerShare} →{" "}
-                      {r.proceedsPerShare}
+                      {formatShortDate(r.closeDate)} · {formatQty(r.qtyClosed)}u ·{" "}
+                      {formatPerShare(r.costPerShare, r.currency)} →{" "}
+                      {formatPerShare(r.proceedsPerShare, r.currency)}
                     </Text>
                     <View style={styles.badges}>
                       <Badge
@@ -178,8 +222,12 @@ export default function RealizedGainsScreen({ navigation, route }: Props) {
                         bg={colors.secondary}
                         fg={colors.mutedForeground}
                       />
+                      {/* Short-position closure; distinct from the short/long-TERM badge. */}
                       {r.closeKind.startsWith("short") && (
-                        <Badge label="Short" bg={colors.neg + "22"} fg={colors.neg} />
+                        <Badge label="Short sale" bg={colors.neg + "22"} fg={colors.neg} />
+                      )}
+                      {unified && r.fxSnapshotMissing && (
+                        <Badge label="Approx. FX" bg={colors.secondary} fg={colors.mutedForeground} />
                       )}
                     </View>
                   </View>
@@ -254,13 +302,14 @@ const styles = StyleSheet.create({
   card: { borderRadius: 12, borderWidth: StyleSheet.hairlineWidth, padding: 16, marginBottom: 12 },
   cardLabel: { fontSize: 13, fontWeight: "600", marginBottom: 4 },
   cardValue: { fontSize: 30, fontWeight: "800", fontVariant: ["tabular-nums"] },
+  cardValueMulti: { fontSize: 20, fontWeight: "800", fontVariant: ["tabular-nums"], marginTop: 2 },
   cardHint: { fontSize: 12, marginTop: 4 },
   row: { borderRadius: 12, borderWidth: StyleSheet.hairlineWidth, padding: 14, marginBottom: 8 },
   rowTop: { flexDirection: "row", justifyContent: "space-between", alignItems: "center" },
   rowSym: { fontSize: 15, fontWeight: "700", flex: 1, marginRight: 10 },
   rowGain: { fontSize: 15, fontWeight: "700", fontVariant: ["tabular-nums"] },
   rowMeta: { fontSize: 12, marginTop: 3 },
-  badges: { flexDirection: "row", gap: 6, marginTop: 6 },
+  badges: { flexDirection: "row", flexWrap: "wrap", gap: 6, marginTop: 6 },
   badge: { paddingHorizontal: 8, paddingVertical: 3, borderRadius: 6 },
   empty: { fontSize: 14, textAlign: "center", paddingVertical: 32 },
 });

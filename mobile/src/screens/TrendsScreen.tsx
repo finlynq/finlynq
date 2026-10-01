@@ -2,9 +2,12 @@
 // (daily/weekly/monthly/quarterly) + group-by (category/group) controls; the
 // date range + business-only filter are inherited from the hub via route
 // params. Renders an income/expense line, per-period grouped bars, and the
-// grouped income + expense category tables. Reads GET /api/reports/trends
-// (bare JSON; amounts are NOT FX-converted server-side — matches web).
-import React, { useEffect, useState } from "react";
+// income + expense breakdown tables. Reads GET /api/reports/trends (bare JSON;
+// amounts are FX-converted to the display currency server-side, which the
+// response echoes as `displayCurrency`). In category mode each row carries the
+// server's `categoryId` and taps through to CategoryDetail; in group mode the
+// rows ARE groups, so they render as a flat list (no one-item collapsibles).
+import React, { useCallback, useState } from "react";
 import {
   View,
   Text,
@@ -13,21 +16,23 @@ import {
   ActivityIndicator,
   TouchableOpacity,
   Dimensions,
+  RefreshControl,
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import Svg, { Polyline, Line } from "react-native-svg";
 import type { NativeStackScreenProps } from "@react-navigation/native-stack";
 import { useTheme } from "../theme";
 import { endpoints } from "../api/client";
-import { logger } from "../lib/logger";
-import { formatCurrency, formatShortDate } from "../lib/format";
+import { formatCurrency } from "../lib/format";
 import { scalePoints, seriesRange } from "../lib/portfolio/chart";
+import { formatSavingsRate } from "../lib/reports/savings-rate";
+import { useReportData } from "../lib/reports/use-report-data";
 import { Icon } from "../components/icon";
 import { MetricGrid, type MetricItem } from "../components/portfolio/MetricGrid";
 import { TrendBars } from "../components/reports/TrendBars";
 import { GroupedCategoryTable, type GroupedRow } from "../components/reports/GroupedCategoryTable";
 import type { MoreStackParamList } from "../navigation/MoreStack";
-import type { ReportTrends, ReportPeriod, ReportGroupBy, TrendsBreakdownItem } from "../../../shared/types";
+import type { ReportPeriod, ReportGroupBy, TrendsBreakdownItem } from "../../../shared/types";
 
 type Props = NativeStackScreenProps<MoreStackParamList, "Trends">;
 
@@ -38,8 +43,19 @@ const PERIODS: { key: ReportPeriod; label: string }[] = [
   { key: "quarterly", label: "Quarterly" },
 ];
 
-const toRows = (rows: TrendsBreakdownItem[]): GroupedRow[] =>
-  rows.map((r) => ({ name: r.name, group: r.group, total: r.total, count: r.count }));
+// Line chart inner vertical padding — must match scalePoints' default padY so
+// the zero baseline lands where the series' zero would.
+const LINE_PAD_Y = 6;
+
+const toRows = (rows: TrendsBreakdownItem[], mode: ReportGroupBy): GroupedRow[] =>
+  rows.map((r) => ({
+    name: r.name,
+    group: r.group,
+    total: r.total,
+    count: r.count,
+    // Only a category row maps to one category; a group row aggregates many.
+    categoryId: mode === "category" ? (r.categoryId ?? null) : null,
+  }));
 
 export default function TrendsScreen({ navigation, route }: Props) {
   const { colors } = useTheme();
@@ -47,46 +63,31 @@ export default function TrendsScreen({ navigation, route }: Props) {
 
   const [period, setPeriod] = useState<ReportPeriod>("monthly");
   const [groupBy, setGroupBy] = useState<ReportGroupBy>("category");
-  const [data, setData] = useState<ReportTrends | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
 
-  useEffect(() => {
-    let cancelled = false;
-    setLoading(true);
-    endpoints
-      .getReportTrends({ startDate, endDate, isBusiness, period, groupBy })
-      .then((res) => {
-        if (cancelled) return;
-        if (res.success) {
-          setData(res.data);
-          setError(null);
-        } else {
-          logger.warn("trends", "fetch failed", { error: res.error });
-          setError(res.error);
-        }
-      })
-      .catch((e) => {
-        if (cancelled) return;
-        logger.error("trends", "fetch threw", { detail: String(e) });
-        setError("Cannot connect to server");
-      })
-      .finally(() => !cancelled && setLoading(false));
-    return () => {
-      cancelled = true;
-    };
-  }, [startDate, endDate, isBusiness, period, groupBy]);
+  const fetcher = useCallback(
+    () => endpoints.getReportTrends({ startDate, endDate, isBusiness, period, groupBy }),
+    [startDate, endDate, isBusiness, period, groupBy]
+  );
+  const { data, loading, refreshing, error, refresh } = useReportData(fetcher, "trends");
 
+  const ccy = data?.displayCurrency ?? displayCurrency;
+  // Render off what the server actually returned, not the chip state.
+  const mode: ReportGroupBy = data?.groupBy ?? groupBy;
+  const openCategory = (row: GroupedRow) => {
+    if (row.categoryId != null) navigation.navigate("CategoryDetail", { categoryId: row.categoryId, name: row.name });
+  };
+
+  const rate = data ? formatSavingsRate(data.totalIncome, data.savingsRate) : null;
   const metrics: MetricItem[] = data
     ? [
-        { label: "Income", value: formatCurrency(data.totalIncome, displayCurrency, { decimals: 0 }), tone: "pos" },
-        { label: "Expenses", value: formatCurrency(data.totalExpenses, displayCurrency, { decimals: 0 }), tone: "neg" },
+        { label: "Income", value: formatCurrency(data.totalIncome, ccy, { decimals: 0 }), tone: "pos" },
+        { label: "Expenses", value: formatCurrency(data.totalExpenses, ccy, { decimals: 0 }), tone: "neg" },
         {
           label: "Net",
-          value: formatCurrency(data.netSavings, displayCurrency, { decimals: 0 }),
+          value: formatCurrency(data.netSavings, ccy, { decimals: 0 }),
           tone: data.netSavings >= 0 ? "pos" : "neg",
         },
-        { label: "Savings rate", value: `${data.savingsRate.toFixed(0)}%`, tone: data.savingsRate >= 0 ? "pos" : "neg" },
+        { label: "Savings rate", value: rate!.text, tone: rate!.tone },
       ]
     : [];
 
@@ -101,7 +102,10 @@ export default function TrendsScreen({ navigation, route }: Props) {
         <View style={{ width: 70 }} />
       </View>
 
-      <ScrollView contentContainerStyle={styles.scroll}>
+      <ScrollView
+        contentContainerStyle={styles.scroll}
+        refreshControl={<RefreshControl refreshing={refreshing} onRefresh={refresh} tintColor={colors.primary} />}
+      >
         <Text style={[styles.rangeLabel, { color: colors.mutedForeground }]}>
           {rangeLabel}
           {isBusiness ? " · Business only" : ""}
@@ -133,7 +137,7 @@ export default function TrendsScreen({ navigation, route }: Props) {
 
             <View style={[styles.card, { backgroundColor: colors.card, borderColor: colors.border }]}>
               <Text style={[styles.cardTitle, { color: colors.foreground }]}>Income vs expenses</Text>
-              <TrendLine points={data.timeseries} currency={displayCurrency} />
+              <TrendLine points={data.timeseries} currency={ccy} />
             </View>
 
             <View style={[styles.card, { backgroundColor: colors.card, borderColor: colors.border }]}>
@@ -142,14 +146,28 @@ export default function TrendsScreen({ navigation, route }: Props) {
             </View>
 
             <Text style={[styles.sectionTitle, { color: colors.foreground }]}>
-              Income {groupBy === "group" ? "groups" : "categories"}
+              Income {mode === "group" ? "groups" : "categories"}
             </Text>
-            <GroupedCategoryTable rows={toRows(data.income)} currency={displayCurrency} tone="pos" emptyText="No income in this range." />
+            <GroupedCategoryTable
+              rows={toRows(data.income, mode)}
+              currency={ccy}
+              tone="pos"
+              emptyText="No income in this range."
+              flat={mode === "group"}
+              onPressItem={mode === "category" ? openCategory : undefined}
+            />
 
             <Text style={[styles.sectionTitle, { color: colors.foreground, marginTop: 20 }]}>
-              Expense {groupBy === "group" ? "groups" : "categories"}
+              Expense {mode === "group" ? "groups" : "categories"}
             </Text>
-            <GroupedCategoryTable rows={toRows(data.expenses)} currency={displayCurrency} tone="neg" emptyText="No expenses in this range." />
+            <GroupedCategoryTable
+              rows={toRows(data.expenses, mode)}
+              currency={ccy}
+              tone="neg"
+              emptyText="No expenses in this range."
+              flat={mode === "group"}
+              onPressItem={mode === "category" ? openCategory : undefined}
+            />
           </>
         ) : null}
       </ScrollView>
@@ -179,14 +197,19 @@ function TrendLine({
 
   const inc = points.map((p) => p.income);
   const exp = points.map((p) => p.expenses);
+  // [0] keeps zero inside the scale, so the baseline below is always on-chart.
   const { min, max } = seriesRange([inc, exp, [0]]);
-  const incPts = scalePoints(inc, min, max, w, h);
-  const expPts = scalePoints(exp, min, max, w, h);
+  const incPts = scalePoints(inc, min, max, w, h, LINE_PAD_Y);
+  const expPts = scalePoints(exp, min, max, w, h, LINE_PAD_Y);
+  // A real zero baseline (same mapping scalePoints uses), not a decorative
+  // midline that reads like an axis but sits at half the max.
+  const span = max - min || 1;
+  const zeroY = LINE_PAD_Y + (1 - (0 - min) / span) * Math.max(1, h - LINE_PAD_Y * 2);
 
   return (
     <View>
       <Svg width={w} height={h} viewBox={`0 0 ${w} ${h}`}>
-        <Line x1={0} y1={h * 0.5} x2={w} y2={h * 0.5} stroke={colors.border} strokeWidth={1} />
+        <Line x1={0} y1={zeroY} x2={w} y2={zeroY} stroke={colors.border} strokeWidth={1} />
         <Polyline points={incPts} fill="none" stroke={colors.pos} strokeWidth={2.5} />
         <Polyline points={expPts} fill="none" stroke={colors.neg} strokeWidth={2.5} />
       </Svg>

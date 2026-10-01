@@ -1,6 +1,7 @@
 // Cash-flow Sankey (react-native-svg). Income sources (left, teal) flow to
 // expense uses (right, palette) with a proportional bipartite flow set; a
-// savings bar sits below when income exceeds expenses. Geometry is the pure
+// savings bar sits below when income exceeds expenses, and in a deficit period
+// a muted "From savings" source funds the shortfall. Geometry is the pure
 // layoutSankey() in lib/reports/sankey.ts; this is a thin SVG wrapper. The
 // chart is rendered at a width wide enough for legible flows and wrapped in a
 // horizontal ScrollView so a narrow phone can pan it. No hover tooltips (touch)
@@ -25,7 +26,7 @@ const FONT = 10.5;
 export function SankeyChart({
   incomeData,
   expenseData,
-  currency = "CAD",
+  currency = "USD",
 }: {
   incomeData: SankeyDatum[];
   expenseData: SankeyDatum[];
@@ -67,12 +68,19 @@ export function SankeyChart({
         {/* Income nodes (left) */}
         {layout.incomeNodes.map((n, i) => (
           <React.Fragment key={`in-${i}`}>
-            <Rect x={n.x} y={n.y} width={n.w} height={Math.max(n.h, 2)} rx={3} fill={colors.pos} />
+            <Rect
+              x={n.x}
+              y={n.y}
+              width={n.w}
+              height={Math.max(n.h, 2)}
+              rx={3}
+              fill={n.fromSavings ? colors.mutedForeground : colors.pos}
+            />
             <SvgText
               x={n.x - LABEL_GAP}
               y={n.y + n.h / 2 + FONT / 3}
               fontSize={FONT}
-              fill={colors.foreground}
+              fill={n.fromSavings ? colors.mutedForeground : colors.foreground}
               textAnchor="end"
             >
               {truncateLabel(n.name, maxChars)}

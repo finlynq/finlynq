@@ -1,7 +1,20 @@
 // Portfolio performance over time — period selector + value/cost line chart +
 // TWRR / MWRR stat grid. Reads GET /api/portfolio/performance (enveloped).
-import React, { useEffect, useState } from "react";
-import { View, Text, ScrollView, StyleSheet, ActivityIndicator, TouchableOpacity } from "react-native";
+//
+// The return metrics are only meaningful over a series of 2+ snapshots: with
+// fewer the server's TWRR is 0 and its MWRR is unconverged, so the grid is
+// hidden rather than showing a fake "+0.0%" / "$0" (the chart renders the
+// not-enough-history explanation instead).
+import React, { useCallback, useEffect, useRef, useState } from "react";
+import {
+  View,
+  Text,
+  ScrollView,
+  StyleSheet,
+  ActivityIndicator,
+  TouchableOpacity,
+  RefreshControl,
+} from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import type { NativeStackScreenProps } from "@react-navigation/native-stack";
 import { useTheme } from "../theme";
@@ -23,55 +36,67 @@ function pct(v: number): string {
   return `${sign}${(v * 100).toFixed(1)}%`;
 }
 
+function toneOf(v: number): MetricItem["tone"] {
+  return v > 0 ? "pos" : v < 0 ? "neg" : "default";
+}
+
 export default function PerformanceScreen({ navigation }: Props) {
   const { colors } = useTheme();
   const [period, setPeriod] = useState<(typeof PERIODS)[number]>("1y");
   const [data, setData] = useState<PortfolioPerformance | null>(null);
   const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // Drops responses from a superseded request (period switch / pull-to-refresh).
+  const seqRef = useRef(0);
+
+  const load = useCallback(async (p: string, isRefresh: boolean) => {
+    const seq = ++seqRef.current;
+    if (isRefresh) setRefreshing(true);
+    else setLoading(true);
+    try {
+      const res = await endpoints.getPortfolioPerformance(p);
+      if (seq !== seqRef.current) return;
+      if (res.success) {
+        setData(res.data);
+        setError(null);
+      } else {
+        logger.warn("performance", "fetch failed", { error: res.error });
+        setError(res.error);
+      }
+    } catch (e) {
+      if (seq !== seqRef.current) return;
+      logger.error("performance", "fetch threw", { detail: String(e) });
+      setError("Cannot connect to server");
+    } finally {
+      if (isRefresh) setRefreshing(false);
+      if (seq === seqRef.current) setLoading(false);
+    }
+  }, []);
 
   useEffect(() => {
-    let cancelled = false;
-    setLoading(true);
-    endpoints
-      .getPortfolioPerformance(period)
-      .then((res) => {
-        if (cancelled) return;
-        if (res.success) {
-          setData(res.data);
-          setError(null);
-        } else {
-          logger.warn("performance", "fetch failed", { error: res.error });
-          setError(res.error);
-        }
-      })
-      .catch((e) => {
-        if (cancelled) return;
-        logger.error("performance", "fetch threw", { detail: String(e) });
-        setError("Cannot connect to server");
-      })
-      .finally(() => !cancelled && setLoading(false));
-    return () => {
-      cancelled = true;
-    };
-  }, [period]);
+    void load(period, false);
+  }, [period, load]);
 
   const currency = data?.currency ?? "USD";
-  const metrics: MetricItem[] = data
-    ? [
-        { label: `TWRR (${period.toUpperCase()})`, value: pct(data.twrr.period), tone: data.twrr.period >= 0 ? "pos" : "neg" },
-        { label: "Annualized", value: pct(data.twrr.annualized), tone: data.twrr.annualized >= 0 ? "pos" : "neg" },
-        {
-          label: "MWRR (XIRR)",
-          value: data.mwrr.converged ? pct(data.mwrr.irr) : "—",
-          tone: data.mwrr.irr >= 0 ? "pos" : "neg",
-        },
-        {
-          label: "Cost basis",
-          value: formatCurrency(data.series[data.series.length - 1]?.costBasis ?? 0, currency, { decimals: 0 }),
-        },
-      ]
-    : [];
+  const series = data?.series ?? [];
+  const hasHistory = series.length >= 2;
+  const metrics: MetricItem[] =
+    data && hasHistory
+      ? [
+          { label: `TWRR (${period.toUpperCase()})`, value: pct(data.twrr.period), tone: toneOf(data.twrr.period) },
+          { label: "Annualized", value: pct(data.twrr.annualized), tone: toneOf(data.twrr.annualized) },
+          {
+            label: "MWRR (XIRR)",
+            value: data.mwrr.converged ? pct(data.mwrr.irr) : "—",
+            tone: data.mwrr.converged ? toneOf(data.mwrr.irr) : "default",
+          },
+          {
+            label: "Cost basis",
+            value: formatCurrency(series[series.length - 1].costBasis, currency, { decimals: 0 }),
+          },
+        ]
+      : [];
 
   return (
     <SafeAreaView style={[styles.safe, { backgroundColor: colors.background }]} edges={["top"]}>
@@ -84,7 +109,10 @@ export default function PerformanceScreen({ navigation }: Props) {
         <View style={{ width: 70 }} />
       </View>
 
-      <ScrollView contentContainerStyle={styles.scroll}>
+      <ScrollView
+        contentContainerStyle={styles.scroll}
+        refreshControl={<RefreshControl refreshing={refreshing} onRefresh={() => void load(period, true)} />}
+      >
         <View style={[styles.seg, { backgroundColor: colors.secondary }]}>
           {PERIODS.map((p) => {
             const active = p === period;
@@ -111,12 +139,13 @@ export default function PerformanceScreen({ navigation }: Props) {
         ) : (
           <>
             <View style={[styles.card, { backgroundColor: colors.card, borderColor: colors.border }]}>
-              <PerformanceChart series={data?.series ?? []} />
+              <PerformanceChart series={series} />
             </View>
-            <MetricGrid items={metrics} />
-            {(data?.gapsFilledDays ?? 0) > 0 && (
+            {hasHistory && <MetricGrid items={metrics} />}
+            {hasHistory && (data?.gapsFilledDays ?? 0) > 0 && (
               <Text style={[styles.hint, { color: colors.mutedForeground }]}>
-                · {data!.gapsFilledDays} days gap-filled (shown dashed)
+                {data!.gapsFilledDays} day{data!.gapsFilledDays === 1 ? "" : "s"} gap-filled (missing
+                price or FX data estimated from the nearest known value)
               </Text>
             )}
           </>

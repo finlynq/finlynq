@@ -303,6 +303,7 @@ export default function OperationFormScreen({ navigation, route }: Props) {
           onAccountChange={onAccountChange}
           set={set}
           categories={categories}
+          isEdit={editId != null}
         />
 
         <LotPickerSheet
@@ -567,6 +568,7 @@ function AccountPickers({
   onAccountChange,
   set,
   categories,
+  isEdit,
 }: {
   config: ReturnType<typeof getOpConfig>;
   form: OpState;
@@ -576,9 +578,14 @@ function AccountPickers({
   onAccountChange: (key: AccountKey, id: number) => void;
   set: (p: Partial<OpState>) => void;
   categories: Category[];
+  isEdit: boolean;
 }) {
-  const invOpts = toAccountOptions(investmentAccounts(ctx.accounts));
-  const bankOpts = toAccountOptions(nonInvestmentAccounts(ctx.accounts));
+  // Archived accounts are offered only when EDITING (so an existing operation
+  // still shows its own account); a new operation can't target one. ctx.accounts
+  // itself stays unfiltered — labels + currency lookups must still resolve.
+  const pickable = isEdit ? ctx.accounts : ctx.accounts.filter((a) => !a.archived);
+  const invOpts = toAccountOptions(investmentAccounts(pickable));
+  const bankOpts = toAccountOptions(nonInvestmentAccounts(pickable));
 
   // Render each account/holding/related/category field's PickerSheet; only the
   // one whose key matches openPicker is visible.

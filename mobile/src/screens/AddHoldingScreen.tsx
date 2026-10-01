@@ -48,7 +48,12 @@ export default function AddHoldingScreen({ navigation, route }: Props) {
       .getAccountBalances()
       .then((res) => {
         if (res.success) {
-          const inv = investmentAccounts(res.data);
+          // A new holding can't be created in an ARCHIVED account — unless the
+          // caller explicitly passed it (e.g. an edit of an existing operation
+          // on that account), so the form still shows its own account.
+          const inv = investmentAccounts(res.data).filter(
+            (a) => !a.archived || a.accountId === route.params?.accountId,
+          );
           setAccounts(inv);
           if (accountId == null && inv.length > 0) {
             setAccountId(inv[0].accountId);

@@ -48,9 +48,15 @@ export default function TransactionDetailScreen({ route, navigation }: Props) {
   const [selectedCategoryId, setSelectedCategoryId] = useState(transaction.categoryId);
 
   useEffect(() => {
-    Promise.all([endpoints.getAccounts(), endpoints.getCategories()])
+    // Include archived accounts so a transaction on one still shows its own
+    // account; the picker offers archived ones only when it's this row's.
+    Promise.all([endpoints.getAccountsDetailed(), endpoints.getCategories()])
       .then(([accRes, catRes]) => {
-        if (accRes.success) setAccounts(accRes.data);
+        if (accRes.success) {
+          setAccounts(
+            accRes.data.filter((a) => !a.archived || a.id === transaction.accountId) as unknown as Account[],
+          );
+        }
         else logger.warn("tx-detail", "accounts fetch failed", { error: accRes.error });
         if (catRes.success) setCategories(catRes.data);
         else logger.warn("tx-detail", "categories fetch failed", { error: catRes.error });

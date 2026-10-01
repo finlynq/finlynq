@@ -1,11 +1,13 @@
 import React from "react";
+import { ActivityIndicator } from "react-native";
 import { render, waitFor } from "@testing-library/react-native";
+import { useIsFocused } from "@react-navigation/native";
 import { ThemeContext } from "../theme";
 import type { Theme } from "../theme";
 import { lightColors } from "../theme/colors";
 import PortfolioScreen from "../screens/PortfolioScreen";
 import { endpoints } from "../api/client";
-import type { PortfolioOverview } from "../../../shared/types";
+import type { PortfolioOverview, PortfolioHoldingSummary } from "../../../shared/types";
 
 jest.mock("../api/client", () => ({
   endpoints: { getPortfolioOverview: jest.fn() },
@@ -19,38 +21,42 @@ const theme: Theme = {
   fontSize: { xs: 11, sm: 13, base: 15, lg: 17, xl: 20, "2xl": 24, "3xl": 30 },
 };
 
-function renderWithTheme(el: React.ReactElement) {
-  return render(
+function withTheme(el: React.ReactElement) {
+  return (
     <ThemeContext.Provider value={{ ...theme, preference: "system", setPreference: () => {} }}>
       {el}
     </ThemeContext.Provider>
   );
 }
 
+function renderWithTheme(el: React.ReactElement) {
+  return render(withTheme(el));
+}
+
+const nvda: PortfolioHoldingSummary = {
+  key: "eq:NVDA",
+  symbol: "NVDA",
+  name: "Nvidia",
+  description: "NVIDIA Corporation",
+  assetType: "stock",
+  totalQty: 40,
+  avgCostDisplay: 300,
+  costBasisDisplay: 12000,
+  marketValueDisplay: 14210,
+  unrealizedGainDisplay: 2210,
+  unrealizedGainPct: 18.4,
+  realizedGainDisplay: 0,
+  dividendsDisplay: 0,
+  totalReturnDisplay: 2210,
+  totalReturnPct: 18.4,
+  pctOfPortfolio: 60,
+  accountCount: 1,
+};
+
 const overview: PortfolioOverview = {
   displayCurrency: "CAD",
   holdings: [],
-  byHolding: [
-    {
-      key: "eq:NVDA",
-      symbol: "NVDA",
-      name: "Nvidia",
-      description: "NVIDIA Corporation",
-      assetType: "stock",
-      totalQty: 40,
-      avgCostDisplay: 300,
-      costBasisDisplay: 12000,
-      marketValueDisplay: 14210,
-      unrealizedGainDisplay: 2210,
-      unrealizedGainPct: 18.4,
-      realizedGainDisplay: 0,
-      dividendsDisplay: 0,
-      totalReturnDisplay: 2210,
-      totalReturnPct: 18.4,
-      pctOfPortfolio: 60,
-      accountCount: 1,
-    },
-  ],
+  byHolding: [nvda],
   summary: {
     totalHoldings: 1,
     totalAccounts: 1,
@@ -85,6 +91,8 @@ describe("PortfolioScreen", () => {
   } as unknown as React.ComponentProps<typeof PortfolioScreen>;
 
   beforeEach(() => {
+    jest.clearAllMocks();
+    (useIsFocused as jest.Mock).mockReturnValue(true);
     (endpoints.getPortfolioOverview as jest.Mock).mockResolvedValue({
       success: true,
       data: overview,
@@ -114,5 +122,81 @@ describe("PortfolioScreen", () => {
     );
     await waitFor(() => expect(endpoints.getPortfolioOverview).toHaveBeenCalled());
     expect(await findByText("Unauthorized")).toBeTruthy();
+  });
+
+  it("renders server Movers with the display-currency day change, sign-toned, null % omitted", async () => {
+    (endpoints.getPortfolioOverview as jest.Mock).mockResolvedValue({
+      success: true,
+      data: {
+        ...overview,
+        displayCurrency: "USD",
+        topGainers: [
+          { key: "eq:NVDA", symbol: "NVDA", name: "NVDA", image: null, dayChangeDisplay: 1234.4, changePct: 2.5 },
+        ],
+        topLosers: [
+          // changePct null (no prior-day value): tone still comes from the $ sign.
+          { key: "metal:XAU", symbol: "XAU", name: "XAU", image: null, dayChangeDisplay: -56.2, changePct: null },
+        ],
+      },
+    });
+    const { findByText, getByText, queryByText } = renderWithTheme(<PortfolioScreen {...props} />);
+    expect(await findByText("Top movers")).toBeTruthy();
+    // Not "+$0" — the consolidated dayChangeDisplay, in the display currency.
+    const gain = getByText("+$1,234");
+    expect(gain.props.style).toEqual(expect.arrayContaining([expect.objectContaining({ color: lightColors.pos })]));
+    expect(getByText("+2.5%")).toBeTruthy();
+    const loss = getByText("-$56");
+    expect(loss.props.style).toEqual(expect.arrayContaining([expect.objectContaining({ color: lightColors.neg })]));
+    expect(queryByText(/NaN|null/)).toBeNull();
+  });
+
+  it("includes metals in the by-type allocation donut", async () => {
+    (endpoints.getPortfolioOverview as jest.Mock).mockResolvedValue({
+      success: true,
+      data: { ...overview, byType: { ...overview.byType, metal: { count: 1, value: 20000 } } },
+    });
+    const { findByText } = renderWithTheme(<PortfolioScreen {...props} />);
+    expect(await findByText("Metals")).toBeTruthy();
+  });
+
+  it("does not emit duplicate React keys when two rows share a legacy key", async () => {
+    const errSpy = jest.spyOn(console, "error").mockImplementation(() => {});
+    (endpoints.getPortfolioOverview as jest.Mock).mockResolvedValue({
+      success: true,
+      data: { ...overview, byHolding: [nvda, { ...nvda, totalQty: 5, description: "Nvidia (legacy)" }] },
+    });
+    const { findByText } = renderWithTheme(<PortfolioScreen {...props} />);
+    expect(await findByText("Nvidia (legacy)")).toBeTruthy();
+    const dupWarnings = errSpy.mock.calls.filter((c) => String(c[0]).includes("same key"));
+    expect(dupWarnings).toHaveLength(0);
+    errSpy.mockRestore();
+  });
+
+  it("refreshes in the background on refocus — content stays, no full-screen spinner", async () => {
+    const { findByText, getByText, rerender, UNSAFE_queryAllByType } = renderWithTheme(
+      <PortfolioScreen {...props} />
+    );
+    expect(await findByText("NVIDIA Corporation")).toBeTruthy();
+
+    let resolveRefetch: (v: unknown) => void = () => {};
+    (endpoints.getPortfolioOverview as jest.Mock).mockReturnValue(
+      new Promise((r) => {
+        resolveRefetch = r;
+      })
+    );
+    (useIsFocused as jest.Mock).mockReturnValue(false);
+    rerender(withTheme(<PortfolioScreen {...props} />));
+    (useIsFocused as jest.Mock).mockReturnValue(true);
+    rerender(withTheme(<PortfolioScreen {...props} />));
+
+    await waitFor(() => expect(endpoints.getPortfolioOverview).toHaveBeenCalledTimes(2));
+    // Refetch in flight: the list is still on screen, no spinner.
+    expect(getByText("NVIDIA Corporation")).toBeTruthy();
+    expect(UNSAFE_queryAllByType(ActivityIndicator)).toHaveLength(0);
+
+    resolveRefetch({ success: false, error: "Server down" });
+    // A failed background refresh keeps the content and says so.
+    expect(await findByText("Could not refresh: Server down")).toBeTruthy();
+    expect(getByText("NVIDIA Corporation")).toBeTruthy();
   });
 });

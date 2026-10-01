@@ -101,10 +101,21 @@ export default function AddTransactionScreen() {
         const investmentIds = new Set<number>(
           balRes.success ? balRes.data.filter((b) => b.isInvestment).map((b) => b.accountId) : []
         );
+        // Archived accounts never appear in a CREATE picker (this screen only
+        // creates). /api/accounts already drops them by default; the balances
+        // payload includes them flagged, so exclude those ids too in case the
+        // accounts call ever starts returning archived rows.
+        const archivedIds = new Set<number>(
+          balRes.success ? balRes.data.filter((b) => b.archived).map((b) => b.accountId) : []
+        );
         if (accRes.success) {
-          const usable = accRes.data.filter((a) => !investmentIds.has(a.id));
+          const usable = accRes.data.filter(
+            (a) => !investmentIds.has(a.id) && !archivedIds.has(a.id),
+          );
           setAccounts(usable);
-          setHasInvestment(accRes.data.length !== usable.length);
+          setHasInvestment(
+            accRes.data.some((a) => investmentIds.has(a.id) && !archivedIds.has(a.id)),
+          );
           if (usable.length > 0) {
             const nameFallback = (a: (typeof usable)[number], b: (typeof usable)[number]) =>
               safeName(a.name).localeCompare(safeName(b.name));

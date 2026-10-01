@@ -1,19 +1,29 @@
 // Income statement — FX-converted income + expense category tables (grouped,
 // collapsible) + a net-savings summary + an optional unrealized-P&L card for
 // investment accounts. Reads GET /api/reports?type=income-statement (bare JSON,
-// totals converted to the display currency server-side).
-import React, { useEffect, useState } from "react";
-import { View, Text, ScrollView, StyleSheet, ActivityIndicator, TouchableOpacity } from "react-native";
+// totals converted to the display currency server-side). Each row carries the
+// server's `categoryId`, so tapping a category opens its month-by-month detail.
+import React, { useCallback } from "react";
+import {
+  View,
+  Text,
+  ScrollView,
+  StyleSheet,
+  ActivityIndicator,
+  TouchableOpacity,
+  RefreshControl,
+} from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import type { NativeStackScreenProps } from "@react-navigation/native-stack";
 import { useTheme } from "../theme";
 import { endpoints } from "../api/client";
-import { logger } from "../lib/logger";
 import { formatCurrency } from "../lib/format";
+import { formatSavingsRate } from "../lib/reports/savings-rate";
+import { useReportData } from "../lib/reports/use-report-data";
 import { Icon } from "../components/icon";
 import { GroupedCategoryTable, type GroupedRow } from "../components/reports/GroupedCategoryTable";
 import type { MoreStackParamList } from "../navigation/MoreStack";
-import type { IncomeStatement, IncomeStatementRow } from "../../../shared/types";
+import type { IncomeStatementRow } from "../../../shared/types";
 
 type Props = NativeStackScreenProps<MoreStackParamList, "IncomeStatement">;
 
@@ -24,41 +34,19 @@ export default function IncomeStatementScreen({ navigation, route }: Props) {
   const { colors } = useTheme();
   const { startDate, endDate, isBusiness, displayCurrency, rangeLabel } = route.params;
 
-  const [data, setData] = useState<IncomeStatement | null>(null);
   // Tapping a category opens its month-by-month detail.
   const openCategory = (row: GroupedRow) => {
     if (row.categoryId != null) navigation.navigate("CategoryDetail", { categoryId: row.categoryId, name: row.name });
   };
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
 
-  useEffect(() => {
-    let cancelled = false;
-    setLoading(true);
-    endpoints
-      .getIncomeStatement({ startDate, endDate, isBusiness })
-      .then((res) => {
-        if (cancelled) return;
-        if (res.success) {
-          setData(res.data);
-          setError(null);
-        } else {
-          logger.warn("income-statement", "fetch failed", { error: res.error });
-          setError(res.error);
-        }
-      })
-      .catch((e) => {
-        if (cancelled) return;
-        logger.error("income-statement", "fetch threw", { detail: String(e) });
-        setError("Cannot connect to server");
-      })
-      .finally(() => !cancelled && setLoading(false));
-    return () => {
-      cancelled = true;
-    };
-  }, [startDate, endDate, isBusiness]);
+  const fetcher = useCallback(
+    () => endpoints.getIncomeStatement({ startDate, endDate, isBusiness }),
+    [startDate, endDate, isBusiness]
+  );
+  const { data, loading, refreshing, error, refresh } = useReportData(fetcher, "income-statement");
 
   const ccy = data?.displayCurrency ?? displayCurrency;
+  const rate = data ? formatSavingsRate(data.totalIncome, data.savingsRate) : null;
   const unreal = data?.unrealized;
   const hasUnreal = !!unreal && (Math.abs(unreal.totals.totalGL) > 0.005 || unreal.accounts.length > 0);
 
@@ -73,7 +61,10 @@ export default function IncomeStatementScreen({ navigation, route }: Props) {
         <View style={{ width: 70 }} />
       </View>
 
-      <ScrollView contentContainerStyle={styles.scroll}>
+      <ScrollView
+        contentContainerStyle={styles.scroll}
+        refreshControl={<RefreshControl refreshing={refreshing} onRefresh={refresh} tintColor={colors.primary} />}
+      >
         <Text style={[styles.rangeLabel, { color: colors.mutedForeground }]}>
           {rangeLabel}
           {isBusiness ? " · Business only" : ""}
@@ -113,7 +104,7 @@ export default function IncomeStatementScreen({ navigation, route }: Props) {
                     {formatCurrency(data.netSavings, ccy, { decimals: 0 })}
                   </Text>
                   <Text style={[styles.summaryRate, { color: colors.mutedForeground }]}>
-                    {data.savingsRate.toFixed(0)}% savings rate
+                    {rate?.text ?? "—"} savings rate
                   </Text>
                 </View>
               </View>

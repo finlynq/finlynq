@@ -43,6 +43,12 @@ export const COMMON_CURRENCIES = ["CAD", "USD", "EUR", "GBP"] as const;
 
 export const DEFAULT_CURRENCY = "CAD";
 
+// Fallback when the user's display currency (GET /api/settings/display-currency)
+// is unknown or the fetch failed. Matches the server's DEFAULT_DISPLAY_CURRENCY
+// (USD, FINLYNQ-183) — never CAD. Goals + budgets default new records to the
+// display currency, not to DEFAULT_CURRENCY.
+export const DISPLAY_CURRENCY_FALLBACK = "USD";
+
 // Display-currency picker (Settings → GENERAL). Mirrors the web
 // SUPPORTED_FIAT_CURRENCIES list + CURRENCY_LABELS (src/lib/fx/
 // supported-currencies.ts). Display currency is a 3-letter ISO code — the

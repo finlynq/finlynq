@@ -10,6 +10,7 @@
 // already returns an envelope is passed through unchanged (defensive).
 import type { ApiResponse, SessionInfo } from "../../../shared/types";
 import { logger, describeShape } from "../lib/logger";
+import { DEFAULT_DISPLAY_CURRENCY, pickReferenceMonth } from "../lib/dashboard";
 
 let _serverUrl = "https://finlynq.com";
 let _authToken: string | null = null;
@@ -445,7 +446,13 @@ async function composeDashboard(): Promise<ApiResponse<DashboardData>> {
     });
   }
 
+  // Archived accounts are INCLUDED here on purpose — archiving hides an account
+  // from lists/pickers, it never removes its money from net worth.
   const balances = raw.balances ?? [];
+  // Every aggregate below is in the server-resolved display currency. Fallback
+  // is USD (FINLYNQ-183), never CAD.
+  const displayCurrency =
+    raw.displayCurrency || balances[0]?.displayCurrency || DEFAULT_DISPLAY_CURRENCY;
   const balVal = (b: AccountBalance) => b.convertedBalance ?? b.balance ?? 0;
   const totalAssets = balances
     .filter((b) => b.accountType === "A")
@@ -455,25 +462,21 @@ async function composeDashboard(): Promise<ApiResponse<DashboardData>> {
     .reduce((s, b) => s + balVal(b), 0);
   const netWorth = totalAssets + totalLiabilitiesSigned;
 
-  const monthMap = new Map<string, { income: number; expenses: number }>();
-  for (const row of raw.incomeVsExpenses ?? []) {
-    const entry = monthMap.get(row.month) ?? { income: 0, expenses: 0 };
-    if (row.type === "I") entry.income = row.total;
-    else if (row.type === "E") entry.expenses = Math.abs(row.total);
-    monthMap.set(row.month, entry);
-  }
-  const months = Array.from(monthMap.keys()).sort();
-  const latest = months.length ? monthMap.get(months[months.length - 1])! : { income: 0, expenses: 0 };
-  const monthlyIncome = latest.income;
-  const monthlyExpenses = latest.expenses;
+  // Last COMPLETE month when the newest one is the current partial month
+  // (mirrors web dashboard FINLYNQ-291 C1).
+  const ref = pickReferenceMonth(raw.incomeVsExpenses ?? []);
+  const monthlyIncome = ref?.income ?? 0;
+  const monthlyExpenses = ref?.expenses ?? 0;
   const savingsRate =
     monthlyIncome > 0 ? ((monthlyIncome - monthlyExpenses) / monthlyIncome) * 100 : 0;
 
   const data: DashboardData = {
+    displayCurrency,
     netWorth,
     totalAssets,
     // Liabilities are stored as negative balances; surface the magnitude for display.
     totalLiabilities: Math.abs(totalLiabilitiesSigned),
+    referenceMonth: ref?.month ?? null,
     monthlyIncome,
     monthlyExpenses,
     savingsRate,
@@ -482,16 +485,33 @@ async function composeDashboard(): Promise<ApiResponse<DashboardData>> {
       name: b.accountName ?? "Account",
       balance: balVal(b),
       type: b.accountType,
-      currency: raw.displayCurrency ?? b.currency ?? "CAD",
+      currency: displayCurrency,
     })),
   };
 
   logger.info("dashboard", "composed", {
     balances: balances.length,
     recent: recentTransactions.length,
-    monthsTracked: months.length,
+    referenceMonth: ref?.month ?? null,
   });
   return { success: true, data };
+}
+
+/** Per-account balances (archived INCLUDED) + the resolved display currency. */
+async function fetchAccountsOverview(): Promise<
+  ApiResponse<{ balances: AccountBalance[]; displayCurrency: string }>
+> {
+  const res = await api.get<RawDashboardResponse>("/api/dashboard");
+  if (!res.success) return res;
+  const balances = res.data?.balances ?? [];
+  return {
+    success: true,
+    data: {
+      balances,
+      displayCurrency:
+        res.data?.displayCurrency || balances[0]?.displayCurrency || DEFAULT_DISPLAY_CURRENCY,
+    },
+  };
 }
 
 export const endpoints = {
@@ -516,7 +536,10 @@ export const endpoints = {
   // Full decrypted account rows (incl. type/group/note/alias/archived/mode) for
   // the account-detail edit prefill + reconciliation-mode picker. Same route as
   // getAccounts; the richer AccountDetailRow type just stops narrowing fields.
-  getAccountsDetailed: () => api.get<AccountDetailRow[]>("/api/accounts"),
+  // `includeArchived=1` so the detail screen can still load an ARCHIVED account
+  // (reached via the Accounts list's "Show archived" toggle) — without it the
+  // route drops archived rows and the screen could never find its own account.
+  getAccountsDetailed: () => api.get<AccountDetailRow[]>("/api/accounts?includeArchived=1"),
   // Edit goes through the COLLECTION route with `id` in the body (PUT). Names
   // are sent plaintext; the server re-encrypts via buildNameFields.
   updateAccount: (d: AccountEditData) => api.put<Account>("/api/accounts", d),
@@ -527,11 +550,17 @@ export const endpoints = {
     api.delete<{ ok?: boolean }>(`/api/accounts?id=${id}`),
 
   // Per-account balances live in the dashboard payload (computed + FX-converted).
+  // Rows INCLUDE archived accounts (each carries `archived`): totals keep them,
+  // list screens / create-mode pickers filter them out client-side.
   getAccountBalances: async (): Promise<ApiResponse<AccountBalance[]>> => {
-    const res = await api.get<RawDashboardResponse>("/api/dashboard");
+    const res = await fetchAccountsOverview();
     if (!res.success) return res;
-    return { success: true, data: res.data?.balances ?? [] };
+    return { success: true, data: res.data.balances };
   },
+  // Same payload plus the server-resolved display currency, so a list total is
+  // labelled correctly even when the user has no accounts yet (USD fallback,
+  // never CAD).
+  getAccountsOverview: () => fetchAccountsOverview(),
 
   // Transactions. The REST route returns a paginated envelope
   // `{ data: Transaction[], total }` (issue #59), NOT a bare array — so unwrap
@@ -693,13 +722,22 @@ export const endpoints = {
     api.get<BudgetWithSpending[]>(
       `/api/budgets?spending=1${month ? `&month=${month}` : ""}`
     ),
+  // POST upserts by (categoryId, month). `currency` is REQUIRED here on
+  // purpose: on create an omitted one is server-defaulted (CAD on older
+  // servers), and on update an omitted one keeps the row's old currency — so
+  // an amount typed in the display currency would be stored against the wrong
+  // currency. Always send the currency the amount was entered in.
+  saveBudget: (d: { categoryId: number; month: string; amount: number; currency: string }) =>
+    api.post<unknown>("/api/budgets", d),
+  // Bare `{ success: true }` on 2xx (passed through by request()).
+  deleteBudget: (id: number) =>
+    api.delete<{ success?: boolean }>(`/api/budgets?id=${id}`),
 
-  // Reports — all bare JSON (request() wraps). The income-statement +
-  // balance-sheet routes FX-convert totals server-side and echo back the
-  // resolved `displayCurrency`; trends + yoy do NOT convert (they SUM raw
-  // amounts), matching the web /reports behavior. Detail screens read the
-  // display currency off the income-statement/balance-sheet response and pass
-  // it down as a route param (trends/sankey/yoy have no currency field).
+  // Reports — all bare JSON (request() wraps). Every report route converts to
+  // the display currency server-side and echoes the resolved `displayCurrency`;
+  // screens prefer that field and fall back to the hub's route param only for
+  // an older server that omits it. The balance-sheet route ignores endDate and
+  // always returns today's balances.
   getIncomeStatement: (p: ReportRangeParams) =>
     api.get<IncomeStatement>(
       `/api/reports?type=income-statement&${reportRangeQuery(p)}`

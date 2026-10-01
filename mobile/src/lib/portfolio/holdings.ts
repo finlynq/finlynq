@@ -6,6 +6,8 @@ import type {
   AccountBalance,
   PortfolioHoldingRow,
   EnrichedHolding,
+  PortfolioOverview,
+  PortfolioHoldingSummary,
 } from "../../../../shared/types";
 
 const METALS = new Set(["XAU", "XAG", "XPT", "XPD"]);
@@ -36,19 +38,45 @@ export function holdingDescription(input: {
 
 /**
  * Canonical key for an enriched per-account holding — mirrors the web
- * /api/portfolio/overview `canonicalKey()` so the overview list can pool the
- * per-account rows into the same `byHolding` rows the server returns, and the
- * holding-detail screen can recover a byHolding row's member accounts.
+ * /api/portfolio/overview `canonicalKey()` (which delegates to
+ * pf-app src/lib/securities/canonical.ts `clusterFromAssetType`) so the
+ * overview list can pool the per-account rows into the same `byHolding` rows
+ * the server returns, and the holding-detail screen can recover a byHolding
+ * row's member accounts.
+ *
+ * The server's display `assetType` has a 5th value, "metal" (XAU/XAG/XPT/XPD);
+ * it feeds that to the cluster rule as "cash", which re-derives `metal:<SYM>`
+ * from the symbol. Without this branch a metal fell through to `custom:` and
+ * its detail screen found no member accounts.
  */
 export function canonicalKeyOf(h: EnrichedHolding): string {
   const sym = (h.symbol ?? "").toUpperCase();
   if (h.assetType === "crypto" && sym) return `crypto:${sym}`;
   if ((h.assetType === "stock" || h.assetType === "etf") && sym) return `eq:${sym}`;
-  if (h.assetType === "cash") {
+  if (h.assetType === "cash" || h.assetType === "metal") {
     if (sym) return METALS.has(sym) ? `metal:${sym}` : `cash:${sym}`;
     return `cash:${(h.currency ?? "").toUpperCase()}`;
   }
-  return `custom:${(h.name ?? "?").trim().toLowerCase()}`;
+  // Server uses `(name || "?")`, so an empty-string name keys as "?" too.
+  return `custom:${(h.name || "?").trim().toLowerCase()}`;
+}
+
+/**
+ * Resolve one consolidated holding (and its per-account member positions)
+ * out of an overview payload by its canonical `key`. Shared by the overview
+ * list (to open the detail screen) and the detail screen (to re-read itself
+ * after a Buy/Sell). The first byHolding row with the key wins — during a
+ * partial securities backfill two rows can share a legacy key; members are
+ * every position whose canonical key matches. Null when the key is gone.
+ */
+export function findHoldingInOverview(
+  overview: Pick<PortfolioOverview, "byHolding" | "holdings">,
+  key: string
+): { summary: PortfolioHoldingSummary; members: EnrichedHolding[] } | null {
+  const summary = (overview.byHolding ?? []).find((s) => s.key === key);
+  if (!summary) return null;
+  const members = (overview.holdings ?? []).filter((h) => canonicalKeyOf(h) === key);
+  return { summary, members };
 }
 
 /** Investment accounts (the only ones that can hold portfolio operations). */

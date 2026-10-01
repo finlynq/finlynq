@@ -1,4 +1,4 @@
-import React, { useEffect, useState, useCallback } from "react";
+import React, { useEffect, useState, useCallback, useRef } from "react";
 import {
   View,
   Text,
@@ -11,16 +11,25 @@ import {
   Alert,
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
+import { useIsFocused, useNavigation } from "@react-navigation/native";
+import type { NativeStackNavigationProp } from "@react-navigation/native-stack";
 import { useTheme } from "../theme";
 import { endpoints } from "../api/client";
-import { api } from "../api/client";
 import { logger } from "../lib/logger";
 import { formatCurrency as formatCurrencyBase } from "../lib/format";
+import { DISPLAY_CURRENCY_FALLBACK } from "../lib/constants";
 import type { BudgetWithSpending, Category } from "../../../shared/types";
+import type { MoreStackParamList } from "../navigation/MoreStack";
 
-function getMonth(offset: number): string {
-  const d = new Date();
-  d.setMonth(d.getMonth() + offset);
+type Nav = NativeStackNavigationProp<MoreStackParamList, "Budgets">;
+
+/**
+ * "YYYY-MM" for the month `offset` months from `now`. Built from day 1 of the
+ * month: `setMonth` on today's date overflows near month-end (Jan 31 + 1 month
+ * = Mar 3), which made Next/Prev skip a month.
+ */
+export function monthFromOffset(offset: number, now: Date = new Date()): string {
+  const d = new Date(now.getFullYear(), now.getMonth() + offset, 1);
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
 }
 
@@ -30,16 +39,22 @@ function formatMonthLabel(monthStr: string): string {
   return d.toLocaleDateString("en-CA", { month: "long", year: "numeric" });
 }
 
-function formatCurrency(amount: number, currency = "USD"): string {
+function formatCurrency(amount: number, currency: string): string {
   return formatCurrencyBase(amount, currency, { decimals: 0 });
 }
 
 export default function BudgetsScreen() {
   const theme = useTheme();
   const colors = theme.colors;
+  const navigation = useNavigation<Nav>();
+  const isFocused = useIsFocused();
 
   const [budgets, setBudgets] = useState<BudgetWithSpending[]>([]);
+  // The month `budgets` belongs to. Rows are only rendered under a matching
+  // month label, so a slow or failed fetch never shows another month's rows.
+  const [loadedMonth, setLoadedMonth] = useState<string | null>(null);
   const [categories, setCategories] = useState<Category[]>([]);
+  const [fetchedDisplayCurrency, setFetchedDisplayCurrency] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -49,31 +64,47 @@ export default function BudgetsScreen() {
   const [showAddForm, setShowAddForm] = useState(false);
   const [newCategoryId, setNewCategoryId] = useState<number | null>(null);
   const [newAmount, setNewAmount] = useState("");
+  const [saving, setSaving] = useState(false);
 
-  const month = getMonth(monthOffset);
+  const month = monthFromOffset(monthOffset);
+  const monthRef = useRef(month);
+  monthRef.current = month;
+  const loadedMonthRef = useRef<string | null>(null);
 
   const fetchBudgets = useCallback(
     async (isRefresh = false) => {
+      const target = month;
       if (isRefresh) setRefreshing(true);
-      else setLoading(true);
       try {
-        const [budgetRes, catRes] = await Promise.all([
-          endpoints.getBudgets(month),
-          endpoints.getCategories(),
+        // Categories feed the add-budget picker and the display currency is
+        // what a new budget is created in; neither failing should blank the
+        // budget list, so they degrade to null.
+        const [budgetRes, catRes, dcRes] = await Promise.all([
+          endpoints.getBudgets(target),
+          endpoints.getCategories().catch(() => null),
+          endpoints.getDisplayCurrency().catch(() => null),
         ]);
+        if (catRes?.success) setCategories(catRes.data ?? []);
+        else if (catRes) logger.warn("budgets", "categories fetch failed", { error: catRes.error });
+        if (dcRes?.success && dcRes.data?.displayCurrency) {
+          setFetchedDisplayCurrency(dcRes.data.displayCurrency);
+        }
+        // The user moved to another month while this was in flight; the
+        // newer fetch owns the screen.
+        if (monthRef.current !== target) return;
         if (budgetRes.success) {
-          setBudgets(budgetRes.data);
+          setBudgets(Array.isArray(budgetRes.data) ? budgetRes.data : []);
+          loadedMonthRef.current = target;
+          setLoadedMonth(target);
           setError(null);
         } else {
           logger.warn("budgets", "budgets fetch failed", { error: budgetRes.error });
-          setError(budgetRes.error);
+          failMonth(target, budgetRes.error);
         }
-        if (catRes.success) setCategories(catRes.data);
-        else logger.warn("budgets", "categories fetch failed", { error: catRes.error });
       } catch (e) {
         const detail = e instanceof Error ? `${e.name}: ${e.message}` : String(e);
         logger.error("budgets", "fetch threw", { detail });
-        setError("Cannot connect to server");
+        if (monthRef.current === target) failMonth(target, "Cannot connect to server");
       } finally {
         setLoading(false);
         setRefreshing(false);
@@ -82,53 +113,96 @@ export default function BudgetsScreen() {
     [month]
   );
 
+  // A failed fetch for a different month must not leave the previous month's
+  // rows on screen under the new label. A failed refresh of the SAME month
+  // keeps what is already shown and just surfaces the error.
+  function failMonth(target: string, message: string) {
+    if (loadedMonthRef.current !== target) {
+      setBudgets([]);
+      loadedMonthRef.current = target;
+      setLoadedMonth(target);
+    }
+    setError(message);
+  }
+
+  // Refetch on focus (e.g. back from a category drill-down or after editing
+  // a category) and whenever the month changes.
   useEffect(() => {
-    fetchBudgets();
-  }, [fetchBudgets]);
+    if (isFocused) fetchBudgets();
+  }, [isFocused, fetchBudgets]);
 
-  // `/api/budgets` returns `categoryNameCt` (ciphertext) un-decrypted — it never
-  // calls decryptName, unlike /api/accounts and /api/transactions. So `b.categoryName`
-  // is undefined on the wire. Resolve the display name from the separately-fetched
-  // (already-decrypted) categories list by id instead.
-  const categoryLabel = (catId: number) =>
-    categories.find((c) => c.id === catId)?.name || `Category #${catId}`;
+  const monthLoading = loadedMonth !== month;
+  const rows = monthLoading ? [] : budgets;
 
-  const totalBudgeted = budgets.reduce((s, b) => s + (b.convertedAmount ?? b.amount), 0);
-  const totalSpent = budgets.reduce((s, b) => s + (b.convertedSpent ?? 0), 0);
+  // The server converts every amount into the display currency and says which
+  // one on each row; the settings fetch covers a month with no rows yet.
+  const displayCurrency =
+    rows.find((b) => b.displayCurrency)?.displayCurrency ??
+    fetchedDisplayCurrency ??
+    DISPLAY_CURRENCY_FALLBACK;
+
+  // `categoryName` is decrypted server-side. The categories-list lookup only
+  // covers a server too old to send it.
+  const categoryLabel = (b: BudgetWithSpending) =>
+    b.categoryName ||
+    categories.find((c) => c.id === b.categoryId)?.name ||
+    `Category #${b.categoryId}`;
+
+  const totalBudgeted = rows.reduce((s, b) => s + (b.convertedAmount ?? b.amount), 0);
+  const totalSpent = rows.reduce((s, b) => s + (b.convertedSpent ?? 0), 0);
   const overallPct = totalBudgeted > 0 ? Math.min((totalSpent / totalBudgeted) * 100, 100) : 0;
+  const totalOver = totalSpent > totalBudgeted;
 
+  const goToMonth = (delta: number) => {
+    setEditingId(null);
+    setMonthOffset((p) => p + delta);
+  };
+
+  // Editing works in the DISPLAY currency (the field is prefilled with the
+  // converted amount), so the save re-denominates the budget into it. Sending
+  // the amount without `currency` would store a display-currency number
+  // against the row's old currency.
   const handleSaveEdit = async (budget: BudgetWithSpending) => {
+    if (saving) return;
     const parsedAmount = parseFloat(editAmount);
     if (isNaN(parsedAmount) || parsedAmount <= 0) {
       Alert.alert("Error", "Enter a valid amount");
       return;
     }
+    setSaving(true);
     try {
-      const res = await api.post("/api/budgets", {
+      const res = await endpoints.saveBudget({
         categoryId: budget.categoryId,
         month: budget.month,
         amount: parsedAmount,
+        currency: displayCurrency,
       });
       if (res.success) {
         setEditingId(null);
         fetchBudgets(true);
       } else {
-        Alert.alert("Error", "error" in res ? res.error : "Failed to update");
+        Alert.alert("Error", res.error || "Failed to update");
       }
     } catch {
       Alert.alert("Error", "Cannot connect to server");
+    } finally {
+      setSaving(false);
     }
   };
 
   const handleDelete = (budget: BudgetWithSpending) => {
-    Alert.alert("Delete Budget", `Remove budget for ${categoryLabel(budget.categoryId)}?`, [
+    Alert.alert("Delete Budget", `Remove budget for ${categoryLabel(budget)}?`, [
       { text: "Cancel", style: "cancel" },
       {
         text: "Delete",
         style: "destructive",
         onPress: async () => {
           try {
-            await api.delete(`/api/budgets?id=${budget.id}`);
+            const res = await endpoints.deleteBudget(budget.id);
+            if (!res.success) {
+              Alert.alert("Couldn't delete", res.error || "Please try again.");
+              return;
+            }
             fetchBudgets(true);
           } catch {
             Alert.alert("Error", "Cannot connect to server");
@@ -139,6 +213,7 @@ export default function BudgetsScreen() {
   };
 
   const handleAddBudget = async () => {
+    if (saving) return;
     if (!newCategoryId) {
       Alert.alert("Error", "Select a category");
       return;
@@ -148,11 +223,13 @@ export default function BudgetsScreen() {
       Alert.alert("Error", "Enter a valid amount");
       return;
     }
+    setSaving(true);
     try {
-      const res = await api.post("/api/budgets", {
+      const res = await endpoints.saveBudget({
         categoryId: newCategoryId,
         month,
         amount: parsedAmount,
+        currency: displayCurrency,
       });
       if (res.success) {
         setShowAddForm(false);
@@ -160,15 +237,17 @@ export default function BudgetsScreen() {
         setNewCategoryId(null);
         fetchBudgets(true);
       } else {
-        Alert.alert("Error", "error" in res ? res.error : "Failed to create budget");
+        Alert.alert("Error", res.error || "Failed to create budget");
       }
     } catch {
       Alert.alert("Error", "Cannot connect to server");
+    } finally {
+      setSaving(false);
     }
   };
 
   // Categories not yet budgeted this month
-  const budgetedCatIds = new Set(budgets.map((b) => b.categoryId));
+  const budgetedCatIds = new Set(rows.map((b) => b.categoryId));
   const unbudgetedCats = categories.filter(
     (c) => c.type === "E" && !budgetedCatIds.has(c.id)
   );
@@ -204,23 +283,29 @@ export default function BudgetsScreen() {
 
         {/* Month Navigator */}
         <View style={styles.monthNav}>
-          <TouchableOpacity onPress={() => setMonthOffset((p) => p - 1)}>
+          <TouchableOpacity onPress={() => goToMonth(-1)}>
             <Text style={[styles.navBtn, { color: colors.primary }]}>← Prev</Text>
           </TouchableOpacity>
           <Text style={[styles.monthLabel, { color: colors.foreground }]}>
             {formatMonthLabel(month)}
           </Text>
-          <TouchableOpacity onPress={() => setMonthOffset((p) => p + 1)}>
+          <TouchableOpacity onPress={() => goToMonth(1)}>
             <Text style={[styles.navBtn, { color: colors.primary }]}>Next →</Text>
           </TouchableOpacity>
         </View>
 
-        {error && (
+        {monthLoading && (
+          <View style={styles.monthLoading}>
+            <ActivityIndicator size="small" color={colors.primary} />
+          </View>
+        )}
+
+        {!monthLoading && error && (
           <Text style={[styles.errorText, { color: colors.destructive }]}>{error}</Text>
         )}
 
         {/* Overall Summary */}
-        {budgets.length > 0 && (
+        {rows.length > 0 && (
           <View
             style={[styles.card, { backgroundColor: colors.card, borderColor: colors.border }]}
           >
@@ -228,7 +313,7 @@ export default function BudgetsScreen() {
               <View>
                 <Text style={[styles.summaryLabel, { color: colors.mutedForeground }]}>Spent</Text>
                 <Text style={[styles.summaryValue, { color: colors.foreground }]}>
-                  {formatCurrency(totalSpent)}
+                  {formatCurrency(totalSpent, displayCurrency)}
                 </Text>
               </View>
               <View style={{ alignItems: "flex-end" }}>
@@ -236,7 +321,7 @@ export default function BudgetsScreen() {
                   Budgeted
                 </Text>
                 <Text style={[styles.summaryValue, { color: colors.primary }]}>
-                  {formatCurrency(totalBudgeted)}
+                  {formatCurrency(totalBudgeted, displayCurrency)}
                 </Text>
               </View>
             </View>
@@ -245,14 +330,21 @@ export default function BudgetsScreen() {
                 style={[
                   styles.overallFill,
                   {
-                    backgroundColor: totalSpent > totalBudgeted ? colors.destructive : colors.primary,
+                    backgroundColor: totalOver ? colors.destructive : colors.primary,
                     width: `${overallPct}%`,
                   },
                 ]}
               />
             </View>
-            <Text style={[styles.remainText, { color: colors.mutedForeground }]}>
-              {formatCurrency(totalBudgeted - totalSpent)} remaining
+            <Text
+              style={[
+                styles.remainText,
+                { color: totalOver ? colors.destructive : colors.mutedForeground },
+              ]}
+            >
+              {totalOver
+                ? `${formatCurrency(totalSpent - totalBudgeted, displayCurrency)} over`
+                : `${formatCurrency(totalBudgeted - totalSpent, displayCurrency)} remaining`}
             </Text>
           </View>
         )}
@@ -301,7 +393,7 @@ export default function BudgetsScreen() {
               )}
             </ScrollView>
             <Text style={[styles.fieldLabel, { color: colors.mutedForeground, marginTop: 12 }]}>
-              AMOUNT
+              AMOUNT ({displayCurrency})
             </Text>
             <TextInput
               style={[
@@ -319,8 +411,9 @@ export default function BudgetsScreen() {
               placeholderTextColor={colors.mutedForeground}
             />
             <TouchableOpacity
-              style={[styles.saveBtn, { backgroundColor: colors.primary }]}
+              style={[styles.saveBtn, { backgroundColor: colors.primary, opacity: saving ? 0.6 : 1 }]}
               onPress={handleAddBudget}
+              disabled={saving}
             >
               <Text style={[styles.saveBtnText, { color: colors.primaryForeground }]}>
                 Add Budget
@@ -330,7 +423,7 @@ export default function BudgetsScreen() {
         )}
 
         {/* Budget List */}
-        {budgets.length === 0 && !error && (
+        {!monthLoading && rows.length === 0 && !error && (
           <View style={styles.emptyContainer}>
             <Text style={[styles.emptyText, { color: colors.mutedForeground }]}>
               No budgets set for {formatMonthLabel(month)}
@@ -338,24 +431,34 @@ export default function BudgetsScreen() {
           </View>
         )}
 
-        {budgets.map((b) => {
+        {rows.map((b) => {
           const budgetAmt = b.convertedAmount ?? b.amount;
           const spent = b.convertedSpent ?? 0;
           const pct = budgetAmt > 0 ? Math.min((spent / budgetAmt) * 100, 100) : 0;
           const isOver = spent > budgetAmt;
           const isEditing = editingId === b.id;
+          const name = categoryLabel(b);
+          const storedInOtherCurrency = !!b.currency && b.currency !== displayCurrency;
 
           return (
             <TouchableOpacity
               key={b.id}
               activeOpacity={0.7}
+              accessibilityRole="button"
+              accessibilityLabel={`${name} budget`}
+              onPress={
+                isEditing
+                  ? undefined
+                  : () =>
+                      navigation.navigate("CategoryDetail", { categoryId: b.categoryId, name })
+              }
               onLongPress={() => {
-                Alert.alert(categoryLabel(b.categoryId), undefined, [
+                Alert.alert(name, undefined, [
                   {
                     text: "Edit Amount",
                     onPress: () => {
                       setEditingId(b.id);
-                      setEditAmount(String(budgetAmt));
+                      setEditAmount(String(Math.round(budgetAmt * 100) / 100));
                     },
                   },
                   { text: "Delete", style: "destructive", onPress: () => handleDelete(b) },
@@ -371,7 +474,7 @@ export default function BudgetsScreen() {
               >
                 <View style={styles.budgetHeader}>
                   <Text style={[styles.catName, { color: colors.foreground }]} numberOfLines={1}>
-                    {categoryLabel(b.categoryId)}
+                    {name}
                   </Text>
                   {b.categoryGroup && (
                     <Text style={[styles.catGroup, { color: colors.mutedForeground }]}>
@@ -381,42 +484,58 @@ export default function BudgetsScreen() {
                 </View>
 
                 {isEditing ? (
-                  <View style={styles.editRow}>
-                    <TextInput
-                      style={[
-                        styles.editInput,
-                        {
-                          color: colors.foreground,
-                          backgroundColor: colors.secondary,
-                          borderColor: colors.border,
-                        },
-                      ]}
-                      value={editAmount}
-                      onChangeText={setEditAmount}
-                      keyboardType="decimal-pad"
-                      autoFocus
-                    />
-                    <TouchableOpacity
-                      style={[styles.editSaveBtn, { backgroundColor: colors.primary }]}
-                      onPress={() => handleSaveEdit(b)}
-                    >
-                      <Text style={{ color: colors.primaryForeground, fontWeight: "600" }}>
-                        Save
+                  <>
+                    <View style={styles.editRow}>
+                      <Text style={[styles.editCurrency, { color: colors.mutedForeground }]}>
+                        {displayCurrency}
                       </Text>
-                    </TouchableOpacity>
-                    <TouchableOpacity onPress={() => setEditingId(null)}>
-                      <Text style={{ color: colors.mutedForeground, fontSize: 14 }}>Cancel</Text>
-                    </TouchableOpacity>
-                  </View>
+                      <TextInput
+                        style={[
+                          styles.editInput,
+                          {
+                            color: colors.foreground,
+                            backgroundColor: colors.secondary,
+                            borderColor: colors.border,
+                          },
+                        ]}
+                        value={editAmount}
+                        onChangeText={setEditAmount}
+                        keyboardType="decimal-pad"
+                        autoFocus
+                      />
+                      <TouchableOpacity
+                        style={[
+                          styles.editSaveBtn,
+                          { backgroundColor: colors.primary, opacity: saving ? 0.6 : 1 },
+                        ]}
+                        onPress={() => handleSaveEdit(b)}
+                        disabled={saving}
+                      >
+                        <Text style={{ color: colors.primaryForeground, fontWeight: "600" }}>
+                          Save
+                        </Text>
+                      </TouchableOpacity>
+                      <TouchableOpacity onPress={() => setEditingId(null)} disabled={saving}>
+                        <Text style={{ color: colors.mutedForeground, fontSize: 14 }}>Cancel</Text>
+                      </TouchableOpacity>
+                    </View>
+                    {storedInOtherCurrency && (
+                      <Text style={[styles.editNote, { color: colors.mutedForeground }]}>
+                        This budget is set in {b.currency} (
+                        {formatCurrencyBase(b.amount, b.currency, { decimals: 2 })}). Saving
+                        stores it in {displayCurrency}.
+                      </Text>
+                    )}
+                  </>
                 ) : (
                   <>
                     <View style={styles.amountsRow}>
                       <Text style={[styles.spentText, { color: colors.foreground }]}>
-                        {formatCurrency(spent)}
+                        {formatCurrency(spent, displayCurrency)}
                       </Text>
                       <Text style={[styles.ofText, { color: colors.mutedForeground }]}>
                         {" "}
-                        of {formatCurrency(budgetAmt)}
+                        of {formatCurrency(budgetAmt, displayCurrency)}
                       </Text>
                     </View>
                     <View style={[styles.progressBar, { backgroundColor: colors.secondary }]}>
@@ -437,8 +556,8 @@ export default function BudgetsScreen() {
                       ]}
                     >
                       {isOver
-                        ? `${formatCurrency(spent - budgetAmt)} over budget`
-                        : `${formatCurrency(budgetAmt - spent)} remaining`}
+                        ? `${formatCurrency(spent - budgetAmt, displayCurrency)} over budget`
+                        : `${formatCurrency(budgetAmt - spent, displayCurrency)} remaining`}
                     </Text>
                   </>
                 )}
@@ -447,9 +566,9 @@ export default function BudgetsScreen() {
           );
         })}
 
-        {budgets.length > 0 && (
+        {rows.length > 0 && (
           <Text style={[styles.hintText, { color: colors.mutedForeground }]}>
-            Long press a budget to edit or delete
+            Tap a budget to see its spending · long press to edit or delete
           </Text>
         )}
       </ScrollView>
@@ -479,6 +598,7 @@ const styles = StyleSheet.create({
   },
   navBtn: { fontSize: 14, fontWeight: "600" },
   monthLabel: { fontSize: 17, fontWeight: "700" },
+  monthLoading: { paddingVertical: 24, alignItems: "center" },
   errorText: { fontSize: 14, marginBottom: 12 },
   card: {
     borderRadius: 12,
@@ -520,6 +640,7 @@ const styles = StyleSheet.create({
   progressFill: { height: 6, borderRadius: 3 },
   remaining: { fontSize: 12 },
   editRow: { flexDirection: "row", alignItems: "center", gap: 8 },
+  editCurrency: { fontSize: 13, fontWeight: "600" },
   editInput: {
     flex: 1,
     fontSize: 16,
@@ -530,6 +651,7 @@ const styles = StyleSheet.create({
     paddingVertical: 8,
   },
   editSaveBtn: { paddingHorizontal: 14, paddingVertical: 8, borderRadius: 8 },
+  editNote: { fontSize: 12, marginTop: 6 },
   fieldLabel: { fontSize: 12, fontWeight: "600", marginBottom: 6 },
   chipRow: { flexDirection: "row" },
   chip: {

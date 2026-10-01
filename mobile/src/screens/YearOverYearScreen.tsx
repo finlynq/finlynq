@@ -1,20 +1,33 @@
 // Year over year — compare two calendar years. Reads GET /api/reports/yoy
 // (year1/year2 → category expense comparison + per-month income/expense totals
 // for both years). This is the same dedicated endpoint the web /reports YoY tab
-// uses (NOT two shifted trends calls). Amounts are NOT FX-converted server-side
-// (matches web). For expenses, a year-over-year INCREASE is colored coral and a
-// decrease teal (lower spending is the good direction).
-import React, { useEffect, useMemo, useState } from "react";
-import { View, Text, ScrollView, StyleSheet, ActivityIndicator, TouchableOpacity } from "react-native";
+// uses (NOT two shifted trends calls). Amounts are FX-converted to the display
+// currency server-side (echoed as `displayCurrency`). For expenses, a
+// year-over-year INCREASE is colored coral and a decrease teal (lower spending
+// is the good direction).
+//
+// Partial year: when either side is the current year, the totals compare
+// Jan → current month on BOTH sides (like for like), the current year's future
+// months show "—", and its header reads "YYYY YTD". The category comparison is
+// full calendar years server-side, so it gets a caveat line instead.
+import React, { useCallback, useMemo, useState } from "react";
+import {
+  View,
+  Text,
+  ScrollView,
+  StyleSheet,
+  ActivityIndicator,
+  TouchableOpacity,
+  RefreshControl,
+} from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import type { NativeStackScreenProps } from "@react-navigation/native-stack";
 import { useTheme } from "../theme";
 import { endpoints } from "../api/client";
-import { logger } from "../lib/logger";
 import { formatCurrency, safeName } from "../lib/format";
+import { useReportData } from "../lib/reports/use-report-data";
 import { Icon } from "../components/icon";
 import type { MoreStackParamList } from "../navigation/MoreStack";
-import type { YoYReport } from "../../../shared/types";
 
 type Props = NativeStackScreenProps<MoreStackParamList, "YearOverYear">;
 
@@ -30,46 +43,34 @@ export default function YearOverYearScreen({ navigation, route }: Props) {
 
   const [year1, setYear1] = useState(years[1]); // prior year
   const [year2, setYear2] = useState(years[0]); // current year
-  const [data, setData] = useState<YoYReport | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
 
-  useEffect(() => {
-    let cancelled = false;
-    setLoading(true);
-    endpoints
-      .getYoY({ year1, year2 })
-      .then((res) => {
-        if (cancelled) return;
-        if (res.success) {
-          setData(res.data);
-          setError(null);
-        } else {
-          logger.warn("yoy", "fetch failed", { error: res.error });
-          setError(res.error);
-        }
-      })
-      .catch((e) => {
-        if (cancelled) return;
-        logger.error("yoy", "fetch threw", { detail: String(e) });
-        setError("Cannot connect to server");
-      })
-      .finally(() => !cancelled && setLoading(false));
-    return () => {
-      cancelled = true;
-    };
-  }, [year1, year2]);
+  const fetcher = useCallback(() => endpoints.getYoY({ year1, year2 }), [year1, year2]);
+  const { data, loading, refreshing, error, refresh } = useReportData(fetcher, "yoy");
+  const ccy = data?.displayCurrency ?? displayCurrency;
 
-  // Year totals from the monthly rows.
+  const now = new Date();
+  const currentYear = now.getFullYear();
+  const currentMonthIdx = now.getMonth(); // 0-based
+  const hasCurrentYear = !!data && (data.year1 === currentYear || data.year2 === currentYear);
+  // Months (0-based) included in the totals: all 12, or Jan → this month.
+  const lastMonthIdx = hasCurrentYear ? currentMonthIdx : 11;
+  const isFutureMonth = (year: number, idx: number) => year === currentYear && idx > currentMonthIdx;
+  const yearLabel = (y: number) => (y === currentYear ? `${y} YTD` : String(y));
+  const throughMonth = data?.monthly[currentMonthIdx]?.month ?? "";
+  // Category totals are full calendar years server-side — only a real mismatch
+  // (one side partial, the other a finished year) needs the caveat.
+  const categoryCaveat = !!data && hasCurrentYear && data.year1 !== data.year2;
+
+  // Year totals from the monthly rows, limited to the like-for-like window.
   const totals = useMemo(() => {
-    const m = data?.monthly ?? [];
+    const m = (data?.monthly ?? []).filter((_, i) => i <= lastMonthIdx);
     return {
       income1: m.reduce((s, r) => s + r.year1Income, 0),
       expenses1: m.reduce((s, r) => s + r.year1Expenses, 0),
       income2: m.reduce((s, r) => s + r.year2Income, 0),
       expenses2: m.reduce((s, r) => s + r.year2Expenses, 0),
     };
-  }, [data]);
+  }, [data, lastMonthIdx]);
 
   const categories = useMemo(
     () => (data?.categories ?? []).filter((c) => c.year1Amount > 0 || c.year2Amount > 0),
@@ -87,7 +88,10 @@ export default function YearOverYearScreen({ navigation, route }: Props) {
         <View style={{ width: 70 }} />
       </View>
 
-      <ScrollView contentContainerStyle={styles.scroll}>
+      <ScrollView
+        contentContainerStyle={styles.scroll}
+        refreshControl={<RefreshControl refreshing={refreshing} onRefresh={refresh} tintColor={colors.primary} />}
+      >
         <Text style={[styles.fieldLabel, { color: colors.mutedForeground }]}>BASE YEAR</Text>
         <View style={styles.chipRow}>
           {years.map((y) => (
@@ -111,23 +115,34 @@ export default function YearOverYearScreen({ navigation, route }: Props) {
             <View style={[styles.card, { backgroundColor: colors.card, borderColor: colors.border }]}>
               <View style={styles.totalsHead}>
                 <Text style={[styles.totalsHeadLabel, { color: colors.mutedForeground }]} />
-                <Text style={[styles.totalsHeadYear, { color: colors.mutedForeground }]}>{data.year1}</Text>
-                <Text style={[styles.totalsHeadYear, { color: colors.foreground }]}>{data.year2}</Text>
+                <Text style={[styles.totalsHeadYear, { color: colors.mutedForeground }]}>{yearLabel(data.year1)}</Text>
+                <Text style={[styles.totalsHeadYear, { color: colors.foreground }]}>{yearLabel(data.year2)}</Text>
               </View>
-              <TotalsRow label="Income" v1={totals.income1} v2={totals.income2} ccy={displayCurrency} />
-              <TotalsRow label="Expenses" v1={totals.expenses1} v2={totals.expenses2} ccy={displayCurrency} border />
+              <TotalsRow label="Income" v1={totals.income1} v2={totals.income2} ccy={ccy} />
+              <TotalsRow label="Expenses" v1={totals.expenses1} v2={totals.expenses2} ccy={ccy} border />
               <TotalsRow
                 label="Net"
                 v1={totals.income1 - totals.expenses1}
                 v2={totals.income2 - totals.expenses2}
-                ccy={displayCurrency}
+                ccy={ccy}
                 border
                 bold
               />
             </View>
+            {hasCurrentYear && data.year1 !== data.year2 && (
+              <Text style={[styles.caption, { color: colors.mutedForeground }]}>
+                Totals cover Jan–{throughMonth} of both years, so {currentYear} YTD compares like for like.
+              </Text>
+            )}
 
             {/* Expense category comparison */}
             <Text style={[styles.sectionTitle, { color: colors.foreground }]}>Expense categories</Text>
+            {categoryCaveat && categories.length > 0 && (
+              <Text style={[styles.caption, { color: colors.mutedForeground }]}>
+                Category amounts are full calendar years: {currentYear} only runs through {throughMonth}, so these %
+                changes compare a partial year with a full one.
+              </Text>
+            )}
             {categories.length === 0 ? (
               <Text style={[styles.empty, { color: colors.mutedForeground }]}>
                 No expense categories in these years.
@@ -152,11 +167,11 @@ export default function YearOverYearScreen({ navigation, route }: Props) {
                       </Text>
                       <View style={styles.catAmounts}>
                         <Text style={[styles.catVal, { color: colors.mutedForeground }]}>
-                          {formatCurrency(c.year1Amount, displayCurrency, { decimals: 0 })}
+                          {formatCurrency(c.year1Amount, ccy, { decimals: 0 })}
                         </Text>
                         <Icon name="chevronRight" size={12} color={colors.mutedForeground} />
                         <Text style={[styles.catVal, { color: colors.foreground }]}>
-                          {formatCurrency(c.year2Amount, displayCurrency, { decimals: 0 })}
+                          {formatCurrency(c.year2Amount, ccy, { decimals: 0 })}
                         </Text>
                       </View>
                       <Text style={[styles.catChange, { color: changeColor }]}>
@@ -175,23 +190,33 @@ export default function YearOverYearScreen({ navigation, route }: Props) {
             <View style={[styles.card, { backgroundColor: colors.card, borderColor: colors.border }]}>
               <View style={styles.totalsHead}>
                 <Text style={[styles.monthHeadLabel, { color: colors.mutedForeground }]}>Month</Text>
-                <Text style={[styles.totalsHeadYear, { color: colors.mutedForeground }]}>{data.year1}</Text>
-                <Text style={[styles.totalsHeadYear, { color: colors.foreground }]}>{data.year2}</Text>
+                <Text style={[styles.totalsHeadYear, { color: colors.mutedForeground }]}>{yearLabel(data.year1)}</Text>
+                <Text style={[styles.totalsHeadYear, { color: colors.foreground }]}>{yearLabel(data.year2)}</Text>
               </View>
-              {data.monthly.map((m, i) => (
-                <View
-                  key={m.month}
-                  style={[styles.monthRow, i === 0 && { borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: colors.border }]}
-                >
-                  <Text style={[styles.monthLabel, { color: colors.foreground }]}>{m.month}</Text>
-                  <Text style={[styles.monthVal, { color: colors.mutedForeground }]}>
-                    {formatCurrency(m.year1Expenses, displayCurrency, { decimals: 0 })}
-                  </Text>
-                  <Text style={[styles.monthVal, { color: colors.foreground }]}>
-                    {formatCurrency(m.year2Expenses, displayCurrency, { decimals: 0 })}
-                  </Text>
-                </View>
-              ))}
+              {data.monthly.map((m, i) => {
+                // Outside the like-for-like window → dimmed (not in the totals).
+                const outside = i > lastMonthIdx;
+                const cell = (year: number, v: number) =>
+                  isFutureMonth(year, i) ? "—" : formatCurrency(v, ccy, { decimals: 0 });
+                return (
+                  <View
+                    key={m.month}
+                    style={[
+                      styles.monthRow,
+                      i === 0 && { borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: colors.border },
+                      outside && { opacity: 0.5 },
+                    ]}
+                  >
+                    <Text style={[styles.monthLabel, { color: colors.foreground }]}>{m.month}</Text>
+                    <Text style={[styles.monthVal, { color: colors.mutedForeground }]}>
+                      {cell(data.year1, m.year1Expenses)}
+                    </Text>
+                    <Text style={[styles.monthVal, { color: colors.foreground }]}>
+                      {cell(data.year2, m.year2Expenses)}
+                    </Text>
+                  </View>
+                );
+              })}
             </View>
           </>
         ) : null}
@@ -279,6 +304,7 @@ const styles = StyleSheet.create({
   totalsLabel: { flex: 1, fontSize: 14 },
   totalsVal: { width: 90, textAlign: "right", fontSize: 14, fontVariant: ["tabular-nums"] },
   sectionTitle: { fontSize: 16, fontWeight: "700", marginTop: 20 },
+  caption: { fontSize: 12, lineHeight: 17, marginTop: 8 },
   catRow: { flexDirection: "row", alignItems: "center", paddingHorizontal: 14, paddingVertical: 11 },
   catName: { flex: 1, fontSize: 14, fontWeight: "500", marginRight: 8 },
   catAmounts: { flexDirection: "row", alignItems: "center", gap: 4, marginRight: 10 },

@@ -7,6 +7,7 @@
 import {
   ACCOUNT_GROUPS,
   DEFAULT_CURRENCY,
+  DISPLAY_CURRENCY_FALLBACK,
   GOAL_TYPES,
   GOAL_PRIORITIES,
 } from "./constants";
@@ -64,15 +65,21 @@ export interface GoalFormState {
   note: string;
 }
 
+/**
+ * `defaultCurrency` is the user's display currency: a new goal (and a legacy
+ * goal stored without one) defaults to it, never to a hardcoded CAD. Callers
+ * that haven't resolved it yet get the USD fallback and re-seed once it loads.
+ */
 export function goalFormFromGoal(
   goal: GoalWithProgress | null | undefined,
+  defaultCurrency: string = DISPLAY_CURRENCY_FALLBACK,
 ): GoalFormState {
   if (!goal) {
     return {
       name: "",
       targetAmount: "",
       type: GOAL_TYPES[0].value,
-      currency: DEFAULT_CURRENCY,
+      currency: defaultCurrency,
       deadline: "",
       priority: GOAL_PRIORITIES[0].value,
       linkedAccountIds: [],
@@ -83,7 +90,7 @@ export function goalFormFromGoal(
     name: goal.name ?? "",
     targetAmount: goal.targetAmount != null ? String(goal.targetAmount) : "",
     type: goal.type ?? GOAL_TYPES[0].value,
-    currency: goal.currency ?? DEFAULT_CURRENCY,
+    currency: goal.currency || defaultCurrency,
     deadline: goal.deadline ?? "",
     priority: goal.priority ?? GOAL_PRIORITIES[0].value,
     // Prefer the multi-account list (issue #130); fall back to the legacy

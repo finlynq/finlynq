@@ -14,82 +14,32 @@ import type { NativeStackScreenProps } from "@react-navigation/native-stack";
 import { useTheme } from "../theme";
 import { endpoints } from "../api/client";
 import { logger } from "../lib/logger";
-import { formatCurrency, safeName } from "../lib/format";
+import { formatCurrency } from "../lib/format";
 import {
   parseGroupOrderResponse,
   parseDropdownOrder,
-  orderGroups,
-  sortByUserOrder,
-  OTHER_GROUP,
   EMPTY_DROPDOWN_ORDER,
   type AccountGroupOrder,
   type DropdownOrder,
 } from "../lib/sort-helpers";
+import { accountDisplayName, buildAccountSections, sumNetWorth } from "../lib/account-sections";
+import { DEFAULT_DISPLAY_CURRENCY } from "../lib/dashboard";
 import { Icon } from "../components/icon";
 import type { AccountBalance } from "../../../shared/types";
 import type { AccountsStackParamList } from "../navigation/AccountsStack";
 
 type Props = NativeStackScreenProps<AccountsStackParamList, "AccountsList">;
 
-interface Section {
-  title: string;
-  data: AccountBalance[];
-}
-
-/**
- * Group account balances into SectionList sections, ordered by the user's saved
- * group order. Mirrors web's accounts/page.tsx groups() pattern:
- *   - Section (group) order: orderGroups(savedOrder) with "Other" always last.
- *   - Accounts within each group: sortByUserOrder(saved account dropdown order),
- *     falling back to localeCompare by display name — mirrors web's
- *     useDropdownOrder("account") applied per-group.
- *
- * `groupOrder` comes from GET /api/settings/account-group-order and `dropdownOrder`
- * from GET /api/settings/dropdown-order. A missing/failed fetch degrades to alpha
- * sections with "Other" last / plain name order (the pure fallbacks).
- */
-function groupAccounts(
-  balances: AccountBalance[],
-  groupOrder: AccountGroupOrder,
-  dropdownOrder: DropdownOrder,
-): Section[] {
-  const groups = new Map<string, AccountBalance[]>();
-  for (const b of balances) {
-    const key = b.accountGroup || OTHER_GROUP;
-    const arr = groups.get(key) ?? [];
-    arr.push(b);
-    groups.set(key, arr);
-  }
-
-  // Determine the saved order for each account type (A=Asset, L=Liability).
-  // The API groups all account types into a single list, so we merge the A + L
-  // saved orders (A leads, then L) and let orderGroups do the dedup + "Other"-last.
-  const allGroupNames = Array.from(groups.keys());
-  const savedA = groupOrder.A ?? [];
-  const savedL = groupOrder.L ?? [];
-  const mergedSavedOrder = [...savedA, ...savedL];
-  const orderedTitles = orderGroups(allGroupNames, mergedSavedOrder);
-
-  const nameFallback = (a: AccountBalance, z: AccountBalance) =>
-    safeName(a.accountName).localeCompare(safeName(z.accountName));
-
-  return orderedTitles.map((title) => ({
-    title,
-    data: sortByUserOrder(
-      groups.get(title) ?? [],
-      (a) => a.accountId,
-      dropdownOrder.lists.account,
-      nameFallback,
-    ),
-  }));
-}
-
 export default function AccountsScreen({ navigation }: Props) {
   const { colors } = useTheme();
   const isFocused = useIsFocused();
+  // ALL balance rows, archived included: the net-worth total sums these; the
+  // list itself hides archived rows unless "Show archived" is on.
   const [balances, setBalances] = useState<AccountBalance[]>([]);
+  const [displayCurrency, setDisplayCurrency] = useState<string>(DEFAULT_DISPLAY_CURRENCY);
   const [groupOrder, setGroupOrder] = useState<AccountGroupOrder>({ A: [], L: [] });
   const [dropdownOrder, setDropdownOrder] = useState<DropdownOrder>(EMPTY_DROPDOWN_ORDER);
+  const [showArchived, setShowArchived] = useState(false);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -102,12 +52,13 @@ export default function AccountsScreen({ navigation }: Props) {
       // parallel. Both ordering fetches are non-fatal — a failure degrades to
       // alpha sections with "Other" last / plain name order.
       const [res, orderRes, dropdownRes] = await Promise.all([
-        endpoints.getAccountBalances(),
+        endpoints.getAccountsOverview(),
         endpoints.getAccountGroupOrder(),
         endpoints.getDropdownOrder(),
       ]);
       if (res.success) {
-        setBalances(res.data);
+        setBalances(res.data.balances);
+        setDisplayCurrency(res.data.displayCurrency || DEFAULT_DISPLAY_CURRENCY);
         setError(null);
       } else {
         logger.warn("accounts", "fetch failed", { error: res.error });
@@ -147,9 +98,10 @@ export default function AccountsScreen({ navigation }: Props) {
     if (isFocused) fetchAccounts();
   }, [isFocused, fetchAccounts]);
 
-  const displayCurrency = balances[0]?.displayCurrency ?? "CAD";
-  const netWorth = balances.reduce((s, b) => s + (b.convertedBalance ?? b.balance), 0);
-  const sections = groupAccounts(balances, groupOrder, dropdownOrder);
+  // Archived accounts stay in net worth — archiving is a visibility flag only.
+  const netWorth = sumNetWorth(balances);
+  const archivedCount = balances.filter((b) => b.archived).length;
+  const sections = buildAccountSections(balances, groupOrder, dropdownOrder, showArchived);
 
   if (loading) {
     return (
@@ -174,7 +126,12 @@ export default function AccountsScreen({ navigation }: Props) {
       {/* Net worth hero */}
       <View style={[styles.hero, { backgroundColor: colors.card, borderColor: colors.border }]}>
         <Text style={[styles.heroLabel, { color: colors.mutedForeground }]}>Net Worth</Text>
-        <Text style={[styles.heroValue, { color: colors.foreground }]}>
+        <Text
+          style={[styles.heroValue, { color: colors.foreground }]}
+          numberOfLines={1}
+          adjustsFontSizeToFit
+          minimumFontScale={0.6}
+        >
           {formatCurrency(netWorth, displayCurrency, { decimals: 0 })}
         </Text>
       </View>
@@ -182,6 +139,12 @@ export default function AccountsScreen({ navigation }: Props) {
       {error ? (
         <View style={styles.center}>
           <Text style={{ color: colors.destructive }}>{error}</Text>
+          <TouchableOpacity
+            style={[styles.retryBtn, { borderColor: colors.border }]}
+            onPress={() => fetchAccounts()}
+          >
+            <Text style={[styles.retryText, { color: colors.primary }]}>Retry</Text>
+          </TouchableOpacity>
         </View>
       ) : (
         <SectionList
@@ -193,9 +156,16 @@ export default function AccountsScreen({ navigation }: Props) {
             <RefreshControl refreshing={refreshing} onRefresh={() => fetchAccounts(true)} />
           }
           renderSectionHeader={({ section }) => (
-            <Text style={[styles.sectionHeader, { color: colors.mutedForeground }]}>
-              {section.title}
-            </Text>
+            <View>
+              {section.typeHeader && (
+                <Text style={[styles.typeHeader, { color: colors.foreground }]}>
+                  {section.typeHeader}
+                </Text>
+              )}
+              <Text style={[styles.sectionHeader, { color: colors.mutedForeground }]}>
+                {section.title}
+              </Text>
+            </View>
           )}
           renderItem={({ item }) => {
             // Big number = the account's NATIVE balance (sign drives the color).
@@ -211,7 +181,11 @@ export default function AccountsScreen({ navigation }: Props) {
               <TouchableOpacity
                 activeOpacity={0.7}
                 onPress={() => navigation.navigate("AccountDetail", { account: item })}
-                style={[styles.row, { backgroundColor: colors.card, borderColor: colors.border }]}
+                style={[
+                  styles.row,
+                  { backgroundColor: colors.card, borderColor: colors.border },
+                  item.archived ? styles.rowArchived : null,
+                ]}
               >
                 <View style={styles.rowLeft}>
                   <View style={[styles.iconWrap, { backgroundColor: colors.secondary }]}>
@@ -223,11 +197,11 @@ export default function AccountsScreen({ navigation }: Props) {
                   </View>
                   <View style={styles.rowText}>
                     <Text style={[styles.accountName, { color: colors.foreground }]} numberOfLines={1}>
-                      {safeName(item.accountName)}
+                      {accountDisplayName(item)}
                     </Text>
                     <Text style={[styles.accountMeta, { color: colors.mutedForeground }]}>
                       {item.currency}
-                      {item.accountType === "L" ? " · Liability" : ""}
+                      {item.archived ? " · Archived" : ""}
                     </Text>
                   </View>
                 </View>
@@ -248,7 +222,22 @@ export default function AccountsScreen({ navigation }: Props) {
             );
           }}
           ListEmptyComponent={
-            <Text style={[styles.empty, { color: colors.mutedForeground }]}>No accounts yet</Text>
+            <Text style={[styles.empty, { color: colors.mutedForeground }]}>
+              {archivedCount > 0 ? "No active accounts" : "No accounts yet"}
+            </Text>
+          }
+          ListFooterComponent={
+            archivedCount > 0 ? (
+              <TouchableOpacity
+                style={styles.archivedToggle}
+                onPress={() => setShowArchived((v) => !v)}
+                accessibilityRole="button"
+              >
+                <Text style={[styles.archivedToggleText, { color: colors.mutedForeground }]}>
+                  {showArchived ? "Hide archived" : `Show archived (${archivedCount})`}
+                </Text>
+              </TouchableOpacity>
+            ) : null
           }
         />
       )}
@@ -280,12 +269,13 @@ const styles = StyleSheet.create({
   heroLabel: { fontSize: 13, fontWeight: "600", marginBottom: 4 },
   heroValue: { fontSize: 30, fontWeight: "800", fontVariant: ["tabular-nums"] },
   list: { paddingHorizontal: 16, paddingBottom: 32 },
+  typeHeader: { fontSize: 17, fontWeight: "800", marginTop: 16, marginBottom: 2 },
   sectionHeader: {
     fontSize: 12,
     fontWeight: "700",
     textTransform: "uppercase",
     letterSpacing: 0.5,
-    marginTop: 12,
+    marginTop: 10,
     marginBottom: 6,
   },
   row: {
@@ -297,6 +287,7 @@ const styles = StyleSheet.create({
     padding: 14,
     marginBottom: 8,
   },
+  rowArchived: { opacity: 0.6 },
   rowLeft: { flexDirection: "row", alignItems: "center", flex: 1, marginRight: 12 },
   iconWrap: {
     width: 36,
@@ -314,4 +305,14 @@ const styles = StyleSheet.create({
   amount: { fontSize: 16, fontWeight: "700", fontVariant: ["tabular-nums"] },
   amountSub: { fontSize: 12, fontWeight: "600", marginTop: 2, fontVariant: ["tabular-nums"] },
   empty: { textAlign: "center", paddingVertical: 32, fontSize: 14 },
+  archivedToggle: { alignSelf: "center", paddingVertical: 14, paddingHorizontal: 16 },
+  archivedToggleText: { fontSize: 13, fontWeight: "600" },
+  retryBtn: {
+    marginTop: 12,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderRadius: 8,
+    paddingHorizontal: 16,
+    paddingVertical: 8,
+  },
+  retryText: { fontSize: 14, fontWeight: "600" },
 });

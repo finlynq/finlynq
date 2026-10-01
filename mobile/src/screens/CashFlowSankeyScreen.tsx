@@ -1,21 +1,30 @@
 // Cash-flow Sankey — where income flows to expenses. Reads GET /api/reports/
-// trends (the income/expense category aggregates are period-independent totals)
-// and renders the SankeyChart from them. Mirrors web: income sources sorted
-// desc, expense uses capped to the top 10 (the rest fold out of the diagram, so
-// a note is shown). Amounts are NOT FX-converted server-side (matches web).
-import React, { useEffect, useMemo, useState } from "react";
-import { View, Text, ScrollView, StyleSheet, ActivityIndicator, TouchableOpacity } from "react-native";
+// trends (the income/expense category aggregates are period-independent totals,
+// FX-converted to the display currency the response echoes) and renders the
+// SankeyChart from them. Income sources are sorted desc; expense uses keep the
+// top 10 and fold the rest into an "Other (n)" node, and a deficit period gets
+// a "From savings" source — so the diagram's totals always match the summary
+// printed under it (web drops the tail and lets deficit bands overflow).
+import React, { useCallback, useMemo } from "react";
+import {
+  View,
+  Text,
+  ScrollView,
+  StyleSheet,
+  ActivityIndicator,
+  TouchableOpacity,
+  RefreshControl,
+} from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import type { NativeStackScreenProps } from "@react-navigation/native-stack";
 import { useTheme } from "../theme";
 import { endpoints } from "../api/client";
-import { logger } from "../lib/logger";
 import { formatCurrency, safeName } from "../lib/format";
+import { useReportData } from "../lib/reports/use-report-data";
 import { Icon } from "../components/icon";
 import { SankeyChart } from "../components/reports/SankeyChart";
-import type { SankeyDatum } from "../lib/reports/sankey";
+import { capSankeyExpenses, type SankeyDatum } from "../lib/reports/sankey";
 import type { MoreStackParamList } from "../navigation/MoreStack";
-import type { ReportTrends } from "../../../shared/types";
 
 type Props = NativeStackScreenProps<MoreStackParamList, "CashFlowSankey">;
 
@@ -25,35 +34,12 @@ export default function CashFlowSankeyScreen({ navigation, route }: Props) {
   const { colors } = useTheme();
   const { startDate, endDate, isBusiness, displayCurrency, rangeLabel } = route.params;
 
-  const [data, setData] = useState<ReportTrends | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
-
-  useEffect(() => {
-    let cancelled = false;
-    setLoading(true);
-    endpoints
-      .getReportTrends({ startDate, endDate, isBusiness, period: "monthly", groupBy: "category" })
-      .then((res) => {
-        if (cancelled) return;
-        if (res.success) {
-          setData(res.data);
-          setError(null);
-        } else {
-          logger.warn("sankey", "fetch failed", { error: res.error });
-          setError(res.error);
-        }
-      })
-      .catch((e) => {
-        if (cancelled) return;
-        logger.error("sankey", "fetch threw", { detail: String(e) });
-        setError("Cannot connect to server");
-      })
-      .finally(() => !cancelled && setLoading(false));
-    return () => {
-      cancelled = true;
-    };
-  }, [startDate, endDate, isBusiness]);
+  const fetcher = useCallback(
+    () => endpoints.getReportTrends({ startDate, endDate, isBusiness, period: "monthly", groupBy: "category" }),
+    [startDate, endDate, isBusiness]
+  );
+  const { data, loading, refreshing, error, refresh } = useReportData(fetcher, "sankey");
+  const ccy = data?.displayCurrency ?? displayCurrency;
 
   const sankeyIncome: SankeyDatum[] = useMemo(
     () =>
@@ -64,15 +50,14 @@ export default function CashFlowSankeyScreen({ navigation, route }: Props) {
     [data]
   );
 
-  const allExpenses = useMemo(
-    () => (data?.expenses ?? []).filter((r) => r.total > 0).sort((a, z) => z.total - a.total),
+  const { data: sankeyExpenses, foldedCount } = useMemo(
+    () =>
+      capSankeyExpenses(
+        (data?.expenses ?? []).map((r) => ({ name: safeName(r.name), value: r.total })),
+        EXPENSE_CAP
+      ),
     [data]
   );
-  const sankeyExpenses: SankeyDatum[] = useMemo(
-    () => allExpenses.slice(0, EXPENSE_CAP).map((r) => ({ name: safeName(r.name), value: r.total })),
-    [allExpenses]
-  );
-  const cappedCount = Math.max(0, allExpenses.length - EXPENSE_CAP);
 
   return (
     <SafeAreaView style={[styles.safe, { backgroundColor: colors.background }]} edges={["top"]}>
@@ -85,7 +70,10 @@ export default function CashFlowSankeyScreen({ navigation, route }: Props) {
         <View style={{ width: 70 }} />
       </View>
 
-      <ScrollView contentContainerStyle={styles.scroll}>
+      <ScrollView
+        contentContainerStyle={styles.scroll}
+        refreshControl={<RefreshControl refreshing={refreshing} onRefresh={refresh} tintColor={colors.primary} />}
+      >
         <Text style={[styles.rangeLabel, { color: colors.mutedForeground }]}>
           {rangeLabel}
           {isBusiness ? " · Business only" : ""}
@@ -101,23 +89,23 @@ export default function CashFlowSankeyScreen({ navigation, route }: Props) {
               <Text style={[styles.cardHint, { color: colors.mutedForeground }]}>
                 Swipe the diagram sideways to see all flows.
               </Text>
-              <SankeyChart incomeData={sankeyIncome} expenseData={sankeyExpenses} currency={displayCurrency} />
+              <SankeyChart incomeData={sankeyIncome} expenseData={sankeyExpenses} currency={ccy} />
             </View>
 
-            {cappedCount > 0 && (
+            {foldedCount > 0 && (
               <Text style={[styles.note, { color: colors.mutedForeground }]}>
-                Showing the top {EXPENSE_CAP} expense categories · {cappedCount} smaller{" "}
-                {cappedCount === 1 ? "category is" : "categories are"} not drawn.
+                Showing the top {EXPENSE_CAP} expense categories · the {foldedCount} smaller ones are
+                combined into “Other ({foldedCount})”.
               </Text>
             )}
 
             <View style={[styles.summary, { backgroundColor: colors.card, borderColor: colors.border }]}>
-              <SummaryRow label="Income" value={data.totalIncome} ccy={displayCurrency} color={colors.pos} />
-              <SummaryRow label="Expenses" value={data.totalExpenses} ccy={displayCurrency} color={colors.neg} border />
+              <SummaryRow label="Income" value={data.totalIncome} ccy={ccy} color={colors.pos} />
+              <SummaryRow label="Expenses" value={data.totalExpenses} ccy={ccy} color={colors.neg} border />
               <SummaryRow
                 label="Net savings"
                 value={data.netSavings}
-                ccy={displayCurrency}
+                ccy={ccy}
                 color={data.netSavings >= 0 ? colors.pos : colors.neg}
                 border
                 bold

@@ -292,11 +292,26 @@ export interface RegisterPayload {
 
 // --- Dashboard ---
 export interface DashboardData {
+  /**
+   * The user's display (reporting) currency, from the top-level
+   * `displayCurrency` of GET /api/dashboard. EVERY aggregate on this object
+   * (net worth, assets, liabilities, monthly income/expenses) is denominated in
+   * it. Falls back to USD (never CAD) when the server omits it.
+   */
+  displayCurrency: string;
   netWorth: number;
   totalAssets: number;
   totalLiabilities: number;
+  /**
+   * "YYYY-MM" of the month `monthlyIncome`/`monthlyExpenses`/`savingsRate`
+   * summarize — the last COMPLETE month when the newest tracked month is the
+   * current (partial) calendar month (mirrors web FINLYNQ-291 C1). `null` when
+   * no month has any income/expense rows yet.
+   */
+  referenceMonth: string | null;
   monthlyIncome: number;
   monthlyExpenses: number;
+  /** Savings rate of `referenceMonth` in percent; may be negative. */
   savingsRate: number;
   recentTransactions: Transaction[];
   accountBalances: Array<{ name: string; balance: number; type: string; currency: string }>;
@@ -315,15 +330,26 @@ export interface HealthScoreData {
   score: number;
   grade: "Excellent" | "Good" | "Fair" | "Needs Work";
   components: HealthScoreComponent[];
+  /**
+   * 3-month (income − expenses) / income in percent (FINLYNQ-291). May be
+   * NEGATIVE (spent more than earned); `null` when there is no income to divide
+   * by. Optional so an older server that omits it degrades gracefully.
+   */
+  savingsRatePct?: number | null;
 }
 
 // --- Budget with spending ---
 export interface BudgetWithSpending extends Budget {
+  /** Decrypted server-side (`safeName` → "Category #<id>" under a cold DEK). */
   categoryName?: string;
   categoryGroup?: string;
+  /** `amount` converted from the row's native `currency` into `displayCurrency`. */
   convertedAmount?: number;
+  /** Month's spending in the category, in `displayCurrency`. */
   convertedSpent?: number;
   rolloverAmount?: number;
+  /** The currency `convertedAmount`/`convertedSpent` are expressed in. */
+  displayCurrency?: string;
 }
 
 // --- Per-account balance (the `balances` rows from GET /api/dashboard) ---
@@ -340,6 +366,15 @@ export interface AccountBalance {
   displayCurrency: string;
   isInvestment?: boolean;
   holdingsValue?: number;
+  /**
+   * Archived accounts ARE included in the dashboard balances (they still count
+   * toward net worth). `archived` is a list/picker visibility flag only: list
+   * screens hide these rows behind a "Show archived" toggle and create-mode
+   * pickers filter them out, but totals must keep them.
+   */
+  archived?: boolean;
+  /** Decrypted alias (null under a cold DEK) — render via safeAccountName. */
+  alias?: string | null;
 }
 
 // --- Portfolio overview (GET /api/portfolio/overview) ---
@@ -389,7 +424,25 @@ export interface PortfolioSummary {
   totalReturnPct: number;
 }
 
-/** One enriched per-account holding row (overview.holdings / topGainers / topLosers). */
+/** Display asset type the overview route derives per position. */
+export type PortfolioAssetType = "etf" | "stock" | "crypto" | "cash" | "metal";
+
+/**
+ * One consolidated Top Movers row (FINLYNQ-190, pf-app
+ * src/lib/portfolio/top-movers.ts). One row per canonical security key, NOT
+ * per account. `dayChangeDisplay` is in the overview's `displayCurrency`;
+ * `changePct` is a value-weighted aggregate and may be null.
+ */
+export interface Mover {
+  key: string;
+  symbol: string | null;
+  name: string;
+  image: string | null;
+  dayChangeDisplay: number;
+  changePct: number | null;
+}
+
+/** One enriched per-account holding row (overview.holdings). */
 export interface EnrichedHolding {
   id: number;
   accountId: number | null;
@@ -413,10 +466,13 @@ export interface EnrichedHolding {
   securityName?: string | null;
   symbol: string | null;
   currency: string;
-  assetType: "etf" | "stock" | "crypto" | "cash";
+  /** Server derives "metal" for XAU/XAG/XPT/XPD positions (overview route). */
+  assetType: PortfolioAssetType;
   price: number | null;
   change: number | null;
   changePct: number | null;
+  /** Display-currency day change $ for this position (null = no live quote). */
+  dayChangeDisplay?: number | null;
   quoteCurrency: string | null;
   marketCap: number | null;
   image: string | null;
@@ -450,12 +506,12 @@ export interface PortfolioOverview {
   byHolding: PortfolioHoldingSummary[];
   displayCurrency: string;
   summary: PortfolioSummary;
-  /** Asset-type breakdown keyed by etf|stock|crypto|cash. */
+  /** Asset-type breakdown keyed by etf|stock|crypto|cash|metal. */
   byType: Record<string, AllocationBucket>;
   /** Per-account breakdown keyed by (decrypted) account name. */
   byAccount: Record<string, AllocationBucket>;
-  topGainers: EnrichedHolding[];
-  topLosers: EnrichedHolding[];
+  topGainers: Mover[];
+  topLosers: Mover[];
 }
 
 /** GET /api/portfolio bare-array row (decrypted names; powers op-form pickers). */
@@ -514,8 +570,12 @@ export interface RealizedGainRow {
   term: "short" | "long";
   closeKind: string;
   source: string;
-  /** Present only when ?currency=base. */
+  /** Present only in the unified view (?unified=1): gain in the display currency. */
   realizedGainInBase?: number;
+  /** Present only in the unified view: the display currency realizedGainInBase is in. */
+  baseCurrency?: string;
+  /** True when a historical FX snapshot was missing and a current rate was used. */
+  fxSnapshotMissing?: boolean;
 }
 
 export interface RealizedGainsResult {
@@ -527,7 +587,7 @@ export interface RealizedGainsResult {
     byCurrency: Record<string, { realizedGain: number; qtyClosed: number }>;
   };
   filter: Record<string, unknown>;
-  /** Present only when ?currency=base. */
+  /** Present only in the unified view (?unified=1). */
   totalRealizedGainInBase?: number;
 }
 
@@ -554,6 +614,8 @@ export interface DividendGroupRow {
   rowCount: number;
   reinvestedCount: number;
   withholdingCount: number;
+  /** Reporting mode only: rows in this bucket not yet re-rated (excluded from amount). */
+  unratedCount?: number;
 }
 
 export interface DividendIncomeResult {
@@ -563,7 +625,13 @@ export interface DividendIncomeResult {
     amount: number;
     rowCount: number;
     byCurrency: Record<string, number>;
+    /** Reporting mode only: rows lacking stored reporting fields (excluded from totals). */
+    unratedCount?: number;
   };
+  /** FINLYNQ-182: "reporting" when ?reportingCurrency=1 was honoured. */
+  mode?: "native" | "reporting";
+  /** Reporting mode only: the currency totals + group amounts are expressed in. */
+  reportingCurrency?: string;
   filter: Record<string, unknown>;
 }
 
@@ -868,9 +936,11 @@ export interface TransactionFormData {
 // Mirror the bare-JSON shapes returned by GET /api/reports (income-statement +
 // balance-sheet), /api/reports/trends and /api/reports/yoy. Category/account
 // names are decrypted server-side and can be "" under a cold DEK — route every
-// label through safeName(). Totals are FX-converted server-side on the
-// income-statement + balance-sheet routes; the trends + yoy routes do NOT
-// convert (they SUM raw amounts), matching the web /reports behavior exactly.
+// label through safeName(). Every report route converts amounts to the user's
+// display currency server-side and echoes it as `displayCurrency` (trends + yoy
+// prefer each row's stored historical reporting_amount, else convert at the
+// current rate). The balance sheet ignores endDate: it is always TODAY's
+// balances, whatever range the caller passes.
 
 export type ReportPeriod = "daily" | "weekly" | "monthly" | "quarterly";
 export type ReportGroupBy = "category" | "group";
@@ -956,6 +1026,9 @@ export interface TrendsPoint {
 export interface TrendsBreakdownItem {
   name: string;
   group: string;
+  /** Set in groupBy=category mode (FINLYNQ-130); null in group mode, where a
+   *  row aggregates many categories. Optional for older servers. */
+  categoryId?: number | null;
   total: number;
   count: number;
   periods: Record<string, number>;
@@ -966,6 +1039,8 @@ export interface ReportTrends {
   groupBy: ReportGroupBy;
   startDate: string;
   endDate: string;
+  /** Currency every amount below is expressed in (optional for older servers). */
+  displayCurrency?: string;
   timeseries: TrendsPoint[];
   income: TrendsBreakdownItem[];
   expenses: TrendsBreakdownItem[];
@@ -993,6 +1068,9 @@ export interface YoYMonthlyRow {
 export interface YoYReport {
   year1: number;
   year2: number;
+  /** Currency every amount below is expressed in (optional for older servers). */
+  displayCurrency?: string;
+  /** Expense categories; amounts are FULL calendar years on both sides. */
   categories: YoYCategoryRow[];
   monthly: YoYMonthlyRow[];
 }
