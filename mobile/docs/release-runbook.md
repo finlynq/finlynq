@@ -100,3 +100,9 @@ npx eas build --platform ios --profile production --auto-submit --non-interactiv
   stored" footgun). **1.0.14 / vc22 (Android only)** proactively recovers a lost-DEK session on
   open/resume/unlock (consumes the new `/api/auth/session` `encryptionLocked` flag) instead of
   only healing on a write — needs the web change deployed to the target backend.
+- **1.0.17 / vc25 (Android only)** adds the **Subscriptions** screen (More → Subscriptions: list +
+  calendar views, "found in your transactions" suggestions, weekly → annual incl. semi-annual).
+  **Needs the 2026-10-01 web change (`d0db1f9`, merged Subscriptions page) on the target backend:**
+  on a server without it, `/api/subscriptions` + `/api/recurring` are dev-mode gated and the screen
+  shows "Subscriptions need a newer Finlynq server" for anyone not in dev mode. Promote the web
+  change (dev → main) before moving this build past internal testing.
