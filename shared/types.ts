@@ -147,18 +147,71 @@ export interface PortfolioHolding {
   note: string;
 }
 
+/** Billing cadence. GET /api/subscriptions always serves one of these
+ *  (legacy "yearly" is normalized to "annual" server-side). */
+export type SubscriptionFrequency =
+  | "weekly"
+  | "biweekly"
+  | "monthly"
+  | "quarterly"
+  | "semiannual"
+  | "annual";
+
 export interface Subscription {
   id: number;
-  name: string;
+  /** DEK-decrypted; null under a cold DEK. */
+  name: string | null;
   amount: number;
   currency: string;
-  frequency: "weekly" | "monthly" | "quarterly" | "annual";
+  frequency: SubscriptionFrequency;
   categoryId: number | null;
+  categoryName?: string | null;
   accountId: number | null;
+  accountName?: string | null;
   nextDate: string | null;
   status: "active" | "paused" | "cancelled";
   cancelReminderDate: string | null;
   notes: string | null;
+  /** Additive, server-computed at the CURRENT rate (FINLYNQ-123) — totals only. */
+  displayCurrency?: string;
+  displayAmount?: number;
+}
+
+/** POST /api/subscriptions body. Omit (don't null) empty optionals on create. */
+export interface SubscriptionFormData {
+  name: string;
+  amount: number;
+  currency?: string;
+  frequency: SubscriptionFrequency;
+  categoryId?: number | null;
+  accountId?: number | null;
+  nextDate?: string | null;
+  status?: "active" | "paused" | "cancelled";
+  cancelReminderDate?: string | null;
+  notes?: string | null;
+}
+
+/** GET /api/recurring — repeating series detected in the user's transactions. */
+export interface RecurringItem {
+  payee: string;
+  /** Signed: negative = bill, positive = income. Native currency. */
+  avgAmount: number;
+  currency: string;
+  avgAmountDisplay?: number;
+  /** Detector vocabulary — may be "yearly"; normalize before use. */
+  frequency: string;
+  count: number;
+  lastDate: string;
+  nextDate: string;
+  accountId: number;
+  categoryId: number | null;
+}
+
+export interface RecurringResponse {
+  recurring: RecurringItem[];
+  displayCurrency?: string;
+  monthlyRecurringTotal?: number;
+  count?: number;
 }
 
 export interface Snapshot {

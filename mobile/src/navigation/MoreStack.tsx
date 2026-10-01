@@ -19,7 +19,9 @@ import CashFlowSankeyScreen from "../screens/CashFlowSankeyScreen";
 import YearOverYearScreen from "../screens/YearOverYearScreen";
 import InboxScreen from "../screens/InboxScreen";
 import ReconcileThresholdsScreen from "../screens/ReconcileThresholdsScreen";
-import type { Category, GoalWithProgress } from "../../../shared/types";
+import SubscriptionsScreen from "../screens/SubscriptionsScreen";
+import AddSubscriptionScreen from "../screens/AddSubscriptionScreen";
+import type { Category, GoalWithProgress, Subscription, SubscriptionFormData } from "../../../shared/types";
 
 /** Date range + display currency threaded from the Reports hub to a detail
  *  screen (trends/sankey/income-statement responses don't all carry currency). */
@@ -46,6 +48,9 @@ export type MoreStackParamList = {
   // `category`/`goal` present → edit mode (prefill + PUT); absent → create.
   AddCategory: { category?: Category } | undefined;
   AddGoal: { goal?: GoalWithProgress } | undefined;
+  Subscriptions: undefined;
+  // `subscription` → edit; `prefill` → create seeded from a detected series.
+  AddSubscription: { subscription?: Subscription; prefill?: SubscriptionFormData } | undefined;
   WhatsNew: undefined;
   Feedback: undefined;
   Reports: undefined;
@@ -64,6 +69,7 @@ export default function MoreStack() {
       <Stack.Screen name="MoreHome" component={MoreScreen} />
       <Stack.Screen name="Budgets" component={BudgetsScreen} />
       <Stack.Screen name="Goals" component={GoalsScreen} />
+      <Stack.Screen name="Subscriptions" component={SubscriptionsScreen} />
       <Stack.Screen name="Categories" component={CategoriesScreen} />
       <Stack.Screen name="Import" component={ImportScreen} />
       <Stack.Screen name="Inbox" component={InboxScreen} />
@@ -82,6 +88,11 @@ export default function MoreStack() {
       <Stack.Screen
         name="AddGoal"
         component={AddGoalScreen}
+        options={{ presentation: "modal" }}
+      />
+      <Stack.Screen
+        name="AddSubscription"
+        component={AddSubscriptionScreen}
         options={{ presentation: "modal" }}
       />
       <Stack.Screen name="WhatsNew" component={WhatsNewScreen} />

@@ -373,6 +373,9 @@ import type {
   AccountEditData,
   AccountDetailRow,
   ReconcileThresholds,
+  Subscription,
+  SubscriptionFormData,
+  RecurringResponse,
 } from "../../../shared/types";
 
 // Shared report query params. The date range + business + display currency are
@@ -573,6 +576,25 @@ export const endpoints = {
   updateCategory: (d: CategoryEditData) => api.put<Category>("/api/categories", d),
   deleteCategory: (id: number) =>
     api.delete<{ success?: boolean }>(`/api/categories?id=${id}`),
+
+  // Subscriptions — bare array; every row also carries the server's
+  // current-rate `displayAmount` / `displayCurrency` (FINLYNQ-123) so totals
+  // never raw-sum mixed currencies. PUT takes `id` in the body; DELETE by `?id=`
+  // returns `{ success: true }` (passed through by request() as an envelope).
+  // Dev-mode-gated (404) on servers older than the 2026-10 merge.
+  getSubscriptions: () => api.get<Subscription[]>("/api/subscriptions"),
+  createSubscription: (d: SubscriptionFormData) =>
+    api.post<Subscription>("/api/subscriptions", d),
+  updateSubscription: (d: Partial<SubscriptionFormData> & { id: number }) =>
+    api.put<Subscription>("/api/subscriptions", d),
+  deleteSubscription: (id: number) =>
+    api.delete<{ success?: boolean }>(`/api/subscriptions?id=${id}`),
+  // Repeating series detected in the user's transactions — feeds the
+  // "found in your transactions" suggestions and the calendar's projections.
+  getRecurring: () => api.get<RecurringResponse>("/api/recurring"),
+  // The user's active currency set — the picker source for a record's currency.
+  getActiveCurrencies: () =>
+    api.get<{ active: string[] }>("/api/settings/active-currencies"),
 
   // Goals — bare array of Goal + server-computed progress fields.
   getGoals: () => api.get<GoalWithProgress[]>("/api/goals"),
