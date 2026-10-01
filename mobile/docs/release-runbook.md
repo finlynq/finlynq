@@ -111,3 +111,10 @@ npx eas build --platform ios --profile production --auto-submit --non-interactiv
   top payees, recent transactions); Income statement category rows tap through too. Needs the
   web release with `GET /api/reports/categories` + `/api/reports/category` (PR #356) on the
   target backend; older servers show "Category reports need a newer Finlynq server".
+- **1.0.19 / vc27 (Android + iOS)**: fixes from a review of every summary screen against the current
+  API. Dashboard in the display currency (was USD for everyone), refetch on focus + error banner,
+  month tiles step back to the last complete month; archived accounts handled; Top Movers read the
+  aggregated mover (were "+$0"); dividends / realized-gains totals no longer mix currencies; metal
+  holdings; Sankey / YoY / 12-month preset / local dates; budgets saved in the display currency.
+  The Income statement category tap-through needs PR #357 (income rows carry `categoryId`) on the
+  target backend.
