@@ -231,7 +231,9 @@ export default function CategoryReportsScreen() {
               <View style={[styles.card, { backgroundColor: colors.card, borderColor: colors.border }]}>
                 {data.categories.map((c, idx) => {
                   const color = colorFor(c.id);
-                  const ch = changeLabel(c.change);
+                  // Nothing yet this month reads as "none", not a green "-100%".
+                  const none = c.amount === 0;
+                  const ch = none ? (data.partial ? "none yet" : "none") : changeLabel(c.change);
                   return (
                     <TouchableOpacity
                       key={c.id}
@@ -258,7 +260,7 @@ export default function CategoryReportsScreen() {
                       <MiniTrend values={c.trend} color={isIncome ? colors.pos : colors.neg} />
                       <View style={styles.rowRight}>
                         <Text style={[styles.amount, { color: colors.foreground }]}>{formatCurrency(c.amount, cur, { decimals: 0 })}</Text>
-                        {ch ? <Text style={[styles.change, { color: toneColor(c.change) }]}>{ch}</Text> : null}
+                        {ch ? <Text style={[styles.change, { color: none ? colors.mutedForeground : toneColor(c.change) }]}>{ch}</Text> : null}
                       </View>
                     </TouchableOpacity>
                   );
