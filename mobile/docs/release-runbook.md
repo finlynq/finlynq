@@ -118,3 +118,10 @@ npx eas build --platform ios --profile production --auto-submit --non-interactiv
   holdings; Sankey / YoY / 12-month preset / local dates; budgets saved in the display currency.
   The Income statement category tap-through needs PR #357 (income rows carry `categoryId`) on the
   target backend.
+- **1.0.20 / vc28 (Android)**: **Transactions calendar** (List / Calendar toggle on the Transactions
+  tab; month grid with each day's income, spending and count; tap a day for its transactions) —
+  needs `GET /api/transactions/calendar` (prod since 2026-10-07, PR #367). **Cross-currency
+  transfers**: an editable "Amount received" field pre-filled from `/api/fx/preview` replaces the old
+  "use the web app" refusal. **Transfers edit as a pair** through `PUT /api/transactions/transfer`;
+  the server refuses single-leg money edits on the generic route since PR #369, and the app shows
+  that message if it ever hits it.
