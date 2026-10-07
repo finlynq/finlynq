@@ -37,6 +37,9 @@ export const holdingCreateSchema = z.object({
   currency: currencyCode.optional(),
   isCrypto: z.boolean().optional(),
   note: z.string().max(500).optional(),
+  // GH #365 — the ISIN the ticker was resolved from (holding form sends it
+  // when the user typed an ISIN); remembered on the security, not the holding.
+  isin: z.string().max(20).nullable().optional(),
 });
 
 export const holdingUpdateSchema = z.object({
@@ -47,6 +50,7 @@ export const holdingUpdateSchema = z.object({
   // PUT accepts the legacy 0/1 int form (matches the existing API contract).
   isCrypto: z.number().int().min(0).max(1).optional(),
   note: z.string().max(500).optional(),
+  isin: z.string().max(20).nullable().optional(),
 });
 
 export type HoldingCreateInput = z.infer<typeof holdingCreateSchema>;

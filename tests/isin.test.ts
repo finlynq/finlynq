@@ -140,7 +140,7 @@ describe("resolveIsinTickersInPlace (imports)", () => {
 
   it("statement staging runs it before writing the staged rows", () => {
     const src = read("src/lib/import/stage-statement-file.ts");
-    const at = src.indexOf("await resolveIsinTickersInPlace(shaped)");
+    const at = src.indexOf("await resolveIsinTickersInPlace(shaped,");
     expect(at).toBeGreaterThan(-1);
     expect(at).toBeLessThan(src.indexOf("const buildStagedRow"));
   });

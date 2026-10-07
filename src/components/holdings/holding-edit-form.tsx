@@ -325,6 +325,11 @@ export function HoldingEditForm({
     try {
       const symbolValue = form.symbol.trim() ? form.symbol.trim() : null;
       const currency = form.currency.trim().toUpperCase();
+      // GH #365 — the ISIN behind the ticker, while the field still holds what it resolved to.
+      const isin =
+        resolvedIsin && symbolValue && resolvedIsin.symbol.toUpperCase() === symbolValue.toUpperCase()
+          ? resolvedIsin.isin
+          : undefined;
       let payload: unknown;
       let method: "POST" | "PUT";
       if (isCreateMode) {
@@ -335,6 +340,7 @@ export function HoldingEditForm({
           currency: currency || undefined,
           isCrypto: form.isCrypto,
           note: form.note,
+          isin,
         });
         if (!create.success) {
           // Map zod issues into per-field errors. Keep error strings as ""
@@ -361,6 +367,7 @@ export function HoldingEditForm({
           currency: currency || undefined,
           isCrypto: form.isCrypto ? 1 : 0,
           note: form.note,
+          isin,
         });
         if (!update.success) {
           const fieldErrs: Record<string, string> = {};

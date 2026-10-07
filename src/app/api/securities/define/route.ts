@@ -25,6 +25,7 @@ import { and, eq, sql } from "drizzle-orm";
 import { db, schema } from "@/db";
 import { apiHandler } from "@/lib/api-handler";
 import { resolveOrCreateSecurity } from "@/lib/securities/resolve";
+import { rememberSecurityIsin } from "@/lib/securities/isin-store";
 import { currencyCode } from "@/lib/schemas/holding";
 import { isSupportedCurrency, isCryptoCurrency } from "@/lib/fx/supported-currencies";
 import { symbolToCoinGeckoId } from "@/lib/crypto-service";
@@ -39,6 +40,8 @@ const defineSchema = z.object({
   // Add-security dialog sends 'manual' when the ticker lookup found no live
   // price. Defaults to 'auto' (the column default).
   priceSource: z.enum(["auto", "manual"]).optional(),
+  // GH #365 — the ISIN the ticker was resolved from (Add security dialog).
+  isin: z.string().max(20).nullable().optional(),
 });
 
 export const POST = apiHandler(
@@ -83,6 +86,7 @@ export const POST = apiHandler(
         .set({ priceSource: body.priceSource, updatedAt: sql`NOW()` })
         .where(and(eq(schema.securities.id, securityId), eq(schema.securities.userId, userId)));
     }
+    await rememberSecurityIsin(userId, dek, securityId, body.isin);
     return { securityId, priceSource: body.priceSource ?? "auto" };
   },
 );

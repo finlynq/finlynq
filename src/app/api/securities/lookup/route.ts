@@ -19,11 +19,11 @@ import { apiHandler } from "@/lib/api-handler";
 import { fetchQuoteLive } from "@/lib/price-service";
 import { symbolToCoinGeckoId, getCryptoPrice } from "@/lib/crypto-service";
 import { isIsin, normalizeIsin } from "@/lib/securities/isin";
-import { resolveIsin } from "@/lib/securities/isin-resolve";
+import { resolveIsinForUser } from "@/lib/securities/isin-store";
 
 export const GET = apiHandler(
   { auth: "auth", fallbackMessage: "Lookup failed" },
-  async ({ request }) => {
+  async ({ request, userId, dek }) => {
     const symbol = (request.nextUrl.searchParams.get("symbol") ?? "").trim();
     if (!symbol) return { found: false, isCrypto: false };
     const wantCrypto = request.nextUrl.searchParams.get("crypto") === "1";
@@ -32,12 +32,14 @@ export const GET = apiHandler(
     // dialog swaps `symbol` into its Ticker field, since an ISIN never prices.
     if (isIsin(symbol)) {
       const isin = normalizeIsin(symbol);
-      const match = await resolveIsin(isin);
+      // The user's own securities first (an ISIN they've used before), then Yahoo.
+      const match = await resolveIsinForUser(userId, dek, isin);
       if (!match) return { found: false, isCrypto: false, resolvedFromIsin: null, isinNotFound: true };
       const quote = await fetchQuoteLive(match.symbol).catch(() => null);
+      const quoteName = quote?.name && quote.name.trim().toUpperCase() !== match.symbol.toUpperCase() ? quote.name.trim() : null;
       return {
         found: !!quote,
-        name: match.name,
+        name: match.name ?? quoteName,
         currency: quote?.currency ?? null,
         isCrypto: false,
         symbol: match.symbol,

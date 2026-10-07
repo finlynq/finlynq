@@ -86,6 +86,8 @@ type Security = {
   id: number;
   symbol: string | null;
   name: string | null;
+  /** GH #365 — the ISIN this security was entered/imported by, if any. */
+  isin?: string | null;
   assetType: string;
   currency: string;
   isCash: boolean;
@@ -178,6 +180,8 @@ export default function InvestmentsSettingsPage() {
   const [addLookupFound, setAddLookupFound] = useState<boolean | null>(null);
   // GH #365 — what happened to an ISIN typed into Ticker (resolved, or not found).
   const [addIsinNote, setAddIsinNote] = useState<string | null>(null);
+  // The ISIN behind the ticker now in the field (sent on save so the security remembers it).
+  const [addIsin, setAddIsin] = useState<{ isin: string; symbol: string } | null>(null);
   const priceSourceTouchedRef = useRef(false);
   // Auto-fill bookkeeping (refs avoid stale-closure reads inside the async
   // lookup): which fields the user edited by hand + a sequence guard so a slow
@@ -339,6 +343,7 @@ export default function InvestmentsSettingsPage() {
     setAddPriceSource("auto");
     setAddLookupFound(null);
     setAddIsinNote(null);
+    setAddIsin(null);
     priceSourceTouchedRef.current = false;
     nameTouchedRef.current = false;
     currencyTouchedRef.current = false;
@@ -391,7 +396,8 @@ export default function InvestmentsSettingsPage() {
         // An ISIN never prices: swap in the Yahoo symbol it resolved to.
         if (d?.resolvedFromIsin && d.symbol) {
           setAddSymbol(d.symbol);
-          setAddIsinNote(`Found ISIN ${d.resolvedFromIsin} on Yahoo Finance as ${d.symbol}.`);
+          setAddIsin({ isin: d.resolvedFromIsin, symbol: d.symbol });
+          setAddIsinNote(`Found ISIN ${d.resolvedFromIsin} as ${d.symbol}.`);
         } else {
           setAddIsinNote(
             d?.isinNotFound
@@ -469,6 +475,8 @@ export default function InvestmentsSettingsPage() {
           currency,
           isCrypto: addIsCrypto,
           priceSource: addPriceSource,
+          // Only while the field still holds the ticker that ISIN resolved to.
+          isin: addIsin && addIsin.symbol.toUpperCase() === symbol.toUpperCase() ? addIsin.isin : undefined,
         }),
       });
       if (!res.ok) {
@@ -949,6 +957,11 @@ export default function InvestmentsSettingsPage() {
                       <TableRow key={r.s.id}>
                         <TableCell className="text-sm font-mono font-medium">
                           {r.symbol}
+                          {r.s.isin && (
+                            <span className="block text-[11px] font-normal text-muted-foreground" title="ISIN">
+                              {r.s.isin}
+                            </span>
+                          )}
                           {r.s.isCash && (
                             <Badge variant="outline" className="ml-1.5 text-[10px]">
                               cash
@@ -1219,6 +1232,7 @@ export default function InvestmentsSettingsPage() {
                   onChange={(e) => {
                     setAddSymbol(e.target.value);
                     setAddIsinNote(null);
+                    setAddIsin(null);
                     if (!nameTouchedRef.current) setAddName(""); // drop stale auto-name
                   }}
                   onBlur={() => lookupTicker(addSymbol, addIsCrypto)}

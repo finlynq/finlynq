@@ -17,7 +17,7 @@ import { requireAuth } from "@/lib/auth/require-auth";
 import { fetchQuote } from "@/lib/price-service";
 import { looksLikeYahooTicker } from "@/lib/securities/yahoo-symbol";
 import { isIsin } from "@/lib/securities/isin";
-import { resolveIsin } from "@/lib/securities/isin-resolve";
+import { resolveIsinForUser } from "@/lib/securities/isin-store";
 import { symbolToCoinGeckoId } from "@/lib/crypto-service";
 import {
   isSupportedCurrency,
@@ -70,7 +70,8 @@ export async function GET(request: NextRequest) {
   // 0. An ISIN (GH #365) — resolve it to the Yahoo symbol and describe THAT.
   //    Checked first: a valid ISIN is never a ticker, coin or currency code.
   if (isIsin(symbol)) {
-    const match = await resolveIsin(symbol);
+    // The user's own securities first (an ISIN they've used before), then Yahoo.
+    const match = await resolveIsinForUser(auth.context.userId, auth.context.dek, symbol);
     if (!match) {
       return NextResponse.json<SymbolInfo>({
         symbol,
@@ -87,14 +88,15 @@ export async function GET(request: NextRequest) {
       symbol: resolved,
       kind: match.quoteType === "ETF" ? "etf" : "stock",
       currency: quote?.currency || null,
-      label: quote?.currency
-        ? `ISIN ${symbol} → ${resolved} — priced in ${quote.currency}`
-        : `ISIN ${symbol} → ${resolved}`,
+      label:
+        `ISIN ${symbol} → ${resolved}` +
+        (match.source === "stored" ? " (from your securities)" : "") +
+        (quote?.currency ? ` — priced in ${quote.currency}` : ""),
       isCrypto: false,
       ...(quote && quote.price > 0 ? { price: quote.price } : {}),
       source: "yahoo",
       resolvedFromIsin: symbol,
-      name: match.name,
+      name: match.name ?? null,
     });
   }
 

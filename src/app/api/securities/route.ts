@@ -60,6 +60,7 @@ export const GET = apiHandler(
         image: schema.securities.image,
         symbolCt: schema.securities.symbolCt,
         nameCt: schema.securities.nameCt,
+        isinCt: schema.securities.isinCt,
         createdAt: schema.securities.createdAt,
       })
       .from(schema.securities)
@@ -72,7 +73,8 @@ export const GET = apiHandler(
     const securities = decryptNamedRows(secRows, dek, {
       symbolCt: "symbol",
       nameCt: "name",
-    }) as Array<(typeof secRows)[number] & { symbol: string | null; name: string | null }>;
+      isinCt: "isin",
+    }) as Array<(typeof secRows)[number] & { symbol: string | null; name: string | null; isin: string | null }>;
 
     // Positions per security, with account name + qty (cached) for context.
     const posRows = await db
@@ -134,6 +136,8 @@ export const GET = apiHandler(
           id: s.id,
           symbol: s.symbol,
           name: s.name,
+          // GH #365 — the ISIN this security was entered/imported by, if any.
+          isin: s.isin ?? null,
           assetType: s.assetType,
           currency: s.currency,
           isCash: s.isCash,

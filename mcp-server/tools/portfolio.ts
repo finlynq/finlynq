@@ -25,6 +25,7 @@ import {
 } from "./_shared";
 import { aggregateHoldings } from "../../src/lib/portfolio/aggregate-holdings";
 import { resolveTickerInput } from "../../src/lib/securities/isin-resolve";
+import { rememberSecurityIsin } from "../../src/lib/securities/isin-store";
 import { valuePortfolio, weightBasis } from "../../src/lib/portfolio/valuation";
 import { withConfirmation, PreviewAbortError } from "./_confirm";
 import {
@@ -708,6 +709,8 @@ export function registerPortfolioTools(server: McpServer, ctx: PgToolContext) {
         isCash: false,
         currency: cur,
       });
+      // GH #365 — remember the ISIN the symbol was resolved from.
+      await rememberSecurityIsin(userId, dek, securityId, symbolInput?.resolvedFromIsin);
 
       try {
         // Issue #95: dual-write portfolio_holdings + holding_accounts. Every
@@ -857,6 +860,7 @@ export function registerPortfolioTools(server: McpServer, ctx: PgToolContext) {
           isCash: h.is_cash === true,
           currency: nextCurrency,
         });
+        await rememberSecurityIsin(userId, dek, resolved, symbolInput?.resolvedFromIsin);
         if (resolved != null && resolved !== oldSecurityId) {
           updates.push(sql`security_id = ${resolved}`);
           securityChanged = true;

@@ -90,7 +90,12 @@ const BATCH_CONCURRENCY = 4;
  * can't place is left untouched rather than guessed. Returns how many rows
  * changed.
  */
-export async function resolveIsinTickersInPlace<T extends { ticker?: string | null }>(rows: T[]): Promise<number> {
+export async function resolveIsinTickersInPlace<T extends { ticker?: string | null }>(
+  rows: T[],
+  /** How to resolve one ISIN. Staging passes a user-aware lookup that checks
+   *  the user's stored securities first (isin-store.ts); defaults to Yahoo. */
+  lookup: (isin: string) => Promise<{ symbol: string } | null> = resolveIsin,
+): Promise<number> {
   const isins = [
     ...new Set(
       rows
@@ -104,7 +109,7 @@ export async function resolveIsinTickersInPlace<T extends { ticker?: string | nu
   const resolved = new Map<string, string>();
   for (let i = 0; i < isins.length; i += BATCH_CONCURRENCY) {
     const batch = isins.slice(i, i + BATCH_CONCURRENCY);
-    const matches = await Promise.all(batch.map((isin) => resolveIsin(isin)));
+    const matches = await Promise.all(batch.map((isin) => lookup(isin).catch(() => null)));
     matches.forEach((m, j) => {
       if (m) resolved.set(batch[j], m.symbol);
     });

@@ -309,6 +309,11 @@ export const securities = pgTable(
     symbolLookup: text("symbol_lookup"),
     nameCt: text("name_ct"),
     nameLookup: text("name_lookup"),
+    // GH #365 — the ISIN the security was entered or imported by, if any.
+    // Encrypted like symbol_ct; isin_lookup is the HMAC for exact matching.
+    // The resolved Yahoo SYMBOL still drives clustering and pricing.
+    isinCt: text("isin_ct"),
+    isinLookup: text("isin_lookup"),
     image: text("image"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
@@ -317,6 +322,7 @@ export const securities = pgTable(
     // One security per (user, cluster). Backs the find-or-create re-select.
     uniqueIndex("securities_user_cluster_idx").on(t.userId, t.clusterKey),
     index("securities_user_idx").on(t.userId),
+    index("securities_user_isin_lookup_idx").on(t.userId, t.isinLookup),
     // ─── CHECK constraints — mirror of the migration chain ───
     // Adding one in a migration means declaring it here in the SAME commit;
     // tests/schema-check-parity.test.ts fails the build otherwise.

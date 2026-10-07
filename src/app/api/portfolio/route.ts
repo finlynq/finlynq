@@ -7,6 +7,7 @@ import { requireEncryption } from "@/lib/auth/require-encryption";
 import { validateBody, safeErrorMessage, logApiError } from "@/lib/validate";
 import { buildNameFields, decryptName, decryptNamedRows, nameLookup } from "@/lib/crypto/encrypted-columns";
 import { resolveOrCreateSecurity, gcOrphanSecurity } from "@/lib/securities/resolve";
+import { rememberSecurityIsin } from "@/lib/securities/isin-store";
 import {
   holdingCreateSchema,
   holdingUpdateSchema,
@@ -43,7 +44,7 @@ export async function POST(request: NextRequest) {
     const body = await request.json();
     const parsed = validateBody(body, holdingCreateSchema);
     if (parsed.error) return parsed.error;
-    const { name, accountId, symbol, currency, isCrypto, note } = parsed.data;
+    const { name, accountId, symbol, currency, isCrypto, note, isin } = parsed.data;
 
     const acct = await db
       .select({ id: schema.accounts.id, currency: schema.accounts.currency })
@@ -85,6 +86,8 @@ export async function POST(request: NextRequest) {
       isCash: false,
       currency: holdingCurrency,
     });
+    // GH #365 — remember the ISIN this ticker came from, so it matches next time.
+    await rememberSecurityIsin(auth.userId, auth.dek, securityId, isin);
 
     try {
       // Stream D Phase 4 — plaintext name/symbol dropped.
@@ -224,6 +227,8 @@ export async function PUT(request: NextRequest) {
     const dataNoNames = { ...data };
     delete (dataNoNames as Record<string, unknown>).name;
     delete (dataNoNames as Record<string, unknown>).symbol;
+    // Not a portfolio_holdings column — it lives on the security (above).
+    delete (dataNoNames as Record<string, unknown>).isin;
 
     // Securities master edit-path dual-write — when an identity field changes
     // (symbol / name / currency / isCrypto) the position must re-cluster under
@@ -248,6 +253,8 @@ export async function PUT(request: NextRequest) {
       });
       if (resolved != null) newSecurityId = resolved;
     }
+    // GH #365 — the form sends the ISIN the ticker was resolved from.
+    await rememberSecurityIsin(auth.userId, auth.dek, newSecurityId, data.isin);
     const securityIdChanged = newSecurityId !== existing.securityId;
 
     try {

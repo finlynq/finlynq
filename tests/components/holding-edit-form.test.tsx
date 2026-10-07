@@ -310,7 +310,7 @@ describe("<HoldingEditForm>", () => {
       return Promise.resolve({ ok: true, json: () => Promise.resolve([]) });
     });
 
-    const { container, findByText } = render(
+    const { container, findByText, getByText } = render(
       <HoldingEditForm defaultAccountId={1} onSave={() => {}} onCancel={() => {}} />,
     );
     const symbolInput = container.querySelector('input[placeholder*="ISIN"]') as HTMLInputElement | null;
@@ -321,5 +321,15 @@ describe("<HoldingEditForm>", () => {
     const nameInput = container.querySelector('input[placeholder*="Apple"]') as HTMLInputElement;
     expect(nameInput.value).toBe("Aditya BSL Banking & PSU Debt");
     expect(await findByText(/Found ISIN INF209K01YN0 on Yahoo Finance as 0P0000XVYH\.BO/)).toBeTruthy();
+
+    // Saving sends the ISIN so the security remembers it.
+    fireEvent.click(getByText("Add holding"));
+    await waitFor(() =>
+      expect(fetchMock.mock.calls.some(([u, init]) => u === "/api/portfolio" && (init as RequestInit | undefined)?.method === "POST")).toBe(true),
+    );
+    const post = fetchMock.mock.calls.find(([u, init]) => u === "/api/portfolio" && (init as RequestInit | undefined)?.method === "POST")!;
+    const sent = JSON.parse(String((post[1] as RequestInit).body));
+    expect(sent.symbol).toBe("0P0000XVYH.BO");
+    expect(sent.isin).toBe("INF209K01YN0");
   });
 });
