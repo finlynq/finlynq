@@ -8,20 +8,25 @@ import type { Theme } from "../theme";
 import { lightColors } from "../theme/colors";
 
 const mockGoBack = jest.fn();
+const mockPop = jest.fn();
+// Route params per test: create mode by default, `editTransfer` for an edit.
+let mockRouteParams: Record<string, unknown> = { mode: "transfer" };
 jest.mock("@react-navigation/native", () => ({
   ...jest.requireActual("@react-navigation/native"),
-  useNavigation: () => ({ goBack: mockGoBack, navigate: jest.fn() }),
-  useRoute: () => ({ key: "AddTransaction", name: "AddTransaction", params: { mode: "transfer" } }),
+  useNavigation: () => ({ goBack: mockGoBack, navigate: jest.fn(), pop: mockPop }),
+  useRoute: () => ({ key: "AddTransaction", name: "AddTransaction", params: mockRouteParams }),
 }));
 
 jest.mock("../api/client", () => ({
   endpoints: {
     getAccounts: jest.fn(),
+    getAccountsDetailed: jest.fn(),
     getCategories: jest.fn(),
     getAccountBalances: jest.fn(),
     getDropdownOrder: jest.fn(),
     createTransaction: jest.fn(),
     recordTransfer: jest.fn(),
+    updateTransfer: jest.fn(),
     getFxPreview: jest.fn(),
   },
 }));
@@ -49,6 +54,7 @@ const usdSavings = account(3, "B USD Savings", "USD");
 
 function setupAccounts(accounts: ReturnType<typeof account>[]) {
   (endpoints.getAccounts as jest.Mock).mockResolvedValue({ success: true, data: accounts });
+  (endpoints.getAccountsDetailed as jest.Mock).mockResolvedValue({ success: true, data: accounts });
   (endpoints.getCategories as jest.Mock).mockResolvedValue({
     success: true,
     data: [{ id: 7, type: "E", group: "Food", name: "Groceries", note: "" }],
@@ -80,6 +86,7 @@ const receivedInput = (utils: Awaited<ReturnType<typeof renderTransfer>>) =>
 describe("AddTransactionScreen — transfers", () => {
   beforeEach(() => {
     jest.clearAllMocks();
+    mockRouteParams = { mode: "transfer" };
     (endpoints.recordTransfer as jest.Mock).mockResolvedValue({ success: true, data: {} });
   });
 
@@ -197,5 +204,126 @@ describe("AddTransactionScreen — transfers", () => {
     fireEvent.press(utils.getByText("Save"));
     await waitFor(() => expect(endpoints.recordTransfer).toHaveBeenCalledTimes(2));
     expect((endpoints.recordTransfer as jest.Mock).mock.calls[1][0]).toMatchObject({ receivedAmount: 93.1 });
+  });
+});
+
+// ─── Editing an existing pair ───────────────────────────────────────────────
+const sameCurrencySeed = {
+  transactionId: 42,
+  fromAccountId: 1,
+  toAccountId: 3,
+  fromCurrency: "USD",
+  toCurrency: "USD",
+  enteredAmount: 250,
+  receivedAmount: 250,
+  date: "2026-09-14",
+  note: "Rent float",
+};
+const crossCurrencySeed = {
+  ...sameCurrencySeed,
+  transactionId: 77,
+  toAccountId: 2,
+  toCurrency: "EUR",
+  enteredAmount: 100,
+  receivedAmount: 91.37,
+};
+
+describe("AddTransactionScreen — editing a transfer pair", () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+    (endpoints.updateTransfer as jest.Mock).mockResolvedValue({ success: true, data: { ok: true } });
+  });
+
+  it("opens pre-filled from both legs and PUTs a same-currency pair", async () => {
+    mockRouteParams = { mode: "transfer", editTransfer: sameCurrencySeed };
+    setupAccounts([usdChequing, eurSavings, usdSavings]);
+    const utils = await renderTransfer();
+    expect(utils.getByText("Edit Transfer")).toBeTruthy();
+    expect(utils.queryByText("Expense")).toBeNull(); // no mode switch on an edit
+    expect(utils.getByLabelText("Amount").props.value).toBe("250");
+    expect(utils.getByDisplayValue("2026-09-14")).toBeTruthy();
+    expect(utils.getByText("A Chequing")).toBeTruthy();
+    expect(utils.getByText("B USD Savings")).toBeTruthy();
+    expect(utils.getByLabelText("Note").props.value).toBe("Rent float");
+    expect(utils.queryByText(/AMOUNT RECEIVED/)).toBeNull();
+    // Edit mode reads accounts with archived ones included.
+    expect(endpoints.getAccountsDetailed).toHaveBeenCalled();
+
+    fireEvent.changeText(utils.getByLabelText("Amount"), "275");
+    fireEvent.press(utils.getByText("Save"));
+    await waitFor(() => expect(endpoints.updateTransfer).toHaveBeenCalledTimes(1));
+    expect(endpoints.updateTransfer).toHaveBeenCalledWith({
+      transactionId: 42,
+      fromAccountId: 1,
+      toAccountId: 3,
+      enteredAmount: 275,
+      date: "2026-09-14",
+      note: "Rent float",
+    });
+    expect(endpoints.recordTransfer).not.toHaveBeenCalled();
+    expect(endpoints.getFxPreview).not.toHaveBeenCalled();
+    // Back past the stale detail screen.
+    await waitFor(() => expect(mockPop).toHaveBeenCalledWith(2));
+  });
+
+  it("keeps a cross-currency pair's booked amount received and PUTs it", async () => {
+    mockRouteParams = { mode: "transfer", editTransfer: crossCurrencySeed };
+    setupAccounts([usdChequing, eurSavings]);
+    (endpoints.getFxPreview as jest.Mock).mockResolvedValue(preview(92));
+    const utils = await renderTransfer();
+    expect(receivedInput(utils).props.value).toBe("91.37");
+    expect(utils.getByText("rate 0.913700 · as booked")).toBeTruthy();
+    expect(utils.getByText(/Saved from the original transfer/)).toBeTruthy();
+
+    // The market-rate preview lands but never replaces the booked amount.
+    await waitFor(() => expect(endpoints.getFxPreview).toHaveBeenCalled());
+    await waitFor(() => expect(utils.getByText(/Market rate on .*: 0\.920000 \(yahoo\)/)).toBeTruthy());
+    expect(receivedInput(utils).props.value).toBe("91.37");
+
+    fireEvent.press(utils.getByText("Save"));
+    await waitFor(() => expect(endpoints.updateTransfer).toHaveBeenCalledTimes(1));
+    expect(endpoints.updateTransfer).toHaveBeenCalledWith(
+      expect.objectContaining({
+        transactionId: 77,
+        fromAccountId: 1,
+        toAccountId: 2,
+        enteredAmount: 100,
+        receivedAmount: 91.37,
+        date: "2026-09-14",
+      }),
+    );
+  });
+
+  it("drops the 'as booked' label once the amounts change", async () => {
+    mockRouteParams = { mode: "transfer", editTransfer: crossCurrencySeed };
+    setupAccounts([usdChequing, eurSavings]);
+    (endpoints.getFxPreview as jest.Mock).mockResolvedValue(preview(92));
+    const utils = await renderTransfer();
+    fireEvent.changeText(receivedInput(utils), "90");
+    expect(utils.getByText("rate 0.900000 · entered")).toBeTruthy();
+    expect(utils.getByText(/Pre-filled from market FX/)).toBeTruthy();
+  });
+
+  it("leaves an encrypted (unreadable) note alone unless retyped", async () => {
+    mockRouteParams = { mode: "transfer", editTransfer: { ...sameCurrencySeed, note: null } };
+    setupAccounts([usdChequing, usdSavings]);
+    const utils = await renderTransfer();
+    expect(utils.getByLabelText("Note").props.value).toBe("");
+    fireEvent.press(utils.getByText("Save"));
+    await waitFor(() => expect(endpoints.updateTransfer).toHaveBeenCalledTimes(1));
+    expect((endpoints.updateTransfer as jest.Mock).mock.calls[0][0]).not.toHaveProperty("note");
+  });
+
+  it("shows the server's error and stays open when the PUT is refused", async () => {
+    const alertSpy = jest.spyOn(Alert, "alert");
+    mockRouteParams = { mode: "transfer", editTransfer: sameCurrencySeed };
+    setupAccounts([usdChequing, usdSavings]);
+    (endpoints.updateTransfer as jest.Mock).mockResolvedValueOnce({ success: false, error: "Transfer not found" });
+    const utils = await renderTransfer();
+    fireEvent.press(utils.getByText("Save"));
+    await waitFor(() => expect(alertSpy).toHaveBeenCalledWith("Error", "Transfer not found"));
+    expect(mockPop).not.toHaveBeenCalled();
+    expect(mockGoBack).not.toHaveBeenCalled();
+    expect(utils.getByText("Edit Transfer")).toBeTruthy();
   });
 });

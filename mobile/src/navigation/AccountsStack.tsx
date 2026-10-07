@@ -8,6 +8,7 @@ import AddTransactionScreen from "../screens/AddTransactionScreen";
 // cast to ComponentType to mount it in this stack without duplicating its type.
 import TransactionDetailScreen from "../screens/TransactionDetailScreen";
 import type { AccountBalance, AccountDetailRow, Transaction } from "../../../shared/types";
+import type { TransferEditSeed } from "../lib/transfer-pair";
 
 export type AccountsStackParamList = {
   AccountsList: undefined;
@@ -17,6 +18,8 @@ export type AccountsStackParamList = {
   AddTransaction: {
     mode?: "expense" | "income" | "transfer";
     preselectedAccountId?: number;
+    // Edit an existing transfer pair (opened from TransactionDetail).
+    editTransfer?: TransferEditSeed;
   };
   // Transaction view/edit screen reused from the Transactions tab.
   TransactionDetail: { transaction: Transaction };

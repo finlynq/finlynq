@@ -339,6 +339,27 @@ describe("API Client", () => {
       });
     });
 
+    it("getLinkedTransactions unwraps the bare { data } list", async () => {
+      const rows = [{ id: 10, date: "2026-09-14", accountId: 1, categoryId: 5, currency: "USD", amount: -100 }];
+      mockFetch.mockResolvedValue({ ok: true, status: 200, json: () => Promise.resolve({ data: rows }) });
+      const res = await endpoints.getLinkedTransactions("5b0c6a3e-1f2d-4c3b-9a8e-7d6f5e4c3b2a", 11);
+      expect(mockFetch).toHaveBeenCalledWith(
+        "http://localhost:3000/api/transactions/linked?linkId=5b0c6a3e-1f2d-4c3b-9a8e-7d6f5e4c3b2a&excludeId=11",
+        expect.any(Object)
+      );
+      expect(res).toEqual({ success: true, data: rows });
+    });
+
+    it("updateTransfer PUTs the pair edit", async () => {
+      mockFetch.mockResolvedValue({ ok: true, status: 200, json: () => Promise.resolve({ ok: true }) });
+      const payload = { transactionId: 11, fromAccountId: 1, toAccountId: 2, enteredAmount: 100, receivedAmount: 91.37, date: "2026-09-14" };
+      await endpoints.updateTransfer(payload);
+      expect(mockFetch).toHaveBeenCalledWith(
+        "http://localhost:3000/api/transactions/transfer",
+        expect.objectContaining({ method: "PUT", body: JSON.stringify(payload) })
+      );
+    });
+
     it("deleteTransaction calls correct path", async () => {
       await endpoints.deleteTransaction(42);
       expect(mockFetch).toHaveBeenCalledWith(

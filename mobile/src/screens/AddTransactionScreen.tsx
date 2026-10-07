@@ -27,6 +27,7 @@ import {
 import { Icon } from "../components/icon";
 import { PickerSheet, type PickerOption } from "../components/picker-sheet";
 import type { Account, Category } from "../../../shared/types";
+import type { TransferEditSeed } from "../lib/transfer-pair";
 
 type Mode = "expense" | "income" | "transfer";
 
@@ -47,16 +48,21 @@ function todayStr(): string {
 }
 
 // Read-only nav surface this screen needs — keeps it usable from any stack
-// (Transactions and More both register it).
+// (Transactions, Accounts and More all register it). `editTransfer` turns the
+// Transfer form into an editor for an existing pair (from TransactionDetail).
 type AddRoute = RouteProp<
-  { AddTransaction?: { mode?: Mode; preselectedAccountId?: number } },
+  { AddTransaction?: { mode?: Mode; preselectedAccountId?: number; editTransfer?: TransferEditSeed } },
   "AddTransaction"
 >;
 
 export default function AddTransactionScreen() {
   const { colors } = useTheme();
-  const navigation = useNavigation<{ goBack: () => void }>();
+  const navigation = useNavigation<{ goBack: () => void; pop?: (count?: number) => void }>();
   const route = useRoute<AddRoute>();
+  // Editing an existing transfer pair: same form, pre-filled from both legs,
+  // saved with PUT /api/transactions/transfer (rewrites both legs at once).
+  const editSeed = route.params?.editTransfer ?? null;
+  const seedCrossCurrency = !!editSeed && editSeed.fromCurrency !== editSeed.toCurrency;
 
   const [accounts, setAccounts] = useState<Account[]>([]);
   const [categories, setCategories] = useState<Category[]>([]);
@@ -65,34 +71,45 @@ export default function AddTransactionScreen() {
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
 
-  const [mode, setMode] = useState<Mode>(route.params?.mode ?? "expense");
+  const [mode, setMode] = useState<Mode>(editSeed ? "transfer" : route.params?.mode ?? "expense");
 
   // Shared form state
-  const [date, setDate] = useState(todayStr());
-  const [amount, setAmount] = useState("");
+  const [date, setDate] = useState(editSeed?.date ?? todayStr());
+  const [amount, setAmount] = useState(editSeed ? String(editSeed.enteredAmount) : "");
   const [payee, setPayee] = useState("");
-  const [note, setNote] = useState("");
+  const [note, setNote] = useState(editSeed?.note ?? "");
+  // An edited pair whose note only came back encrypted keeps it unless retyped.
+  const noteTouched = useRef(false);
   const [tags, setTags] = useState("");
   const [selectedAccountId, setSelectedAccountId] = useState<number | null>(null);
   const [selectedCategoryId, setSelectedCategoryId] = useState<number | null>(null);
 
   // Transfer-only state
-  const [fromAccountId, setFromAccountId] = useState<number | null>(null);
-  const [toAccountId, setToAccountId] = useState<number | null>(null);
+  const [fromAccountId, setFromAccountId] = useState<number | null>(editSeed?.fromAccountId ?? null);
+  const [toAccountId, setToAccountId] = useState<number | null>(editSeed?.toAccountId ?? null);
   // Cross-currency transfers: what arrived in the To account, in ITS currency.
   // Pre-filled from the market-rate preview until the user edits it; once
   // touched it is never overwritten (a ref, so a preview still in flight when
-  // the user types sees the edit too).
-  const [receivedAmount, setReceivedAmount] = useState("");
-  const receivedTouched = useRef(false);
+  // the user types sees the edit too). An edited pair starts with the amount
+  // its destination leg booked, already "touched" so no preview replaces it.
+  const [receivedAmount, setReceivedAmount] = useState(
+    seedCrossCurrency && editSeed ? String(editSeed.receivedAmount) : "",
+  );
+  const receivedTouched = useRef(seedCrossCurrency);
   const [fxPreview, setFxPreview] = useState<FxPreviewState>({ state: "idle" });
 
   // Which picker sheet is open, if any.
   const [openPicker, setOpenPicker] = useState<null | "account" | "category" | "from" | "to">(null);
 
   useEffect(() => {
+    // Editing a pair reads the detailed list (archived accounts included) so a
+    // pair on an archived account still resolves; create keeps /api/accounts.
+    const pairIds = new Set<number>(editSeed ? [editSeed.fromAccountId, editSeed.toAccountId] : []);
+    const accountsRequest = (
+      editSeed ? endpoints.getAccountsDetailed() : endpoints.getAccounts()
+    ) as ReturnType<typeof endpoints.getAccounts>;
     Promise.all([
-      endpoints.getAccounts(),
+      accountsRequest,
       endpoints.getCategories(),
       endpoints.getAccountBalances(),
       // Fetch the user's saved picker order so account + category pickers mirror
@@ -127,14 +144,18 @@ export default function AddTransactionScreen() {
           balRes.success ? balRes.data.filter((b) => b.archived).map((b) => b.accountId) : []
         );
         if (accRes.success) {
+          for (const a of accRes.data as Array<Account & { archived?: boolean }>) {
+            if (a.archived) archivedIds.add(a.id);
+          }
+          // An edited pair always offers its own two accounts.
           const usable = accRes.data.filter(
-            (a) => !investmentIds.has(a.id) && !archivedIds.has(a.id),
+            (a) => pairIds.has(a.id) || (!investmentIds.has(a.id) && !archivedIds.has(a.id)),
           );
           setAccounts(usable);
           setHasInvestment(
             accRes.data.some((a) => investmentIds.has(a.id) && !archivedIds.has(a.id)),
           );
-          if (usable.length > 0) {
+          if (usable.length > 0 && !editSeed) {
             const nameFallback = (a: (typeof usable)[number], b: (typeof usable)[number]) =>
               safeName(a.name).localeCompare(safeName(b.name));
             // Default = the FIRST account in the SORTED picker list (saved
@@ -190,10 +211,15 @@ export default function AddTransactionScreen() {
 
   // An amount received typed for one currency pair means nothing for another:
   // when the pair changes, drop it and let the preview fill the new one.
+  // Arriving from NO pair (accounts still loading, or a same-currency pair
+  // whose value was already dropped) leaves nothing stale, and resetting
+  // there would wipe an edited pair's booked amount on first load.
   const lastFxPair = useRef(fxPair);
   useEffect(() => {
-    if (lastFxPair.current === fxPair) return;
+    const previous = lastFxPair.current;
+    if (previous === fxPair) return;
     lastFxPair.current = fxPair;
+    if (previous === "") return;
     receivedTouched.current = false;
     setReceivedAmount("");
   }, [fxPair]);
@@ -360,17 +386,32 @@ export default function AddTransactionScreen() {
 
     setSaving(true);
     try {
-      const res = await endpoints.recordTransfer({
-        fromAccountId,
-        toAccountId,
-        enteredAmount: Math.abs(parsedAmount),
-        date,
-        note: note || undefined,
-        ...(received != null ? { receivedAmount: received } : {}),
-      });
+      const res = editSeed
+        ? await endpoints.updateTransfer({
+            transactionId: editSeed.transactionId,
+            fromAccountId,
+            toAccountId,
+            enteredAmount: Math.abs(parsedAmount),
+            date,
+            // "" clears the note; an unreadable (encrypted) one is left as is.
+            ...(editSeed.note !== null || noteTouched.current ? { note } : {}),
+            ...(received != null ? { receivedAmount: received } : {}),
+          })
+        : await endpoints.recordTransfer({
+            fromAccountId,
+            toAccountId,
+            enteredAmount: Math.abs(parsedAmount),
+            date,
+            note: note || undefined,
+            ...(received != null ? { receivedAmount: received } : {}),
+          });
       if (res.success) {
-        logger.info("add-tx", "transfer created", { crossCurrency: isCrossCurrency });
-        navigation.goBack();
+        logger.info("add-tx", editSeed ? "transfer updated" : "transfer created", {
+          crossCurrency: isCrossCurrency,
+        });
+        // An edit returns past the (now stale) detail screen.
+        if (editSeed && navigation.pop) navigation.pop(2);
+        else navigation.goBack();
       } else if (res.code === "fx-currency-needs-override") {
         logger.warn("add-tx", "transfer needs an amount received", { error: res.error });
         setFxPreview({ state: "needs-override" });
@@ -380,7 +421,10 @@ export default function AddTransactionScreen() {
         );
       } else {
         logger.warn("add-tx", "transfer rejected", { error: res.error });
-        Alert.alert("Error", "error" in res ? res.error : "Failed to create transfer");
+        Alert.alert(
+          "Error",
+          "error" in res ? res.error : editSeed ? "Failed to save transfer" : "Failed to create transfer",
+        );
       }
     } catch (e) {
       const detail = e instanceof Error ? `${e.name}: ${e.message}` : String(e);
@@ -403,7 +447,7 @@ export default function AddTransactionScreen() {
   // Don't strand them on an unusable form — point at the create flows + the
   // one-tap sample-data shortcut. The list screens (Accounts → + Add, More →
   // Categories → + Add) are the primary path.
-  if (accounts.length === 0 || categories.length === 0) {
+  if (accounts.length === 0 || (!editSeed && categories.length === 0)) {
     return (
       <SafeAreaView style={[styles.safe, { backgroundColor: colors.background }]} edges={["top"]}>
         <View style={[styles.topBar, { borderBottomColor: colors.border }]}>
@@ -485,9 +529,19 @@ export default function AddTransactionScreen() {
       !!preview &&
       impliedRate != null &&
       (Math.abs(recvNum - preview.converted) < 0.005 || Math.abs(impliedRate - preview.rate) < 1e-6);
+    // Editing a pair whose amounts and accounts are still the ones it was saved with.
+    const isAsBooked =
+      !!editSeed &&
+      seedCrossCurrency &&
+      impliedRate != null &&
+      fromAccountId === editSeed.fromAccountId &&
+      toAccountId === editSeed.toAccountId &&
+      Math.abs(sentNum - editSeed.enteredAmount) < 0.005 &&
+      Math.abs(recvNum - editSeed.receivedAmount) < 0.005;
+    const rateSource = isAsBooked ? "as booked" : matchesPreview && preview ? preview.source : "entered";
     const caption =
       impliedRate != null
-        ? `rate ${impliedRate.toFixed(6)} · ${matchesPreview && preview ? preview.source : "entered"}`
+        ? `rate ${impliedRate.toFixed(6)} · ${rateSource}`
         : fxPreview.state === "loading"
           ? "Calculating…"
           : preview
@@ -519,8 +573,10 @@ export default function AddTransactionScreen() {
           accessibilityLabel={`Amount received in ${toCurrency}`}
         />
         <Text style={[styles.fxNote, { color: colors.mutedForeground }]}>
-          The amount above leaves {safeName(fromAccount?.name, "the From account")} in {fromCurrency}. Pre-filled
-          from market FX. Override with the actual amount your bank credited.
+          The amount above leaves {safeName(fromAccount?.name, "the From account")} in {fromCurrency}.{" "}
+          {isAsBooked
+            ? "Saved from the original transfer. Override with the actual amount your bank credited."
+            : "Pre-filled from market FX. Override with the actual amount your bank credited."}
         </Text>
         {preview && impliedRate != null && !matchesPreview ? (
           <Text style={[styles.fxNote, { color: colors.mutedForeground }]}>
@@ -552,7 +608,7 @@ export default function AddTransactionScreen() {
             <Text style={[styles.backBtn, { color: colors.primary }]}>Cancel</Text>
           </TouchableOpacity>
           <Text style={[styles.title, { color: colors.foreground }]}>
-            {isTransfer ? "Transfer" : "Add Transaction"}
+            {editSeed ? "Edit Transfer" : isTransfer ? "Transfer" : "Add Transaction"}
           </Text>
           <TouchableOpacity
             onPress={isTransfer ? handleSaveTransfer : handleSaveEntry}
@@ -567,7 +623,9 @@ export default function AddTransactionScreen() {
         </View>
 
         <ScrollView contentContainerStyle={styles.scroll}>
-          {/* Segmented control: Expense / Income / Transfer */}
+          {/* Segmented control: Expense / Income / Transfer. An edited
+              transfer stays a transfer, so it has none. */}
+          {!editSeed && (
           <View style={[styles.toggleRow, { backgroundColor: colors.secondary }]}>
             {segments.map((seg) => {
               const active = mode === seg.key;
@@ -589,6 +647,7 @@ export default function AddTransactionScreen() {
               );
             })}
           </View>
+          )}
 
           {/* Amount */}
           <View style={[styles.amountCard, { backgroundColor: colors.card, borderColor: colors.border }]}>
@@ -601,7 +660,7 @@ export default function AddTransactionScreen() {
               keyboardType="decimal-pad"
               placeholder="0.00"
               placeholderTextColor={colors.mutedForeground}
-              autoFocus
+              autoFocus={!editSeed}
             />
           </View>
 
@@ -689,8 +748,12 @@ export default function AddTransactionScreen() {
                   { color: colors.foreground, backgroundColor: colors.secondary, borderColor: colors.border, minHeight: 60, textAlignVertical: "top" },
                 ]}
                 value={note}
-                onChangeText={setNote}
-                placeholder="Optional note"
+                onChangeText={(v) => {
+                  noteTouched.current = true;
+                  setNote(v);
+                }}
+                accessibilityLabel="Note"
+                placeholder={editSeed && editSeed.note === null ? "Unchanged (type to replace)" : "Optional note"}
                 placeholderTextColor={colors.mutedForeground}
                 multiline
               />

@@ -61,6 +61,35 @@ export interface Transaction {
    *  does NOT currently populate this — mobile fetches splits per-tx on the
    *  detail screen. Kept optional for forward-compat with a future list field. */
   hasSplits?: boolean;
+  /** Shared by the two legs of a transfer (and other multi-leg imports).
+   *  Server-generated; GET /api/transactions returns it on every row. */
+  linkId?: string | null;
+  /** Row kind (e.g. "transfer", "buy", "brokerage_deposit_out"); null on
+   *  plain rows. Portfolio kinds are edited as portfolio operations. */
+  kind?: string | null;
+  portfolioHoldingId?: number | null;
+}
+
+/** GET /api/transactions/linked?linkId=…&excludeId=… row — the other legs
+ *  sharing a link id. Soft-DEK: payee/note/names can come back as `v1:`
+ *  ciphertext when the DEK is cold; amounts, accounts and dates never do. */
+export interface LinkedTransaction {
+  id: number;
+  date: string;
+  accountId: number | null;
+  accountName?: string | null;
+  accountCurrency?: string | null;
+  categoryId: number | null;
+  currency: string;
+  amount: number;
+  enteredAmount?: number | null;
+  enteredCurrency?: string | null;
+  quantity?: number | null;
+  portfolioHoldingId?: number | null;
+  payee?: string | null;
+  note?: string | null;
+  tags?: string | null;
+  linkId?: string | null;
 }
 
 /**
@@ -873,6 +902,22 @@ export interface TransferPayload {
   /** Cross-currency only: what arrived in the To account, in ITS currency.
    *  Omitted → the server converts at the market rate for the date (409
    *  `fx-currency-needs-override` when it has none). */
+  receivedAmount?: number;
+  date?: string;
+  note?: string;
+  tags?: string;
+}
+
+/** PUT /api/transactions/transfer — rewrites BOTH legs of a pair atomically.
+ *  Identify the pair by either leg's `transactionId` (or its `linkId`);
+ *  omitted fields keep their current values. */
+export interface TransferUpdatePayload {
+  transactionId?: number;
+  linkId?: string;
+  fromAccountId?: number;
+  toAccountId?: number;
+  enteredAmount?: number;
+  /** Cross-currency only, To account's currency. */
   receivedAmount?: number;
   date?: string;
   note?: string;

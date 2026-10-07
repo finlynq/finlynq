@@ -17,6 +17,7 @@ import { endpoints } from "../api/client";
 import { logger } from "../lib/logger";
 import { formatCurrency as formatCurrencyBase } from "../lib/format";
 import { Icon } from "../components/icon";
+import { resolveTransferPair, type TransferEditSeed } from "../lib/transfer-pair";
 import type { Transaction, Account, Category } from "../../../shared/types";
 import type { NativeStackScreenProps } from "@react-navigation/native-stack";
 import type { TransactionsStackParamList } from "../navigation/TransactionsStack";
@@ -46,6 +47,51 @@ export default function TransactionDetailScreen({ route, navigation }: Props) {
   const [tags, setTags] = useState(transaction.tags || "");
   const [selectedAccountId, setSelectedAccountId] = useState(transaction.accountId);
   const [selectedCategoryId, setSelectedCategoryId] = useState(transaction.categoryId);
+
+  // Portfolio-op rows (buys/sells/transfers/swaps/income/etc.) carry a quantity
+  // or a holding link. Editing them through the generic transactions PUT would
+  // corrupt the leg pair — route them to the dedicated Portfolio OperationForm
+  // instead (the load endpoint resolves the op kind + primary leg id).
+  const isPortfolioRow =
+    (transaction.quantity != null && transaction.quantity !== 0) ||
+    transaction.portfolioHolding != null;
+
+  // A transfer leg (linkId + exactly one partner in another account) is edited
+  // as a PAIR in the Transfer form (PUT /api/transactions/transfer rewrites both
+  // legs). Anything else, an orphaned leg included, keeps the generic edit.
+  const linkId = !isPortfolioRow ? transaction.linkId ?? null : null;
+  const [pairLookup, setPairLookup] = useState<"loading" | "done">(linkId ? "loading" : "done");
+  const [transferSeed, setTransferSeed] = useState<TransferEditSeed | null>(null);
+
+  useEffect(() => {
+    if (!linkId) return;
+    let cancelled = false;
+    endpoints
+      .getLinkedTransactions(linkId, transaction.id)
+      .then((res) => {
+        if (cancelled) return;
+        if (res.success) setTransferSeed(resolveTransferPair(transaction, res.data));
+        else logger.warn("tx-detail", "linked fetch failed", { id: transaction.id, error: res.error });
+      })
+      .catch((e) => {
+        const detail = e instanceof Error ? `${e.name}: ${e.message}` : String(e);
+        logger.warn("tx-detail", "linked fetch threw", { detail });
+      })
+      .finally(() => {
+        if (!cancelled) setPairLookup("done");
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [linkId, transaction]);
+
+  const handleEdit = () => {
+    if (transferSeed) {
+      navigation.navigate("AddTransaction", { mode: "transfer", editTransfer: transferSeed });
+    } else {
+      setEditing(true);
+    }
+  };
 
   useEffect(() => {
     // Include archived accounts so a transaction on one still shows its own
@@ -121,6 +167,11 @@ export default function TransactionDetailScreen({ route, navigation }: Props) {
         logger.info("tx-detail", "transaction updated", { id: transaction.id });
         setEditing(false);
         navigation.goBack();
+      } else if (res.code === "transfer_leg_edit_refused") {
+        // The server won't move one leg of a transfer on its own (amount,
+        // account, date or currency). Say why; the form stays open.
+        logger.warn("tx-detail", "transfer leg edit refused", { id: transaction.id });
+        Alert.alert("Part of a transfer", res.error);
       } else {
         logger.warn("tx-detail", "update rejected", { id: transaction.id, error: res.error });
         Alert.alert("Error", "error" in res ? res.error : "Failed to save");
@@ -133,14 +184,6 @@ export default function TransactionDetailScreen({ route, navigation }: Props) {
       setSaving(false);
     }
   };
-
-  // Portfolio-op rows (buys/sells/transfers/swaps/income/etc.) carry a quantity
-  // or a holding link. Editing them through the generic transactions PUT would
-  // corrupt the leg pair — route them to the dedicated Portfolio OperationForm
-  // instead (the load endpoint resolves the op kind + primary leg id).
-  const isPortfolioRow =
-    (transaction.quantity != null && transaction.quantity !== 0) ||
-    transaction.portfolioHolding != null;
 
   const handleEditInPortfolio = async () => {
     try {
@@ -289,7 +332,9 @@ export default function TransactionDetailScreen({ route, navigation }: Props) {
           <TouchableOpacity onPress={() => navigation.goBack()}>
             <Text style={[styles.backBtn, { color: colors.primary }]}>← Back</Text>
           </TouchableOpacity>
-          <Text style={[styles.title, { color: colors.foreground }]}>Transaction</Text>
+          <Text style={[styles.title, { color: colors.foreground }]}>
+            {transferSeed ? "Transfer" : "Transaction"}
+          </Text>
           <View style={styles.topActions}>
             {editing ? (
               <>
@@ -317,9 +362,14 @@ export default function TransactionDetailScreen({ route, navigation }: Props) {
                     <TouchableOpacity onPress={handleSplit}>
                       <Text style={[styles.actionBtn, { color: colors.primary }]}>Split</Text>
                     </TouchableOpacity>
-                    <TouchableOpacity onPress={() => setEditing(true)}>
-                      <Text style={[styles.actionBtn, { color: colors.primary }]}>Edit</Text>
-                    </TouchableOpacity>
+                    {pairLookup === "loading" ? (
+                      // Still finding out whether this is a transfer leg.
+                      <ActivityIndicator size="small" color={colors.primary} accessibilityLabel="Checking transfer" />
+                    ) : (
+                      <TouchableOpacity onPress={handleEdit}>
+                        <Text style={[styles.actionBtn, { color: colors.primary }]}>Edit</Text>
+                      </TouchableOpacity>
+                    )}
                   </>
                 )}
                 <TouchableOpacity onPress={handleDelete}>

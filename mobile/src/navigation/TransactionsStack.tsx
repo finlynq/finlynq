@@ -5,11 +5,13 @@ import TransactionDetailScreen from "../screens/TransactionDetailScreen";
 import AddTransactionScreen from "../screens/AddTransactionScreen";
 import SplitsEditorScreen from "../screens/SplitsEditorScreen";
 import type { Transaction } from "../../../shared/types";
+import type { TransferEditSeed } from "../lib/transfer-pair";
 
 export type TransactionsStackParamList = {
   TransactionsList: undefined;
   TransactionDetail: { transaction: Transaction };
-  AddTransaction: { mode?: "expense" | "income" | "transfer" } | undefined;
+  // `editTransfer` → edit an existing transfer pair (opened from TransactionDetail).
+  AddTransaction: { mode?: "expense" | "income" | "transfer"; editTransfer?: TransferEditSeed } | undefined;
   // Edit splits for an already-saved transaction. totalAmount carries the
   // parent's sign; the editor works in magnitudes and re-applies it on save.
   SplitsEditor: { transactionId: number; totalAmount: number; currency: string };

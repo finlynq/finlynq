@@ -387,6 +387,8 @@ import type {
   CategoryDetailResponse,
   TransactionsCalendarResponse,
   FxPreview,
+  LinkedTransaction,
+  TransferUpdatePayload,
 } from "../../../shared/types";
 
 // Shared report query params. The date range + business + display currency are
@@ -737,6 +739,17 @@ export const endpoints = {
   // res.code) when it has no rate and the user must enter the amount received.
   recordTransfer: (payload: TransferPayload) =>
     api.post<unknown>("/api/transactions/transfer", payload),
+  // Edit a transfer PAIR: rewrites both legs atomically (same 409 contract).
+  updateTransfer: (payload: TransferUpdatePayload) =>
+    api.put<unknown>("/api/transactions/transfer", payload),
+  // The other legs sharing a link id (a transfer has exactly one). The route
+  // returns bare `{ data: [...] }`, so unwrap to the array like getTransactions.
+  getLinkedTransactions: async (linkId: string, excludeId: number): Promise<ApiResponse<LinkedTransaction[]>> => {
+    const q = new URLSearchParams({ linkId, excludeId: String(excludeId) });
+    const res = await api.get<{ data?: LinkedTransaction[] }>(`/api/transactions/linked?${q.toString()}`);
+    if (!res.success) return res;
+    return { success: true, data: Array.isArray(res.data?.data) ? res.data.data : [] };
+  },
 
   // FX conversion preview (read-only; plain JSON, request() wraps it).
   getFxPreview: (p: { from: string; to: string; date?: string; amount?: number }) => {
