@@ -280,6 +280,34 @@ describe("API Client", () => {
       );
     });
 
+    it("getTransactionsCalendar requests one month and passes the envelope through", async () => {
+      const payload = {
+        month: "2026-07",
+        displayCurrency: "USD",
+        days: [{ date: "2026-07-04", income: 0, spending: 115.4, count: 2 }],
+        totals: { income: 0, spending: 115.4, count: 2 },
+      };
+      mockFetch.mockResolvedValue({
+        ok: true,
+        status: 200,
+        json: () => Promise.resolve({ success: true, data: payload }),
+      });
+      const res = await endpoints.getTransactionsCalendar("2026-07");
+      expect(mockFetch).toHaveBeenCalledWith(
+        "http://localhost:3000/api/transactions/calendar?month=2026-07",
+        expect.any(Object)
+      );
+      expect(res).toEqual({ success: true, data: payload });
+    });
+
+    it("getTransactionsCalendar forwards the account and category filters", async () => {
+      await endpoints.getTransactionsCalendar("2026-07", { accountId: 3, categoryId: 9 });
+      expect(mockFetch).toHaveBeenCalledWith(
+        "http://localhost:3000/api/transactions/calendar?month=2026-07&accountId=3&categoryId=9",
+        expect.any(Object)
+      );
+    });
+
     it("deleteTransaction calls correct path", async () => {
       await endpoints.deleteTransaction(42);
       expect(mockFetch).toHaveBeenCalledWith(

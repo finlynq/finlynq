@@ -1299,3 +1299,26 @@ export interface CategoryDetailResponse {
   topPayees: { payee: string; amount: number; count: number; share: number }[];
   recent: { id: number; date: string; payee: string | null; amount: number; currency: string; accountName: string | null }[];
 }
+
+// ─── Transactions calendar (2026-10) ────────────────────────────────────────
+// GET /api/transactions/calendar?month=YYYY-MM[&accountId=][&categoryId=].
+// apiHandler envelope `{ success, data }` (request() passes it through, so
+// `res.data` is the payload below). Only days WITH transactions appear in
+// `days`. Amounts are already in `displayCurrency` and follow the Reports flow
+// rules: `income` = income-category rows, `spending` = expense-category rows
+// oriented positive (negative when refunds exceed spend); transfers and
+// investment trades are in `count` but move neither total.
+
+export interface TransactionsCalendarDay {
+  date: string;
+  income: number;
+  spending: number;
+  count: number;
+}
+
+export interface TransactionsCalendarResponse {
+  month: string;
+  displayCurrency: string;
+  days: TransactionsCalendarDay[];
+  totals: { income: number; spending: number; count: number };
+}

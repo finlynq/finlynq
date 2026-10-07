@@ -379,6 +379,7 @@ import type {
   RecurringResponse,
   CategoryOverviewResponse,
   CategoryDetailResponse,
+  TransactionsCalendarResponse,
 } from "../../../shared/types";
 
 // Shared report query params. The date range + business + display currency are
@@ -583,6 +584,16 @@ export const endpoints = {
     api.put<Transaction>("/api/transactions", data),
   deleteTransaction: (id: number) =>
     api.delete<void>(`/api/transactions?id=${id}`),
+  // Per-day income / spending / count for one `YYYY-MM` month — the Calendar
+  // view of the Transactions tab. ENVELOPED `{ success, data }` (apiHandler);
+  // request() passes it through, so res.data is the payload. 404 on a server
+  // older than the 2026-10 web release.
+  getTransactionsCalendar: (month: string, opts?: { accountId?: number; categoryId?: number }) => {
+    const q = new URLSearchParams({ month });
+    if (opts?.accountId != null) q.set("accountId", String(opts.accountId));
+    if (opts?.categoryId != null) q.set("categoryId", String(opts.categoryId));
+    return api.get<TransactionsCalendarResponse>(`/api/transactions/calendar?${q.toString()}`);
+  },
 
   // Transaction splits — view metadata that divides a parent across rows. All
   // three return bare JSON: GET → Split[] (decrypted), POST → Split[] (201,

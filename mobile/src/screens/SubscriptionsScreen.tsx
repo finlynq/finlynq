@@ -22,6 +22,9 @@ import { endpoints } from "../api/client";
 import { logger } from "../lib/logger";
 import { formatCurrency, formatShortDate, initial, safeName } from "../lib/format";
 import { Icon } from "../components/icon";
+import { MonthCalendar } from "../components/MonthCalendar";
+import { StatTile as Tile } from "../components/StatTile";
+import { dayTitle, daysInMonth, isoDay, shiftYearMonth } from "../lib/month-calendar";
 import {
   FREQUENCY_LABELS,
   FREQUENCY_SUFFIX,
@@ -46,8 +49,6 @@ type View_ = "list" | "calendar";
 
 const DUE_SOON_DAYS = 30;
 const SUGGESTIONS_PREVIEW = 3;
-const DAY_NAMES = ["S", "M", "T", "W", "T", "F", "S"];
-const pad = (n: number) => String(n).padStart(2, "0");
 
 function relativeDue(date: string, today: string): string | null {
   const d = daysBetween(today, date);
@@ -189,10 +190,8 @@ export default function SubscriptionsScreen() {
   };
 
   // ── calendar data ──────────────────────────────────────────────────────────
-  const daysInMonth = new Date(Date.UTC(year, month + 1, 0)).getUTCDate();
-  const firstWeekday = new Date(Date.UTC(year, month, 1)).getUTCDay();
-  const monthStart = `${year}-${pad(month + 1)}-01`;
-  const monthEnd = `${year}-${pad(month + 1)}-${pad(daysInMonth)}`;
+  const monthStart = isoDay(year, month, 1);
+  const monthEnd = isoDay(year, month, daysInMonth(year, month));
   const events = useMemo(
     () => buildScheduleEvents(subs, recurring, monthStart, monthEnd),
     [subs, recurring, monthStart, monthEnd],
@@ -207,18 +206,18 @@ export default function SubscriptionsScreen() {
   }, [events]);
   const monthBills = events.filter((e) => e.type === "bill").reduce((s, e) => s + e.displayAmount, 0);
   const monthIncome = events.filter((e) => e.type === "income").reduce((s, e) => s + e.displayAmount, 0);
-  const isCurrentMonth = today.slice(0, 7) === monthStart.slice(0, 7);
-  const monthLabel = new Date(Date.UTC(year, month, 1)).toLocaleDateString("en-CA", {
-    month: "long",
-    year: "numeric",
-    timeZone: "UTC",
-  });
 
   const shiftMonth = (delta: number) => {
-    const total = year * 12 + month + delta;
-    setYear(Math.floor(total / 12));
-    setMonth(((total % 12) + 12) % 12);
+    const next = shiftYearMonth(year, month, delta);
+    setYear(next.year);
+    setMonth(next.month);
     setSelectedDay(null);
+  };
+
+  const goToToday = () => {
+    setYear(Number(today.slice(0, 4)));
+    setMonth(Number(today.slice(5, 7)) - 1);
+    setSelectedDay(Number(today.slice(8, 10)));
   };
 
   const eventColor = (ev: Pick<ScheduleEvent, "type" | "source">) =>
@@ -389,58 +388,26 @@ export default function SubscriptionsScreen() {
   const calendarView = (
     <>
       <View style={[styles.card, styles.calCard, { backgroundColor: colors.card, borderColor: colors.border }]}>
-        <View style={styles.calHead}>
-          <TouchableOpacity onPress={() => shiftMonth(-1)} hitSlop={10} accessibilityLabel="Previous month">
-            <Icon name="back" size={20} color={colors.foreground} />
-          </TouchableOpacity>
-          <TouchableOpacity
-            disabled={isCurrentMonth}
-            onPress={() => {
-              setYear(Number(today.slice(0, 4)));
-              setMonth(Number(today.slice(5, 7)) - 1);
-              setSelectedDay(Number(today.slice(8, 10)));
-            }}
-          >
-            <Text style={[styles.cardTitle, { color: colors.foreground }]}>{monthLabel}</Text>
-            {!isCurrentMonth && <Text style={[styles.todayLink, { color: colors.primary }]}>Back to today</Text>}
-          </TouchableOpacity>
-          <TouchableOpacity onPress={() => shiftMonth(1)} hitSlop={10} accessibilityLabel="Next month">
-            <Icon name="chevronRight" size={20} color={colors.foreground} />
-          </TouchableOpacity>
-        </View>
-        <View style={styles.weekRow}>
-          {DAY_NAMES.map((d, i) => (
-            <Text key={i} style={[styles.weekday, { color: colors.mutedForeground }]}>{d}</Text>
-          ))}
-        </View>
-        <View style={styles.grid}>
-          {Array.from({ length: firstWeekday }, (_, i) => (
-            <View key={`pad-${i}`} style={styles.cell} />
-          ))}
-          {Array.from({ length: daysInMonth }, (_, i) => {
-            const day = i + 1;
-            const dayEvents = eventsByDay.get(day) ?? [];
-            const isToday = isCurrentMonth && day === Number(today.slice(8, 10));
-            const isSelected = selectedDay === day;
-            return (
-              <TouchableOpacity
-                key={day}
-                style={[styles.cell, isSelected && { backgroundColor: colors.accent, borderRadius: 10 }]}
-                onPress={() => setSelectedDay(isSelected ? null : day)}
-                accessibilityLabel={`${monthLabel} ${day}${dayEvents.length ? `, ${dayEvents.length} payments` : ""}`}
-              >
-                <View style={[styles.dayBubble, isToday && { backgroundColor: colors.primary }]}>
-                  <Text style={[styles.dayText, { color: isToday ? colors.primaryForeground : colors.foreground }]}>{day}</Text>
-                </View>
-                <View style={styles.dots}>
-                  {dayEvents.slice(0, 3).map((ev, idx) => (
-                    <View key={idx} style={[styles.dot, { backgroundColor: eventColor(ev) }]} />
-                  ))}
-                </View>
-              </TouchableOpacity>
-            );
-          })}
-        </View>
+        <MonthCalendar
+          year={year}
+          month={month}
+          today={today}
+          selectedDay={selectedDay}
+          onSelectDay={setSelectedDay}
+          onShiftMonth={shiftMonth}
+          onToday={goToToday}
+          dayLabel={(day) => {
+            const n = eventsByDay.get(day)?.length ?? 0;
+            return n ? `${n} payments` : "";
+          }}
+          renderDay={(day) => (
+            <View style={styles.dots}>
+              {(eventsByDay.get(day) ?? []).slice(0, 3).map((ev, idx) => (
+                <View key={idx} style={[styles.dot, { backgroundColor: eventColor(ev) }]} />
+              ))}
+            </View>
+          )}
+        />
         <View style={styles.legend}>
           {[
             { label: "Subscription", color: colors.primary },
@@ -458,12 +425,7 @@ export default function SubscriptionsScreen() {
       {selectedDay !== null && (
         <View style={[styles.card, { backgroundColor: colors.card, borderColor: colors.border }]}>
           <Text style={[styles.dayTitle, { color: colors.foreground }]}>
-            {new Date(Date.UTC(year, month, selectedDay)).toLocaleDateString("en-CA", {
-              weekday: "long",
-              month: "long",
-              day: "numeric",
-              timeZone: "UTC",
-            })}
+            {dayTitle(year, month, selectedDay)}
           </Text>
           {selectedEvents.length === 0 ? (
             <Text style={[styles.rowMeta, styles.dayEmpty, { color: colors.mutedForeground }]}>Nothing expected on this day.</Text>
@@ -569,19 +531,6 @@ export default function SubscriptionsScreen() {
   );
 }
 
-function Tile({ label, value, sub, color }: { label: string; value: string; sub?: string; color?: string }) {
-  const { colors } = useTheme();
-  return (
-    <View style={[styles.tile, { backgroundColor: colors.card, borderColor: colors.border }]}>
-      <Text style={[styles.tileLabel, { color: colors.mutedForeground }]} numberOfLines={1}>{label}</Text>
-      <Text style={[styles.tileValue, { color: color ?? colors.foreground }]} numberOfLines={1} adjustsFontSizeToFit>
-        {value}
-      </Text>
-      {sub ? <Text style={[styles.tileSub, { color: colors.mutedForeground }]}>{sub}</Text> : null}
-    </View>
-  );
-}
-
 const styles = StyleSheet.create({
   safe: { flex: 1 },
   center: { flex: 1, alignItems: "center", justifyContent: "center" },
@@ -598,17 +547,6 @@ const styles = StyleSheet.create({
   addSmallBtnText: { fontSize: 14, fontWeight: "700" },
   scroll: { paddingHorizontal: 16, paddingBottom: 40 },
   tiles: { flexDirection: "row", flexWrap: "wrap", justifyContent: "space-between", marginBottom: 4 },
-  tile: {
-    width: "48.5%",
-    borderRadius: 12,
-    borderWidth: StyleSheet.hairlineWidth,
-    paddingHorizontal: 12,
-    paddingVertical: 10,
-    marginBottom: 8,
-  },
-  tileLabel: { fontSize: 12, fontWeight: "600" },
-  tileValue: { fontSize: 19, fontWeight: "800", marginTop: 2, fontVariant: ["tabular-nums"] },
-  tileSub: { fontSize: 11, marginTop: 1 },
   segment: { flexDirection: "row", borderRadius: 10, padding: 3, marginVertical: 8 },
   segmentBtn: { flex: 1, alignItems: "center", paddingVertical: 8, borderRadius: 8 },
   segmentText: { fontSize: 14, fontWeight: "700" },
@@ -639,14 +577,6 @@ const styles = StyleSheet.create({
   ctaBtnText: { fontSize: 15, fontWeight: "700" },
   hint: { fontSize: 12, textAlign: "center", marginTop: 8, lineHeight: 17, paddingHorizontal: 8 },
   calCard: { padding: 10 },
-  calHead: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", paddingHorizontal: 4, marginBottom: 8 },
-  todayLink: { fontSize: 11, fontWeight: "600", textAlign: "center", marginTop: 1 },
-  weekRow: { flexDirection: "row" },
-  weekday: { width: "14.2857%", textAlign: "center", fontSize: 11, fontWeight: "700", paddingBottom: 4 },
-  grid: { flexDirection: "row", flexWrap: "wrap" },
-  cell: { width: "14.2857%", height: 50, alignItems: "center", paddingTop: 3 },
-  dayBubble: { width: 28, height: 28, borderRadius: 14, alignItems: "center", justifyContent: "center" },
-  dayText: { fontSize: 13, fontWeight: "600" },
   dots: { flexDirection: "row", marginTop: 3, height: 6 },
   dot: { width: 6, height: 6, borderRadius: 3, marginHorizontal: 1 },
   legend: { flexDirection: "row", justifyContent: "center", flexWrap: "wrap", marginTop: 8 },
