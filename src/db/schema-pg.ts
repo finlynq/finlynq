@@ -98,6 +98,9 @@ export const categories = pgTable("categories", {
 }, (t) => [
   uniqueIndex("categories_user_name_lookup_uniq").on(t.userId, t.nameLookup),
   index("idx_categories_user_id").on(t.userId),
+  // Reports filter on these literal codes; mirror of
+  // src/lib/categories/category-type.ts CATEGORY_TYPES.
+  check("categories_type_check", sql`${t.type} IN ('E','I','R')`),
 ]);
 
 export const transactions = pgTable("transactions", {

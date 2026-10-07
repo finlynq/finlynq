@@ -1876,7 +1876,7 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
         key_tables: {
           transactions: "id, date, account_id, category_id, currency, amount, payee, note, tags",
           accounts: "id, type(A/L), group, name, currency, note",
-          categories: "id, type(E/I/T), group, name, note",
+          categories: "id, type(E/I/R), group, name, note",
           budgets: "id, category_id, month(YYYY-MM), amount",
           goals: "id, name, type, target_amount, deadline, status, account_id",
           transaction_rules: "id, name, conditions (JSONB ConditionGroup, AND-only), actions (JSONB Action[]), priority, is_active, created_at, updated_at (FINLYNQ-84)",

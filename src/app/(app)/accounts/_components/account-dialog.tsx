@@ -1,7 +1,8 @@
 "use client";
 
 import { useEffect, useRef, useState, type ReactNode } from "react";
-import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import Link from "next/link";
+import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -509,6 +510,21 @@ export function AccountDialog({
         <DialogContent className={showTabs ? "sm:max-w-xl" : undefined}>
           <DialogHeader>
             <DialogTitle>{isEdit ? "Edit Account" : "Create Account"}</DialogTitle>
+            {/* Bank feeds live in Settings, so people looking for "connect my
+                bank" here couldn't find them (in-app feedback 2026-09-15). */}
+            {!isEdit && (
+              <DialogDescription>
+                Want transactions to arrive automatically?{" "}
+                <Link
+                  href="/settings/bank-feeds"
+                  className="text-primary underline-offset-4 hover:underline"
+                  onClick={() => onOpenChange(false)}
+                >
+                  Connect your bank
+                </Link>{" "}
+                instead.
+              </DialogDescription>
+            )}
           </DialogHeader>
 
           {showTabs ? (

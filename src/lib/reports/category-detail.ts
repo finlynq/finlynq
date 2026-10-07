@@ -16,7 +16,8 @@
 
 import { round2 } from "@/lib/utils/number";
 
-export type CategoryType = "E" | "I" | "R";
+import type { CategoryType } from "@/lib/categories/category-type";
+export type { CategoryType };
 
 export interface CategoryTxRow {
   id: number;

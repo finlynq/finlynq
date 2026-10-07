@@ -11,6 +11,7 @@ import JSZip from "jszip";
 import { and, eq, inArray } from "drizzle-orm";
 import { db, schema } from "@/db";
 import { getAccounts, createAccount, updateAccount, getCategories, createCategory } from "@/lib/queries";
+import { normalizeCategoryType } from "@/lib/categories/category-type";
 import { buildNameFields } from "@/lib/crypto/encrypted-columns";
 import {
   parseWealthPositionExport,
@@ -238,7 +239,9 @@ async function materializeZipMapping(
       }
       const encCat = buildNameFields(dek ?? null, { name: desiredName });
       const created = await createCategory(userId, {
-        type: row.autoCreate.type,
+        // The mapping's type comes from the export file's own Type column;
+        // store the code (E/I/R) so the category isn't invisible to reports.
+        type: normalizeCategoryType(row.autoCreate.type) ?? "E",
         group: row.autoCreate.group,
         ...encCat,
       });

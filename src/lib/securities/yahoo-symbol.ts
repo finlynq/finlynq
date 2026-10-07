@@ -57,3 +57,20 @@ export function toYahooSymbol(symbol: string): string {
 
   return s;
 }
+
+/**
+ * Whether `symbol` (already upper-cased) is worth asking Yahoo about. Used by
+ * `/api/portfolio/symbol-info` to decide whether to try a live quote before
+ * giving up with "not recognized".
+ *
+ * The first character may be a DIGIT: Tokyo (`7203.T`), Hong Kong (`0700.HK`)
+ * and Yahoo's own fund codes (`0P0000XVYH.BO`, Indian mutual funds) all start
+ * with one. The old letter-first pattern rejected every one of them, so the
+ * holding form labelled perfectly priceable symbols "not recognized" (GH
+ * #365). A trailing `+` is the warrant notation `toYahooSymbol` maps.
+ */
+const YAHOO_TICKER_SHAPE = /^[A-Z0-9][A-Z0-9.\-]{0,14}\+?$/;
+
+export function looksLikeYahooTicker(symbol: string): boolean {
+  return YAHOO_TICKER_SHAPE.test(symbol);
+}

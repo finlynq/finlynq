@@ -5,6 +5,7 @@ import { useRouter, useSearchParams } from "next/navigation";
 import { useState, useEffect, useRef, Suspense } from "react";
 import { AnalyticsConsent } from "@/components/analytics-consent";
 import { LogoMark } from "@/components/logo-mark";
+import { isSafeNext } from "@/lib/auth/safe-redirect";
 
 type Tab = "login" | "register";
 
@@ -21,7 +22,12 @@ function CloudAuthPageInner() {
   const router = useRouter();
   const searchParams = useSearchParams();
   const initialTab = searchParams.get("tab") === "register" ? "register" : "login";
-  const redirectTo = searchParams.get("redirect") ?? "/dashboard";
+  // Same-origin paths only — the raw param used to go straight into
+  // router.push, so `?redirect=https://evil.example` was an open redirect.
+  const redirectParam = searchParams.get("redirect");
+  const redirectTo = isSafeNext(redirectParam) ? redirectParam : "/dashboard";
+  // Set by UnlockGate when the session is valid but its data key expired.
+  const sessionLocked = searchParams.get("locked") === "1";
   // ?demo=1 pre-fills the login form with the published demo credentials so
   // a marketing link can drop users one click away from Sign In. Reuses the
   // normal /api/auth/login path (no auto-submit) so the user explicitly
@@ -219,6 +225,11 @@ function CloudAuthPageInner() {
         {tab === "register" && (
           <p className="mb-8 -mt-6 text-xs text-muted-foreground/80">
             Free forever. AGPL v3. Encrypted with your password.
+          </p>
+        )}
+        {tab === "login" && sessionLocked && (
+          <p className="mb-6 -mt-4 rounded-lg border border-border bg-card px-4 py-3 text-sm text-muted-foreground">
+            Your session was locked after a period of inactivity. Sign in again to unlock your data.
           </p>
         )}
 

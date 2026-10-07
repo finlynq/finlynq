@@ -46,8 +46,11 @@ export async function POST(request: NextRequest) {
     });
 
     const enc = buildNameFields(dek, { name: categoryName });
+    // "E", never the word "expense": reports filter on the code, so the word
+    // form silently dropped every transaction in a seeded category out of
+    // the expense totals.
     const category = existing ?? await createCategory(userId, {
-      type: "expense",
+      type: "E",
       group: "Personal",
       ...enc,
     });

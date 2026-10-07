@@ -24,6 +24,7 @@ import { SESSION_TTL_MS } from "@/lib/auth/jwt";
 import { getUserByIdentifier, recordSuccessfulLogin } from "@/lib/auth/queries";
 import { logApiError } from "@/lib/validate";
 import { checkRateLimit } from "@/lib/rate-limit";
+import { isSafeNext } from "@/lib/auth/safe-redirect";
 import { deriveKEK, unwrapDEK } from "@/lib/crypto/envelope";
 import { putDEK } from "@/lib/crypto/dek-cache";
 import { enqueueBackfillSecurities } from "@/lib/securities/backfill";
@@ -42,23 +43,6 @@ export interface ZeroClickAccount {
   defaultNext: string;
   /** Shown when the account hasn't been seeded, e.g. the script to run. */
   seedHint: string;
-}
-
-/**
- * Validate that `next` is a safe same-origin redirect target.
- *
- *   - Must start with `/`
- *   - Must NOT start with `//` (that's a protocol-relative URL — `//evil.com`
- *     resolves to `https://evil.com`, an open-redirect bait-and-switch)
- *   - Must NOT contain `\` (Windows-style backslash; some path normalizers
- *     treat `\\evil.com` like `//evil.com`)
- */
-function isSafeNext(next: string | null | undefined): next is string {
-  if (!next) return false;
-  if (!next.startsWith("/")) return false;
-  if (next.startsWith("//")) return false;
-  if (next.includes("\\")) return false;
-  return true;
 }
 
 export async function zeroClickLogin(

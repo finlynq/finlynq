@@ -11,6 +11,7 @@ import {
   getCategoryDeleteBlockers,
   categoryDeleteBlockedMessage,
 } from "@/lib/categories/delete-blockers";
+import { categoryTypeSchema } from "@/lib/categories/category-type";
 
 /**
  * Category names are unique per user via the `categories_user_name_lookup_uniq`
@@ -28,9 +29,12 @@ function duplicateNameResponse(error: unknown): NextResponse | null {
   );
 }
 
+// `type` was a bare z.string(), so a caller sending "expense" stored a category
+// every report skips (they filter on the literal "E"). categoryTypeSchema maps
+// the word forms to the code and 400s anything else.
 const postSchema = z.object({
   name: z.string(),
-  type: z.string(),
+  type: categoryTypeSchema,
   group: z.string(),
   note: z.string().optional(),
 });
@@ -38,7 +42,7 @@ const postSchema = z.object({
 const putSchema = z.object({
   id: z.number(),
   name: z.string().optional(),
-  type: z.string().optional(),
+  type: categoryTypeSchema.optional(),
   group: z.string().optional(),
   note: z.string().optional(),
 });

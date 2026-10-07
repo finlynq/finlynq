@@ -1562,7 +1562,7 @@ export function registerReadsTools(server: McpServer, ctx: PgToolContext) {
           key_tables: {
             transactions: "id, user_id, date, account_id, category_id, currency, amount, payee, note, tags, import_hash, fit_id",
             accounts: "id, user_id, type(A/L), group, name, currency, note, archived, alias",
-            categories: "id, user_id, type(E/I/T), group, name, note",
+            categories: "id, user_id, type(E/I/R), group, name, note",
             budgets: "id, user_id, category_id, month(YYYY-MM), amount, currency",
             goals: "id, user_id, name, type, target_amount, current_amount, deadline, status, account_id",
             transaction_rules: "id, user_id, name, conditions (JSONB ConditionGroup, AND-only), actions (JSONB Action[]), priority, is_active, created_at, updated_at (FINLYNQ-84)",

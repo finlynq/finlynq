@@ -15,6 +15,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { requireAuth } from "@/lib/auth/require-auth";
 import { fetchQuote } from "@/lib/price-service";
+import { looksLikeYahooTicker } from "@/lib/securities/yahoo-symbol";
 import { symbolToCoinGeckoId } from "@/lib/crypto-service";
 import {
   isSupportedCurrency,
@@ -42,7 +43,7 @@ export type SymbolInfo = {
 };
 
 /**
- * Stock-style (Yahoo) symbols look like AAPL, VCN.TO, BRK-B, MSFT.
+ * Stock-style (Yahoo) symbols look like AAPL, VCN.TO, BRK-B, 7203.T, 0700.HK.
  * Currency codes are 3-4 capital letters. We use ordering to disambiguate
  * — a ticker that's also a currency code (rare; e.g. "BTC", "ETH") is
  * treated as crypto first since the holding is typically a coin position
@@ -100,7 +101,7 @@ export async function GET(request: NextRequest) {
   }
 
   // 3. Stock/ETF via Yahoo?
-  if (/^[A-Z][A-Z0-9.\-]{0,14}$/.test(symbol)) {
+  if (looksLikeYahooTicker(symbol)) {
     const quote = await fetchQuote(symbol);
     if (quote && quote.price > 0) {
       return NextResponse.json<SymbolInfo>({

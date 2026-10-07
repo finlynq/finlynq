@@ -727,16 +727,30 @@ async function main() {
     console.log(`[seed-demo] Inserting goals…`);
     const efEnc = encryptName(demoDek, "Emergency fund");
     const tjEnc = encryptName(demoDek, "Trip to Japan");
-    await client.query(
+    const { rows: goalRows } = await client.query<{ id: number }>(
       // currency: USD — the Savings account both goals track is seeded USD,
       // as is the demo's display_currency. Omitting it let the column default
       // stamp the public demo's goals CAD on every nightly reseed.
       `INSERT INTO goals (user_id, name_ct, name_lookup, type, target_amount, currency, deadline, account_id, priority, status, note)
        VALUES
          ($1, $3, $4, 'savings', 10000, 'USD', NULL, $2, 1, 'active', 'Three months of expenses'),
-         ($1, $5, $6, 'savings', 5000, 'USD', '2027-03-01', $2, 2, 'active', '')`,
+         ($1, $5, $6, 'savings', 5000, 'USD', '2027-03-01', $2, 2, 'active', '')
+       RETURNING id`,
       [userId, accountIds["Savings"], efEnc.ct, efEnc.lookup, tjEnc.ct, tjEnc.lookup]
     );
+    // Issue #130: goal progress sums over the `goal_accounts` join, not the
+    // legacy single `goals.account_id` column. Setting only the legacy column
+    // left both demo goals at 0% on every reseed. Both goals track Savings, so
+    // the RETURNING order doesn't matter. The wipe above needs no matching
+    // DELETE: goal_accounts cascades from both goals and accounts.
+    if (accountIds["Savings"]) {
+      for (const g of goalRows) {
+        await client.query(
+          `INSERT INTO goal_accounts (user_id, goal_id, account_id) VALUES ($1, $2, $3)`,
+          [userId, g.id, accountIds["Savings"]]
+        );
+      }
+    }
 
     // 8. Pre-stage the sample OFX file as a pending import on the Chequing
     //    account so users landing on /import/pending immediately see the

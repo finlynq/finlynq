@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { toYahooSymbol } from "@/lib/securities/yahoo-symbol";
+import { looksLikeYahooTicker, toYahooSymbol } from "@/lib/securities/yahoo-symbol";
 
 describe("toYahooSymbol", () => {
   describe("US class shares — dot becomes a dash", () => {
@@ -72,4 +72,18 @@ describe("toYahooSymbol", () => {
       expect(toYahooSymbol("BRK.B+")).toBe("BRK.B-WT");
     });
   });
+});
+
+describe("looksLikeYahooTicker", () => {
+  // GH #365: the letter-first pattern rejected every one of these, so the
+  // holding form called priceable symbols "not recognized".
+  it.each(["AAPL", "VCN.TO", "BRK-B", "BRK.B", "GME+", "7203.T", "0700.HK", "0P0000XVYH.BO", "RELIANCE.NS"])(
+    "accepts %s",
+    (s) => expect(looksLikeYahooTicker(s)).toBe(true),
+  );
+
+  it.each(["", ".TO", "-AAPL", "AA PL", "A".repeat(17), "GME++", "^GSPC"])(
+    "rejects %j",
+    (s) => expect(looksLikeYahooTicker(s)).toBe(false),
+  );
 });

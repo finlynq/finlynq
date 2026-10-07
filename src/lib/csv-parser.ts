@@ -4,6 +4,7 @@ import { generateImportHash, checkDuplicates } from "./import-hash";
 import type { RawTransaction } from "./import-pipeline";
 import { buildNameFields, decryptName, nameLookup } from "./crypto/encrypted-columns";
 import { resolveOrCreateSecurity } from "./securities/resolve";
+import { normalizeCategoryType } from "./categories/category-type";
 // `parseAmount` moved to the dependency-free `./parse-amount` module
 // (2026-06-04) so client components can import it without pulling this file's
 // server-only `@/db` dependency into the browser bundle. Imported here for
@@ -546,11 +547,18 @@ export async function importCategories(csvText: string, userId: string, dek: Buf
             .get()
         : null;
       if (!existing) {
+        // A blank Type column means expense; anything else must be a
+        // recognisable type, or the row would be stored where no report sees it.
+        const type = row["Type"] ? normalizeCategoryType(row["Type"]) : "E";
+        if (!type) {
+          errors.push(`"${row["Category"]}": unknown Type "${row["Type"]}" (use E, I or R)`);
+          continue;
+        }
         const enc = buildNameFields(dek, { name: row["Category"] });
         await db.insert(schema.categories)
           .values({
             userId,
-            type: row["Type"] || "E",
+            type,
             group: row["Group"] ?? "",
             note: row["Note"] ?? "",
             ...enc,
