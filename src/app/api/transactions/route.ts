@@ -20,7 +20,7 @@ import {
 import { canEditPortfolioRow } from "@/lib/portfolio/operations";
 import type { TxRowForLots } from "@/lib/portfolio/lots/types";
 import { db, schema } from "@/db";
-import { and, eq, or } from "drizzle-orm";
+import { and, eq, ne, or } from "drizzle-orm";
 import { markSnapshotsDirty } from "@/lib/portfolio/snapshots/dirty";
 import { markCashSnapshotsDirty } from "@/lib/portfolio/snapshots/cash-dirty";
 import { z } from "zod";
@@ -30,6 +30,7 @@ import { deleteTransactionsCascade } from "@/lib/transactions/delete-cascade";
 import { isTransactionSource, type TransactionSource } from "@/lib/tx-source";
 import { verifyOwnership, OwnershipError } from "@/lib/verify-ownership";
 import { securitiesReadEnabledForUser } from "@/lib/securities/flag";
+import { transferLegChanges } from "@/lib/transactions/transfer-leg-guard";
 
 const postSchema = z.object({
   date: z.string(),
@@ -725,6 +726,53 @@ export async function PUT(request: NextRequest) {
         },
         { status: 409 },
       );
+    }
+
+    // Transfer-leg guard (2026-10-07). Rewriting one leg's amount / account /
+    // date / currency here leaves its partner leg as it was, so the pair stops
+    // agreeing. Those edits belong on PUT /api/transactions/transfer, which
+    // rewrites both legs together. Only applies while a partner leg actually
+    // exists (an orphaned leg has nothing to fall out of step with), and only
+    // to fields the patch CHANGES (see transferLegChanges).
+    const leg = await db
+      .select({
+        linkId: schema.transactions.linkId,
+        amount: schema.transactions.amount,
+        accountId: schema.transactions.accountId,
+        date: schema.transactions.date,
+        currency: schema.transactions.currency,
+        enteredAmount: schema.transactions.enteredAmount,
+        enteredCurrency: schema.transactions.enteredCurrency,
+      })
+      .from(schema.transactions)
+      .where(and(eq(schema.transactions.id, id), eq(schema.transactions.userId, auth.userId)))
+      .get();
+    if (leg?.linkId) {
+      const changed = transferLegChanges(leg, data);
+      if (changed.length > 0) {
+        const partner = await db
+          .select({ id: schema.transactions.id })
+          .from(schema.transactions)
+          .where(
+            and(
+              eq(schema.transactions.userId, auth.userId),
+              eq(schema.transactions.linkId, leg.linkId),
+              ne(schema.transactions.id, id),
+            ),
+          )
+          .get();
+        if (partner) {
+          return NextResponse.json(
+            {
+              error: `This is one side of a transfer, so its ${changed.join(", ")} can't be changed on its own. Edit it as a transfer so both accounts stay in step.`,
+              code: "transfer_leg_edit_refused",
+              fields: changed,
+              partnerTransactionId: partner.id,
+            },
+            { status: 409 },
+          );
+        }
+      }
     }
 
     // Fetch current transaction's entered_* fields for amount-only update handling.
