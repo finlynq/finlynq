@@ -24,6 +24,7 @@ import {
   type PgToolContext,
 } from "./_shared";
 import { aggregateHoldings } from "../../src/lib/portfolio/aggregate-holdings";
+import { resolveTickerInput } from "../../src/lib/securities/isin-resolve";
 import { valuePortfolio, weightBasis } from "../../src/lib/portfolio/valuation";
 import { withConfirmation, PreviewAbortError } from "./_confirm";
 import {
@@ -689,7 +690,10 @@ export function registerPortfolioTools(server: McpServer, ctx: PgToolContext) {
         }
       }
 
-      const symbolValue = symbol && symbol.trim() ? symbol.trim() : null;
+      // GH #365 — an ISIN resolves to the Yahoo symbol it trades under (an
+      // ISIN itself never prices); anything else is stored as typed.
+      const symbolInput = symbol && symbol.trim() ? await resolveTickerInput(symbol) : null;
+      const symbolValue = symbolInput?.symbol ?? null;
       const nameEnc = dek ? encryptName(dek, name) : { ct: null, lookup: null };
       const symbolEnc = dek ? encryptName(dek, symbolValue) : { ct: null, lookup: null };
       const cur = currency ?? String(acct.currency ?? "CAD");
@@ -753,7 +757,7 @@ export function registerPortfolioTools(server: McpServer, ctx: PgToolContext) {
           success: true,
           data: {
             holdingId,
-            message: `Holding "${name}" created in "${acct.name}"${symbolValue ? ` (${symbolValue})` : ""} — pass holdingId=${holdingId} as portfolioHoldingId on record_transaction to bind transactions.`,
+            message: `Holding "${name}" created in "${acct.name}"${symbolValue ? ` (${symbolValue})` : ""}${symbolInput?.resolvedFromIsin ? ` — ISIN ${symbolInput.resolvedFromIsin} resolved to ${symbolValue}` : ""} — pass holdingId=${holdingId} as portfolioHoldingId on record_transaction to bind transactions.`,
           },
         });
       } catch (e) {
@@ -778,7 +782,11 @@ export function registerPortfolioTools(server: McpServer, ctx: PgToolContext) {
     isCrypto?: boolean;
     note?: string;
   }): Promise<ToolResult> {
-      const { holding, holdingId, name, symbol, account, currency, isCrypto, note } = args;
+      const { holding, holdingId, name, account, currency, isCrypto, note } = args;
+      // GH #365 — resolve an ISIN to its Yahoo symbol once, up front; both the
+      // symbol write and the re-cluster below use the resolved value.
+      const symbolInput = args.symbol !== undefined && args.symbol.trim() ? await resolveTickerInput(args.symbol) : null;
+      const symbol = args.symbol === undefined ? undefined : (symbolInput?.symbol ?? "");
       // Issue #99: refuse account-move. Updating only portfolio_holdings.account_id
       // (the prior behavior) leaves a stale (holding, old_account) row in
       // holding_accounts (issue #25's JOIN grain) AND broken account

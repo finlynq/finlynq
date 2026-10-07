@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useRef, useEffect, useCallback } from "react";
+import { useState, useRef, useEffect, useCallback, useMemo } from "react";
 import { useSearchParams, useRouter } from "next/navigation";
 import Link from "next/link";
 import { Card, CardContent } from "@/components/ui/card";
@@ -12,7 +12,9 @@ import { useDropdownOrder } from "@/components/dropdown-order-provider";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { OnboardingTips } from "@/components/onboarding-tips";
 import { Badge } from "@/components/ui/badge";
-import { Plus, SlidersHorizontal, ChevronDown, Receipt, Search, X, AlertTriangle, ArrowRightLeft, Columns3, TrendingUp, Download } from "lucide-react";
+import { Plus, SlidersHorizontal, ChevronDown, Receipt, Search, X, AlertTriangle, ArrowRightLeft, Columns3, TrendingUp, Download, List, CalendarDays } from "lucide-react";
+import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { isoDay } from "@/components/month-calendar";
 import { Pagination } from "@/components/ui/pagination";
 import { DropdownMenu, DropdownMenuTrigger, DropdownMenuContent, DropdownMenuGroup, DropdownMenuLabel, DropdownMenuCheckboxItem, DropdownMenuItem, DropdownMenuSeparator } from "@/components/ui/dropdown-menu";
 import { SplitDialog } from "./split-dialog";
@@ -31,10 +33,11 @@ import type {
 import { useLookups, useTxColumnPrefs, useTxSortPref, useTxFilterPrefs } from "../_hooks/use-tx-prefs";
 import { useTransactions } from "../_hooks/use-transactions";
 import { TransactionTable } from "./transaction-table";
+import { TransactionsCalendar, refreshTransactionsCalendar } from "./transactions-calendar";
 import { buildTransactionQuery } from "@/lib/transactions/build-query";
 import { buildTxDrillUrl } from "@/lib/transactions/drill-url";
 import { exportCsv, type CsvColumn } from "@/lib/csv-export";
-import { todayISO } from "@/lib/utils/date";
+import { localDateISO, todayISO } from "@/lib/utils/date";
 import { LotReallocationNotice } from "@/components/portfolio/lot-reallocation-notice";
 import type { LotReallocationPreview } from "@/lib/portfolio/lots/types";
 
@@ -116,6 +119,44 @@ export function TransactionsWorkspace({
   // sort/filter hooks can reset it to 0 on change without a forward reference.
   const [page, setPage] = useState(0);
 
+  // List / Calendar view (in-app feedback 2026-10-07). `?view=calendar` opens
+  // straight into the calendar; toggling is local state so it never fights
+  // the URL⇄filter sync below. In calendar view the calendar OWNS the date
+  // range: the list shows the selected day, or the whole month when no day is
+  // selected, layered over every other filter via `listFilters` — `filters`
+  // itself (and so the URL-driven state) is left untouched.
+  const [view, setView] = useState<"list" | "calendar">(() =>
+    !locked && urlParams.get("view") === "calendar" ? "calendar" : "list",
+  );
+  const [cal, setCal] = useState(() => {
+    const t = localDateISO();
+    return { year: Number(t.slice(0, 4)), month: Number(t.slice(5, 7)) - 1, day: null as number | null };
+  });
+  const calRange = useMemo(() => {
+    if (cal.day != null) {
+      const d = isoDay(cal.year, cal.month, cal.day);
+      return { start: d, end: d };
+    }
+    const last = new Date(Date.UTC(cal.year, cal.month + 1, 0)).getUTCDate();
+    return { start: isoDay(cal.year, cal.month, 1), end: isoDay(cal.year, cal.month, last) };
+  }, [cal]);
+  const listFilters = useMemo(
+    () => (view === "calendar" ? { ...filters, startDate: calRange.start, endDate: calRange.end } : filters),
+    [view, filters, calRange],
+  );
+  const shiftCalMonth = (delta: number) => {
+    setCal((c) => {
+      const total = c.year * 12 + c.month + delta;
+      return { year: Math.floor(total / 12), month: ((total % 12) + 12) % 12, day: null };
+    });
+    setPage(0);
+  };
+  const calToday = () => {
+    const t = localDateISO();
+    setCal({ year: Number(t.slice(0, 4)), month: Number(t.slice(5, 7)) - 1, day: Number(t.slice(8, 10)) });
+    setPage(0);
+  };
+
   // FINLYNQ-130 — re-sync filters from the URL on every navigation (including
   // client-side drill-through while already mounted on /transactions). Resets
   // the page index and the controlled search input so a drill fully REPLACES
@@ -152,7 +193,7 @@ export function TransactionsWorkspace({
   // useTransactions (FINLYNQ-111 Phase 2). Same deps, fetch URL, {data,total}
   // unwrap, and driving effect; `page` is owned by the page-level state above.
   const { txns, total, loading, limit, loadTxns } = useTransactions(
-    filters,
+    listFilters,
     sortPref,
     colFilters,
     accounts,
@@ -164,6 +205,7 @@ export function TransactionsWorkspace({
   // every create / edit / delete / bulk action below.
   const afterMutate = useCallback(() => {
     loadTxns();
+    refreshTransactionsCalendar();
     onDataChange?.();
   }, [loadTxns, onDataChange]);
 
@@ -291,7 +333,7 @@ export function TransactionsWorkspace({
       // Same builder + filter/sort state the table uses; page 0 + high limit
       // pulls the entire filtered view in one shot (the route honors `limit`
       // directly when no post-decrypt filter is set, else caps at 1000).
-      const params = buildTransactionQuery(filters, sortPref, colFilters, accounts, {
+      const params = buildTransactionQuery(listFilters, sortPref, colFilters, accounts, {
         page: 0,
         limit: 100000,
       });
@@ -727,6 +769,20 @@ export function TransactionsWorkspace({
         onLinkedSiblingClick={(s) => openLinkedSibling(s as LinkedSibling)}
       />
 
+      {/* List / Calendar toggle (in-app feedback 2026-10-07). */}
+      <Tabs
+        value={view}
+        onValueChange={(v) => {
+          setView(v === "calendar" ? "calendar" : "list");
+          setPage(0);
+        }}
+      >
+        <TabsList>
+          <TabsTrigger value="list" className="px-3"><List className="h-4 w-4" /> List</TabsTrigger>
+          <TabsTrigger value="calendar" className="px-3"><CalendarDays className="h-4 w-4" /> Calendar</TabsTrigger>
+        </TabsList>
+      </Tabs>
+
       {/* Search + Filters */}
       <Card className="bg-muted/30 border-dashed">
         <CardContent className="pt-4 space-y-3">
@@ -746,9 +802,14 @@ export function TransactionsWorkspace({
           </div>
           <div className="flex flex-wrap gap-2 items-center">
             <SlidersHorizontal className="h-3.5 w-3.5 text-muted-foreground shrink-0" />
-            <Input type="date" className="w-36 h-8 text-xs" value={filters.startDate} onChange={(e) => { setFilters({ ...filters, startDate: e.target.value }); setPage(0); }} />
-            <span className="text-xs text-muted-foreground">to</span>
-            <Input type="date" className="w-36 h-8 text-xs" value={filters.endDate} onChange={(e) => { setFilters({ ...filters, endDate: e.target.value }); setPage(0); }} />
+            {/* In calendar view the calendar sets the dates (see listFilters). */}
+            {view === "list" && (
+              <>
+                <Input type="date" className="w-36 h-8 text-xs" value={filters.startDate} onChange={(e) => { setFilters({ ...filters, startDate: e.target.value }); setPage(0); }} />
+                <span className="text-xs text-muted-foreground">to</span>
+                <Input type="date" className="w-36 h-8 text-xs" value={filters.endDate} onChange={(e) => { setFilters({ ...filters, endDate: e.target.value }); setPage(0); }} />
+              </>
+            )}
             {/* Account picker is hidden on the account-scoped embed — the view
                 is already locked to a single account (keep the other filters). */}
             {!locked && (
@@ -957,6 +1018,40 @@ export function TransactionsWorkspace({
           )}
         </CardContent>
       </Card>
+
+      {view === "calendar" && (
+        <>
+          <TransactionsCalendar
+            year={cal.year}
+            month={cal.month}
+            selectedDay={cal.day}
+            accountId={filters.accountId}
+            categoryId={filters.categoryId}
+            onSelectDay={(day) => {
+              setCal((c) => ({ ...c, day }));
+              setPage(0);
+            }}
+            onShiftMonth={shiftCalMonth}
+            onToday={calToday}
+          />
+          <div className="flex flex-wrap items-center gap-2 text-sm">
+            <span className="font-medium">
+              {cal.day != null
+                ? `Transactions on ${new Date(Date.UTC(cal.year, cal.month, cal.day)).toLocaleDateString(undefined, { weekday: "long", month: "long", day: "numeric", year: "numeric", timeZone: "UTC" })}`
+                : `All transactions in ${new Date(Date.UTC(cal.year, cal.month, 1)).toLocaleDateString(undefined, { month: "long", year: "numeric", timeZone: "UTC" })}`}
+            </span>
+            {cal.day != null && (
+              <button
+                type="button"
+                onClick={() => { setCal((c) => ({ ...c, day: null })); setPage(0); }}
+                className="text-xs text-muted-foreground hover:text-foreground underline-offset-4 hover:underline"
+              >
+                Show the whole month
+              </button>
+            )}
+          </div>
+        </>
+      )}
 
       {/* Bulk action bar */}
       {someSelected && (

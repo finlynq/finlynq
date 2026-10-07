@@ -176,6 +176,8 @@ export default function InvestmentsSettingsPage() {
   // up yet).
   const [addPriceSource, setAddPriceSource] = useState<"auto" | "manual">("auto");
   const [addLookupFound, setAddLookupFound] = useState<boolean | null>(null);
+  // GH #365 — what happened to an ISIN typed into Ticker (resolved, or not found).
+  const [addIsinNote, setAddIsinNote] = useState<string | null>(null);
   const priceSourceTouchedRef = useRef(false);
   // Auto-fill bookkeeping (refs avoid stale-closure reads inside the async
   // lookup): which fields the user edited by hand + a sequence guard so a slow
@@ -336,6 +338,7 @@ export default function InvestmentsSettingsPage() {
     setAddIsCrypto(false);
     setAddPriceSource("auto");
     setAddLookupFound(null);
+    setAddIsinNote(null);
     priceSourceTouchedRef.current = false;
     nameTouchedRef.current = false;
     currencyTouchedRef.current = false;
@@ -376,11 +379,26 @@ export default function InvestmentsSettingsPage() {
           name?: string | null;
           currency?: string | null;
           isCrypto?: boolean;
+          symbol?: string;
+          resolvedFromIsin?: string | null;
+          isinNotFound?: boolean;
         };
         name = d?.name ?? null;
         currency = d?.currency ?? null;
         isCrypto = d?.isCrypto;
         found = d?.found === true;
+        if (seq !== lookupSeqRef.current) return; // superseded by a newer lookup
+        // An ISIN never prices: swap in the Yahoo symbol it resolved to.
+        if (d?.resolvedFromIsin && d.symbol) {
+          setAddSymbol(d.symbol);
+          setAddIsinNote(`Found ISIN ${d.resolvedFromIsin} on Yahoo Finance as ${d.symbol}.`);
+        } else {
+          setAddIsinNote(
+            d?.isinNotFound
+              ? "This looks like an ISIN, but Yahoo Finance has no listing for it. Enter the ticker instead."
+              : null,
+          );
+        }
       }
       if (seq !== lookupSeqRef.current) return; // superseded by a newer lookup
       if (!nameTouchedRef.current) setAddName(name ?? "");
@@ -1200,10 +1218,11 @@ export default function InvestmentsSettingsPage() {
                   value={addSymbol}
                   onChange={(e) => {
                     setAddSymbol(e.target.value);
+                    setAddIsinNote(null);
                     if (!nameTouchedRef.current) setAddName(""); // drop stale auto-name
                   }}
                   onBlur={() => lookupTicker(addSymbol, addIsCrypto)}
-                  placeholder="e.g. AAPL, VTI, BTC"
+                  placeholder="e.g. AAPL, VTI, BTC, or an ISIN"
                   autoFocus
                 />
                 {lookupLoading && (
@@ -1211,6 +1230,7 @@ export default function InvestmentsSettingsPage() {
                 )}
               </div>
               {addErrors.symbol && <p className="text-xs text-rose-600 mt-1">{addErrors.symbol}</p>}
+              {addIsinNote && <p className="text-[11px] text-muted-foreground mt-1">{addIsinNote}</p>}
               <p className="text-[11px] text-muted-foreground mt-1">
                 We’ll try to fill the name + currency from the ticker; edit them if needed.
               </p>

@@ -264,7 +264,13 @@ async function fetchYahooChartRateToUsd(symbol: string, date: string): Promise<n
     }
     const res = await marketFetch(url, {
       headers: { "User-Agent": "Mozilla/5.0" },
-      next: { revalidate: 3600 },
+      // No `next: { revalidate }` — see the long note in price-service.ts's
+      // fetchQuoteLive. The argument is even stronger here: `findCached` is an
+      // exact (currency, date) lookup with NO staleness check, so today's rate
+      // is fetched ONCE and reused all day. Calls therefore arrived ~24h apart,
+      // far past any revalidate window — it never once saved a request, it only
+      // guaranteed that the rate we stored for today was actually yesterday's.
+      cache: "no-store",
       signal: AbortSignal.timeout(FX_FETCH_TIMEOUT_MS),
     });
     if (!res.ok) return null;

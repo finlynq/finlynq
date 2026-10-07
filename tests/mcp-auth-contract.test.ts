@@ -7,7 +7,7 @@
  * regressions waiting to happen.
  */
 
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeAll, beforeEach } from "vitest";
 
 // getIssuer() reads APP_URL at call time.
 const ISSUER = "https://finlynq.test";
@@ -46,14 +46,23 @@ describe("bearerChallenge — GH #318 bug 3", () => {
 });
 
 describe("GET /api/mcp — GH #318 bug 4 (the re-auth loop)", () => {
-  beforeEach(() => {
+  // The route module pulls in every MCP tool module, so a cold import costs
+  // seconds of transform work — more under full-suite parallel load. It used
+  // to happen inside the first test (fresh after a per-test resetModules), and
+  // that test intermittently blew vitest's 5s default on the import alone
+  // (2026-10-07; it passed in ~2s run on its own). Import ONCE here, under an
+  // explicit hook timeout, so each test's budget covers only its request.
+  // GET doesn't read APP_URL, so one module instance serves all three tests.
+  let GET: typeof import("@/app/api/mcp/route").GET;
+  let NextRequest: typeof import("next/server").NextRequest;
+  beforeAll(async () => {
     process.env.APP_URL = ISSUER;
     vi.resetModules();
-  });
+    ({ GET } = await import("@/app/api/mcp/route"));
+    ({ NextRequest } = await import("next/server"));
+  }, 60_000);
 
   it("returns 405 + Allow: POST, NOT 401", async () => {
-    const { GET } = await import("@/app/api/mcp/route");
-    const { NextRequest } = await import("next/server");
     const res = await GET(new NextRequest(`${ISSUER}/api/mcp`, { method: "GET" }));
 
     // 401 here is what made StreamableHTTPClientTransport._startOrAuthSse
@@ -64,8 +73,6 @@ describe("GET /api/mcp — GH #318 bug 4 (the re-auth loop)", () => {
   });
 
   it("does NOT advertise a Bearer challenge (that re-arms the auth reflex)", async () => {
-    const { GET } = await import("@/app/api/mcp/route");
-    const { NextRequest } = await import("next/server");
     const res = await GET(new NextRequest(`${ISSUER}/api/mcp`, { method: "GET" }));
     expect(res.headers.get("WWW-Authenticate")).toBeNull();
   });
@@ -73,8 +80,6 @@ describe("GET /api/mcp — GH #318 bug 4 (the re-auth loop)", () => {
   it("still 405s when a valid-looking Bearer token IS supplied", async () => {
     // The old handler ignored Authorization entirely; the new one must not
     // start authenticating here either — there is simply no SSE stream.
-    const { GET } = await import("@/app/api/mcp/route");
-    const { NextRequest } = await import("next/server");
     const res = await GET(
       new NextRequest(`${ISSUER}/api/mcp`, {
         method: "GET",

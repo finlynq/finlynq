@@ -13,11 +13,8 @@ import {
   type ScheduleEvent,
 } from "@/lib/subscriptions/calendar-events";
 import type { Subscription } from "./types";
-import { CalendarDays, ChevronLeft, ChevronRight, Plus, TrendingDown, TrendingUp, Scale } from "lucide-react";
-
-const DAY_NAMES = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
-
-const pad = (n: number) => String(n).padStart(2, "0");
+import { CalendarDays, Plus, TrendingDown, TrendingUp, Scale } from "lucide-react";
+import { MonthCalendar, MonthStat, isoDay } from "@/components/month-calendar";
 
 /** Chip / dot styling per event kind. Legend reads the same map. */
 function eventTone(ev: Pick<ScheduleEvent, "type" | "source">) {
@@ -55,9 +52,8 @@ export function SubscriptionsCalendar({
   const [selectedDay, setSelectedDay] = useState<number | null>(() => Number(today.slice(8, 10)));
 
   const daysInMonth = new Date(Date.UTC(year, month + 1, 0)).getUTCDate();
-  const firstWeekday = new Date(Date.UTC(year, month, 1)).getUTCDay();
-  const monthStart = `${year}-${pad(month + 1)}-01`;
-  const monthEnd = `${year}-${pad(month + 1)}-${pad(daysInMonth)}`;
+  const monthStart = isoDay(year, month, 1);
+  const monthEnd = isoDay(year, month, daysInMonth);
 
   const events = useMemo(
     () => buildScheduleEvents(subs, recurring, monthStart, monthEnd),
@@ -92,69 +88,28 @@ export function SubscriptionsCalendar({
     setSelectedDay(Number(today.slice(8, 10)));
   }
 
-  const monthLabel = new Date(Date.UTC(year, month, 1)).toLocaleDateString(undefined, {
-    year: "numeric",
-    month: "long",
-    timeZone: "UTC",
-  });
-  const isCurrentMonth = today.slice(0, 7) === monthStart.slice(0, 7);
-  const todayDay = Number(today.slice(8, 10));
   const selectedEvents = selectedDay ? eventsByDay.get(selectedDay) ?? [] : [];
 
   return (
     <div className="space-y-4">
       <Card>
         <CardContent className="pt-5">
-          <div className="flex items-center justify-between gap-2 mb-3">
-            <Button variant="outline" size="icon" onClick={() => shiftMonth(-1)} aria-label="Previous month">
-              <ChevronLeft className="h-4 w-4" />
-            </Button>
-            <div className="flex items-center gap-2">
-              <h2 className="text-lg font-semibold">{monthLabel}</h2>
-              {!isCurrentMonth && (
-                <Button variant="ghost" size="sm" onClick={goToday}>Today</Button>
-              )}
-            </div>
-            <Button variant="outline" size="icon" onClick={() => shiftMonth(1)} aria-label="Next month">
-              <ChevronRight className="h-4 w-4" />
-            </Button>
-          </div>
-
-          <div className="grid grid-cols-7 gap-px mb-1">
-            {DAY_NAMES.map((d) => (
-              <div key={d} className="text-center text-xs font-medium text-muted-foreground py-1.5">
-                {d}
-              </div>
-            ))}
-          </div>
-
-          <div className="grid grid-cols-7 gap-1">
-            {Array.from({ length: firstWeekday }, (_, i) => (
-              <div key={`pad-${i}`} className="min-h-[56px] sm:min-h-[88px]" />
-            ))}
-            {Array.from({ length: daysInMonth }, (_, i) => {
-              const day = i + 1;
+          <MonthCalendar
+            year={year}
+            month={month}
+            today={today}
+            selectedDay={selectedDay}
+            onSelectDay={setSelectedDay}
+            onShiftMonth={shiftMonth}
+            onToday={goToday}
+            dayLabel={(day) => {
+              const n = eventsByDay.get(day)?.length ?? 0;
+              return n ? `${n} payment${n === 1 ? "" : "s"}` : "";
+            }}
+            renderDay={(day) => {
               const dayEvents = eventsByDay.get(day) ?? [];
-              const isSelected = selectedDay === day;
-              const isToday = isCurrentMonth && day === todayDay;
               return (
-                <button
-                  key={day}
-                  type="button"
-                  onClick={() => setSelectedDay(isSelected ? null : day)}
-                  aria-label={`${monthLabel} ${day}${dayEvents.length ? `, ${dayEvents.length} payment${dayEvents.length === 1 ? "" : "s"}` : ""}`}
-                  aria-pressed={isSelected}
-                  className={`min-h-[56px] sm:min-h-[88px] min-w-0 p-1 sm:p-1.5 rounded-lg text-left align-top transition-colors border flex flex-col ${
-                    isSelected ? "border-primary bg-primary/5" : "border-border/60 hover:bg-muted/50"
-                  }`}
-                >
-                  <span
-                    className={`text-xs sm:text-sm font-medium inline-flex h-6 w-6 items-center justify-center rounded-full ${
-                      isToday ? "bg-primary text-primary-foreground" : ""
-                    }`}
-                  >
-                    {day}
-                  </span>
+                <>
                   {/* Phone width: dots. Wider: named chips. */}
                   {dayEvents.length > 0 && (
                     <div className="flex flex-wrap gap-0.5 mt-1 sm:hidden">
@@ -177,10 +132,10 @@ export function SubscriptionsCalendar({
                       <span className="text-[10px] text-muted-foreground leading-3 px-1">+{dayEvents.length - 2} more</span>
                     )}
                   </div>
-                </button>
+                </>
               );
-            })}
-          </div>
+            }}
+          />
 
           <div className="flex flex-wrap items-center gap-x-4 gap-y-1 mt-3 text-xs text-muted-foreground">
             <span className="flex items-center gap-1.5"><span className="h-2 w-2 rounded-full bg-primary" /> Subscription</span>
@@ -259,16 +214,5 @@ export function SubscriptionsCalendar({
         Income and untracked bills are projected from repeating transactions in your history. Totals are in {displayCurrency} at today&apos;s rates.
       </p>
     </div>
-  );
-}
-
-function MonthStat({ label, value, tone, icon }: { label: string; value: string; tone: string; icon: React.ReactNode }) {
-  return (
-    <Card>
-      <CardContent className="pt-4 pb-4">
-        <div className="flex items-center gap-2 text-xs text-muted-foreground">{icon}{label}</div>
-        <p className={`text-xl font-bold mt-1 tabular-nums ${tone}`}>{value}</p>
-      </CardContent>
-    </Card>
   );
 }

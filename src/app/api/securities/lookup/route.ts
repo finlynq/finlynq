@@ -18,6 +18,8 @@
 import { apiHandler } from "@/lib/api-handler";
 import { fetchQuoteLive } from "@/lib/price-service";
 import { symbolToCoinGeckoId, getCryptoPrice } from "@/lib/crypto-service";
+import { isIsin, normalizeIsin } from "@/lib/securities/isin";
+import { resolveIsin } from "@/lib/securities/isin-resolve";
 
 export const GET = apiHandler(
   { auth: "auth", fallbackMessage: "Lookup failed" },
@@ -25,6 +27,23 @@ export const GET = apiHandler(
     const symbol = (request.nextUrl.searchParams.get("symbol") ?? "").trim();
     if (!symbol) return { found: false, isCrypto: false };
     const wantCrypto = request.nextUrl.searchParams.get("crypto") === "1";
+
+    // An ISIN (GH #365): resolve to the Yahoo symbol and describe THAT. The
+    // dialog swaps `symbol` into its Ticker field, since an ISIN never prices.
+    if (isIsin(symbol)) {
+      const isin = normalizeIsin(symbol);
+      const match = await resolveIsin(isin);
+      if (!match) return { found: false, isCrypto: false, resolvedFromIsin: null, isinNotFound: true };
+      const quote = await fetchQuoteLive(match.symbol).catch(() => null);
+      return {
+        found: !!quote,
+        name: match.name,
+        currency: quote?.currency ?? null,
+        isCrypto: false,
+        symbol: match.symbol,
+        resolvedFromIsin: isin,
+      };
+    }
 
     // Crypto path — requested OR a symbol CoinGecko knows (BTC, ETH, …).
     const cgId = symbolToCoinGeckoId(symbol);

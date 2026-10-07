@@ -129,7 +129,13 @@ async function coinGeckoFetch(endpoint: string): Promise<Response> {
       Accept: "application/json",
       "User-Agent": "Mozilla/5.0",
     },
-    next: { revalidate: 300 },
+    // No `next: { revalidate }` — see the long note in price-service.ts's
+    // fetchQuoteLive. Next's fetch cache serves the PREVIOUS body and
+    // revalidates in the background, so cached prices ran one fetch-generation
+    // behind. It saved no calls (our own price_cache TTL is longer than any
+    // window we'd set), so removing it changes the data we store, not the
+    // number of requests we make.
+    cache: "no-store",
   });
 }
 

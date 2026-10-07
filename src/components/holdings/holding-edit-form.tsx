@@ -76,11 +76,15 @@ export type HoldingEditFormResult =
 type Account = { id: number; name: string; currency: string };
 
 type SymbolInfo = {
+  symbol?: string;
   kind: string;
   currency: string | null;
   label: string;
   source: string;
   isCrypto?: boolean;
+  /** Set when the typed value was an ISIN that resolved to `symbol` (GH #365). */
+  resolvedFromIsin?: string;
+  name?: string | null;
 };
 
 export type HoldingEditFormProps = {
@@ -141,6 +145,10 @@ export function HoldingEditForm({
   // list. The user can override the currency manually after detection.
   const [symbolInfo, setSymbolInfo] = useState<SymbolInfo | null>(null);
   const [symbolLoading, setSymbolLoading] = useState(false);
+  // GH #365 — an ISIN typed into Symbol is swapped for the Yahoo symbol it
+  // resolves to (that is what prices); remembered so the hint survives the
+  // follow-up lookup of the resolved symbol.
+  const [resolvedIsin, setResolvedIsin] = useState<{ isin: string; symbol: string } | null>(null);
   // Treat the saved currency as a manual override on edit-open so the
   // symbol-info auto-fill below doesn't silently rewrite it (e.g. a
   // holding saved with currency=USD and symbol=XAU would otherwise flip
@@ -243,6 +251,17 @@ export function HoldingEditForm({
         const info = (await res.json()) as SymbolInfo;
         if (cancelled) return;
         setSymbolInfo(info);
+        // An ISIN resolved: store the Yahoo symbol, not the ISIN (an ISIN
+        // never prices), and borrow the security name if none was typed.
+        if (info.resolvedFromIsin && info.symbol && info.resolvedFromIsin === sym) {
+          const resolved = info.symbol;
+          setResolvedIsin({ isin: info.resolvedFromIsin, symbol: resolved });
+          setForm((f) => ({
+            ...f,
+            symbol: resolved,
+            name: f.name.trim() ? f.name : info.name ?? f.name,
+          }));
+        }
         // Auto-fill currency: stock/etf/crypto use the detected currency;
         // unknown falls back to account currency. User overrides are sticky.
         if (!currencyTouched) {
@@ -456,7 +475,7 @@ export function HoldingEditForm({
         <Input
           value={form.symbol}
           onChange={(e) => setForm({ ...form, symbol: e.target.value })}
-          placeholder="e.g. VCN.TO, AAPL, BTC, or a currency code (USD, EUR, XAU)"
+          placeholder="e.g. VCN.TO, AAPL, BTC, an ISIN, or a currency code (USD, EUR, XAU)"
           list="symbol-suggestions"
         />
         <datalist id="symbol-suggestions">
@@ -465,7 +484,7 @@ export function HoldingEditForm({
           ))}
         </datalist>
         <p className="text-[11px] text-muted-foreground">
-          Stock or ETF ticker (Yahoo Finance), crypto symbol, or a currency code for a cash position.
+          Stock or ETF ticker (Yahoo Finance), an ISIN (looked up for you), crypto symbol, or a currency code for a cash position.
           Custom currencies you&apos;ve added in Settings are recognized here too.
         </p>
         {symbolLoading ? (
@@ -475,6 +494,11 @@ export function HoldingEditForm({
             <span className="font-medium text-foreground">{symbolInfo.label}</span>
           </p>
         ) : null}
+        {resolvedIsin && form.symbol.trim().toUpperCase() === resolvedIsin.symbol.toUpperCase() && (
+          <p className="text-[11px] text-muted-foreground">
+            Found ISIN {resolvedIsin.isin} on Yahoo Finance as {resolvedIsin.symbol}.
+          </p>
+        )}
       </div>
 
       <div className="space-y-1.5">

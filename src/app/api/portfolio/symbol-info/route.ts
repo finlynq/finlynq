@@ -16,6 +16,8 @@ import { NextRequest, NextResponse } from "next/server";
 import { requireAuth } from "@/lib/auth/require-auth";
 import { fetchQuote } from "@/lib/price-service";
 import { looksLikeYahooTicker } from "@/lib/securities/yahoo-symbol";
+import { isIsin } from "@/lib/securities/isin";
+import { resolveIsin } from "@/lib/securities/isin-resolve";
 import { symbolToCoinGeckoId } from "@/lib/crypto-service";
 import {
   isSupportedCurrency,
@@ -40,6 +42,11 @@ export type SymbolInfo = {
   price?: number;
   /** Where the info came from */
   source: "yahoo" | "coingecko" | "currency-list" | "active-currencies" | "none";
+  /** Set when the input was an ISIN: the ISIN typed. `symbol` is then the
+   *  Yahoo symbol it resolved to, which the form should store instead. */
+  resolvedFromIsin?: string;
+  /** Security name Yahoo returned for a resolved ISIN. */
+  name?: string | null;
 };
 
 /**
@@ -59,6 +66,37 @@ export async function GET(request: NextRequest) {
     return NextResponse.json({ error: "Missing symbol" }, { status: 400 });
   }
   const symbol = raw.toUpperCase();
+
+  // 0. An ISIN (GH #365) — resolve it to the Yahoo symbol and describe THAT.
+  //    Checked first: a valid ISIN is never a ticker, coin or currency code.
+  if (isIsin(symbol)) {
+    const match = await resolveIsin(symbol);
+    if (!match) {
+      return NextResponse.json<SymbolInfo>({
+        symbol,
+        kind: "unknown",
+        currency: null,
+        label: `${symbol} looks like an ISIN, but Yahoo Finance has no listing for it — enter the ticker instead`,
+        isCrypto: false,
+        source: "none",
+      });
+    }
+    const resolved = match.symbol.toUpperCase();
+    const quote = await fetchQuote(resolved);
+    return NextResponse.json<SymbolInfo>({
+      symbol: resolved,
+      kind: match.quoteType === "ETF" ? "etf" : "stock",
+      currency: quote?.currency || null,
+      label: quote?.currency
+        ? `ISIN ${symbol} → ${resolved} — priced in ${quote.currency}`
+        : `ISIN ${symbol} → ${resolved}`,
+      isCrypto: false,
+      ...(quote && quote.price > 0 ? { price: quote.price } : {}),
+      source: "yahoo",
+      resolvedFromIsin: symbol,
+      name: match.name,
+    });
+  }
 
   // 1. Crypto via CoinGecko? (BTC, ETH, SOL, ...)
   const cgId = symbolToCoinGeckoId(symbol);

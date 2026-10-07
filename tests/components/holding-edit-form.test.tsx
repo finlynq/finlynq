@@ -280,4 +280,46 @@ describe("<HoldingEditForm>", () => {
     );
     expect(postCall).toBeTruthy();
   });
+
+  it("swaps a typed ISIN for the Yahoo symbol it resolves to (GH #365)", async () => {
+    fetchMock.mockImplementation((url: string) => {
+      if (url === "/api/accounts") {
+        return Promise.resolve({ ok: true, json: () => Promise.resolve([{ id: 1, name: "Zerodha", currency: "INR" }]) });
+      }
+      if (url === "/api/portfolio/symbol-info?symbol=INF209K01YN0") {
+        return Promise.resolve({
+          ok: true,
+          json: () =>
+            Promise.resolve({
+              symbol: "0P0000XVYH.BO",
+              kind: "stock",
+              currency: "INR",
+              label: "ISIN INF209K01YN0 → 0P0000XVYH.BO — priced in INR",
+              source: "yahoo",
+              resolvedFromIsin: "INF209K01YN0",
+              name: "Aditya BSL Banking & PSU Debt",
+            }),
+        });
+      }
+      if (url.startsWith("/api/portfolio/symbol-info")) {
+        return Promise.resolve({
+          ok: true,
+          json: () => Promise.resolve({ kind: "stock", currency: "INR", label: "0P0000XVYH.BO — priced in INR", source: "yahoo" }),
+        });
+      }
+      return Promise.resolve({ ok: true, json: () => Promise.resolve([]) });
+    });
+
+    const { container, findByText } = render(
+      <HoldingEditForm defaultAccountId={1} onSave={() => {}} onCancel={() => {}} />,
+    );
+    const symbolInput = container.querySelector('input[placeholder*="ISIN"]') as HTMLInputElement | null;
+    expect(symbolInput).not.toBeNull();
+    fireEvent.change(symbolInput!, { target: { value: "inf209k01yn0" } });
+
+    await waitFor(() => expect(symbolInput!.value).toBe("0P0000XVYH.BO"), { timeout: 3000 });
+    const nameInput = container.querySelector('input[placeholder*="Apple"]') as HTMLInputElement;
+    expect(nameInput.value).toBe("Aditya BSL Banking & PSU Debt");
+    expect(await findByText(/Found ISIN INF209K01YN0 on Yahoo Finance as 0P0000XVYH\.BO/)).toBeTruthy();
+  });
 });
