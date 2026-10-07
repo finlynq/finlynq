@@ -18,6 +18,7 @@ import { logger } from "../lib/logger";
 import { formatCurrency as formatCurrencyBase } from "../lib/format";
 import { Icon } from "../components/icon";
 import { resolveTransferPair, type TransferEditSeed } from "../lib/transfer-pair";
+import { isMobileEditableOp, isPortfolioRow as isPortfolioOpRow } from "../lib/portfolio/edit-routing";
 import type { Transaction, Account, Category } from "../../../shared/types";
 import type { NativeStackScreenProps } from "@react-navigation/native-stack";
 import type { TransactionsStackParamList } from "../navigation/TransactionsStack";
@@ -48,13 +49,14 @@ export default function TransactionDetailScreen({ route, navigation }: Props) {
   const [selectedAccountId, setSelectedAccountId] = useState(transaction.accountId);
   const [selectedCategoryId, setSelectedCategoryId] = useState(transaction.categoryId);
 
-  // Portfolio-op rows (buys/sells/transfers/swaps/income/etc.) carry a quantity
-  // or a holding link. Editing them through the generic transactions PUT would
-  // corrupt the leg pair — route them to the dedicated Portfolio OperationForm
-  // instead (the load endpoint resolves the op kind + primary leg id).
-  const isPortfolioRow =
-    (transaction.quantity != null && transaction.quantity !== 0) ||
-    transaction.portfolioHolding != null;
+  // Portfolio-op rows (buys/sells/transfers/swaps/income/deposits/etc.) are
+  // edited in the Portfolio OperationForm, never the generic single-row PUT,
+  // which would leave the op's other legs stale (and which the server refuses
+  // for a linked leg's amount / account / date). Recognised by kind (as the web
+  // does — this catches the bank-side leg of a brokerage deposit, which has no
+  // holding), by holding link, or by quantity. The load endpoint resolves the
+  // op and its anchor leg id.
+  const isPortfolioRow = isPortfolioOpRow(transaction);
 
   // A transfer leg (linkId + exactly one partner in another account) is edited
   // as a PAIR in the Transfer form (PUT /api/transactions/transfer rewrites both
@@ -185,10 +187,21 @@ export default function TransactionDetailScreen({ route, navigation }: Props) {
     }
   };
 
+  const editOnWeb = () =>
+    Alert.alert(
+      "Edit on the web",
+      "This kind of investment transaction can’t be edited in the app yet. Edit it on the web.",
+    );
+
   const handleEditInPortfolio = async () => {
     try {
+      // The load endpoint names the op (a swap's sell leg loads as "swap", not
+      // "sell") and its anchor leg, which the form edits as a whole.
       const res = await endpoints.loadPortfolioOperation(transaction.id);
-      if (res.success && res.data?.op) {
+      if (res.success && res.data?.op && !isMobileEditableOp(res.data.op)) {
+        // An op the app has no form for: never fall back to the generic edit.
+        editOnWeb();
+      } else if (res.success && res.data?.op) {
         // getParent() is the tab navigator; navigate into the Portfolio tab's
         // nested OperationForm. Cast to a permissive navigate (cross-navigator
         // params aren't expressible through the typed parent prop).

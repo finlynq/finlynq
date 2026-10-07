@@ -7,6 +7,7 @@
 // (orphaned leg, multi-leg imports, same-account conversions) keeps the
 // generic single-row edit. Pure, so it is unit-testable.
 import type { LinkedTransaction, Transaction } from "../../../shared/types";
+import { isPortfolioRow } from "./portfolio/edit-routing";
 
 /** Everything the transfer form needs to edit a pair (AddTransaction route param). */
 export interface TransferEditSeed {
@@ -26,45 +27,9 @@ export interface TransferEditSeed {
   note: string | null;
 }
 
-/** Portfolio operations pair their legs too, but are edited as portfolio ops. */
-const PORTFOLIO_KINDS = new Set([
-  "buy",
-  "sell",
-  "buy_cash_leg",
-  "sell_cash_leg",
-  "in_kind_transfer_in",
-  "in_kind_transfer_out",
-  "fx_from",
-  "fx_to",
-  "fx_fee",
-  "portfolio_income",
-  "portfolio_expense",
-  "brokerage_deposit_in",
-  "brokerage_deposit_out",
-  "brokerage_withdrawal_in",
-  "brokerage_withdrawal_out",
-]);
-
 /** Envelope-encrypted value served as-is because the DEK was cold. */
 export function looksEncrypted(value: string | null | undefined): boolean {
   return typeof value === "string" && /^s?v1:/.test(value);
-}
-
-type Leg = {
-  amount: number;
-  quantity?: number | null;
-  portfolioHoldingId?: number | null;
-  portfolioHolding?: string | null;
-  kind?: string | null;
-};
-
-function isPortfolioLeg(l: Leg): boolean {
-  return (
-    (l.quantity != null && l.quantity !== 0) ||
-    l.portfolioHoldingId != null ||
-    l.portfolioHolding != null ||
-    (l.kind != null && PORTFOLIO_KINDS.has(l.kind))
-  );
 }
 
 /** The pair's note: the first readable non-empty one; null if only ciphertext. */
@@ -83,7 +48,8 @@ export function resolveTransferPair(tx: Transaction, siblings: LinkedTransaction
   if (!tx.linkId || siblings.length !== 1) return null;
   const partner = siblings[0];
   if (tx.accountId == null || partner.accountId == null || tx.accountId === partner.accountId) return null;
-  if (isPortfolioLeg(tx) || isPortfolioLeg(partner)) return null;
+  // Portfolio operations pair their legs too, but are edited as portfolio ops.
+  if (isPortfolioRow(tx) || isPortfolioRow(partner)) return null;
   // The negative leg is the source. Two legs with the same sign aren't a transfer.
   if ((tx.amount < 0) === (partner.amount < 0)) return null;
 

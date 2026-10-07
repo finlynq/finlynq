@@ -67,11 +67,13 @@ const sourceLeg = {
 
 const mockNavigate = jest.fn();
 const mockGoBack = jest.fn();
+// The tab navigator: "In Portfolio" navigates into the Portfolio tab's form.
+const mockParentNavigate = jest.fn();
 const navigation = {
   navigate: mockNavigate,
   goBack: mockGoBack,
   addListener: jest.fn(() => jest.fn()),
-  getParent: jest.fn(),
+  getParent: jest.fn(() => ({ navigate: mockParentNavigate })),
 } as any;
 
 function renderDetail(transaction: Transaction) {
@@ -158,5 +160,109 @@ describe("TransactionDetailScreen — transfers", () => {
     );
     expect(mockGoBack).not.toHaveBeenCalled();
     expect(getByText("Save")).toBeTruthy(); // the form stays open
+  });
+});
+
+describe("TransactionDetailScreen — portfolio-operation legs", () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+    (endpoints.getAccountsDetailed as jest.Mock).mockResolvedValue({ success: true, data: [] });
+    (endpoints.getCategories as jest.Mock).mockResolvedValue({ success: true, data: [] });
+    (endpoints.getSplits as jest.Mock).mockResolvedValue({ success: true, data: [] });
+    (endpoints.getLinkedTransactions as jest.Mock).mockResolvedValue({ success: true, data: [] });
+  });
+
+  // The bank-side leg of a brokerage deposit: a link_id pair, but no holding
+  // and no quantity; only its kind says it belongs to a portfolio op.
+  const depositBankLeg: Transaction = {
+    ...destLeg,
+    id: 500,
+    accountId: 1,
+    currency: "USD",
+    amount: -500,
+    kind: "brokerage_deposit_out",
+    portfolioHoldingId: null,
+  };
+
+  it("opens the deposit form for a brokerage deposit's bank-side leg", async () => {
+    (endpoints.loadPortfolioOperation as jest.Mock).mockResolvedValue({
+      success: true,
+      data: { op: "deposit", primaryTxId: 501 },
+    });
+    const { getByText, queryByText } = renderDetail(depositBankLeg);
+    await waitFor(() => expect(getByText("In Portfolio")).toBeTruthy());
+    expect(queryByText("Edit")).toBeNull(); // never the generic single-row edit
+    expect(endpoints.getLinkedTransactions).not.toHaveBeenCalled(); // nor the transfer editor
+
+    fireEvent.press(getByText("In Portfolio"));
+    await waitFor(() =>
+      expect(mockParentNavigate).toHaveBeenCalledWith("Portfolio", {
+        screen: "OperationForm",
+        params: { op: "deposit", editId: 501 },
+      }),
+    );
+    expect(endpoints.loadPortfolioOperation).toHaveBeenCalledWith(500);
+  });
+
+  it("opens the buy form for a buy's cash leg, even with the holding name locked", async () => {
+    (endpoints.loadPortfolioOperation as jest.Mock).mockResolvedValue({
+      success: true,
+      data: { op: "buy", primaryTxId: 600 },
+    });
+    const cashLeg: Transaction = {
+      ...destLeg,
+      id: 601,
+      linkId: null,
+      amount: -1500,
+      kind: "buy_cash_leg",
+      portfolioHolding: null, // cold DEK: the sleeve's name didn't decrypt
+      portfolioHoldingId: 9,
+    };
+    const { getByText } = renderDetail(cashLeg);
+    await waitFor(() => expect(getByText("In Portfolio")).toBeTruthy());
+    fireEvent.press(getByText("In Portfolio"));
+    await waitFor(() =>
+      expect(mockParentNavigate).toHaveBeenCalledWith("Portfolio", {
+        screen: "OperationForm",
+        params: { op: "buy", editId: 600 },
+      }),
+    );
+  });
+
+  it("says to edit on the web when the app has no form for the operation", async () => {
+    const alertSpy = jest.spyOn(Alert, "alert");
+    (endpoints.loadPortfolioOperation as jest.Mock).mockResolvedValue({
+      success: true,
+      data: { op: "rebalance", primaryTxId: 700 },
+    });
+    const { getByText, queryByText } = renderDetail({ ...depositBankLeg, kind: "fx_fee" });
+    await waitFor(() => expect(getByText("In Portfolio")).toBeTruthy());
+    fireEvent.press(getByText("In Portfolio"));
+    await waitFor(() =>
+      expect(alertSpy).toHaveBeenCalledWith("Edit on the web", expect.stringContaining("Edit it on the web")),
+    );
+    expect(mockParentNavigate).not.toHaveBeenCalled();
+    expect(queryByText("Save")).toBeNull();
+  });
+
+  it("shows the server's reason when the operation can't be loaded", async () => {
+    const alertSpy = jest.spyOn(Alert, "alert");
+    const reason = "Unsupported kind legacy_swap: only the 6 portfolio ops can be loaded for edit.";
+    (endpoints.loadPortfolioOperation as jest.Mock).mockResolvedValue({ success: false, error: reason });
+    const { getByText } = renderDetail({ ...depositBankLeg, kind: "sell", quantity: -3 });
+    await waitFor(() => expect(getByText("In Portfolio")).toBeTruthy());
+    fireEvent.press(getByText("In Portfolio"));
+    await waitFor(() => expect(alertSpy).toHaveBeenCalledWith("Edit on the web", reason));
+    expect(mockParentNavigate).not.toHaveBeenCalled();
+  });
+
+  it("keeps the generic edit for a plain transaction", async () => {
+    const plain: Transaction = { ...destLeg, id: 800, linkId: null, kind: null, portfolioHoldingId: null };
+    const { getByText, queryByText } = renderDetail(plain);
+    await waitFor(() => expect(getByText("Edit")).toBeTruthy());
+    expect(queryByText("In Portfolio")).toBeNull();
+    fireEvent.press(getByText("Edit"));
+    expect(getByText("Save")).toBeTruthy();
+    expect(endpoints.loadPortfolioOperation).not.toHaveBeenCalled();
   });
 });
