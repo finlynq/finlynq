@@ -13,7 +13,12 @@ import {
   isoDay,
   monthKeyOf,
   monthTitle,
+  periodRange,
+  periodTitle,
+  rollupByMonth,
+  shiftAnchor,
   shiftYearMonth,
+  weekStart,
 } from "../lib/month-calendar";
 
 describe("month-calendar date math", () => {
@@ -55,6 +60,52 @@ describe("month-calendar date math", () => {
     expect(monthTitle(2026, 6)).toBe("July 2026");
     expect(dayTitle(2026, 6, 4)).toBe("Saturday, July 4");
     expect(dayTitle(2026, 0, 1)).toBe("Thursday, January 1");
+  });
+});
+
+describe("week / month / year periods", () => {
+  it("finds the Sunday that starts a week", () => {
+    expect(weekStart("2026-07-01")).toBe("2026-06-28"); // Wed → previous Sun
+    expect(weekStart("2026-06-28")).toBe("2026-06-28"); // a Sunday is its own start
+    expect(weekStart("2026-07-04")).toBe("2026-06-28"); // Sat → same week
+    expect(weekStart("2026-01-01")).toBe("2025-12-28"); // across a year boundary
+  });
+
+  it("gives each mode's inclusive range, weeks crossing month and year ends", () => {
+    expect(periodRange("week", "2026-07-01")).toEqual({ start: "2026-06-28", end: "2026-07-04" });
+    expect(periodRange("week", "2026-01-01")).toEqual({ start: "2025-12-28", end: "2026-01-03" });
+    expect(periodRange("month", "2026-02-17")).toEqual({ start: "2026-02-01", end: "2026-02-28" });
+    expect(periodRange("month", "2024-02-17")).toEqual({ start: "2024-02-01", end: "2024-02-29" });
+    expect(periodRange("year", "2026-07-15")).toEqual({ start: "2026-01-01", end: "2026-12-31" });
+  });
+
+  it("shifts anchors; month and year steps land on the 1st", () => {
+    expect(shiftAnchor("month", "2026-01-31", 1)).toBe("2026-02-01"); // never skips February
+    expect(shiftAnchor("month", "2026-03-31", -1)).toBe("2026-02-01");
+    expect(shiftAnchor("month", "2026-12-15", 1)).toBe("2027-01-01");
+    expect(shiftAnchor("month", "2026-01-15", -1)).toBe("2025-12-01");
+    expect(shiftAnchor("year", "2026-07-15", 1)).toBe("2027-07-01");
+    expect(shiftAnchor("year", "2026-07-15", -1)).toBe("2025-07-01");
+    expect(shiftAnchor("week", "2026-06-30", 1)).toBe("2026-07-07");
+    expect(shiftAnchor("week", "2026-01-02", -1)).toBe("2025-12-26");
+  });
+
+  it("rolls days up by month, rounding to cents", () => {
+    const out = rollupByMonth([
+      { date: "2026-03-02", income: 1000.1, spending: 0.2, count: 3 },
+      { date: "2026-03-20", income: 0, spending: 0.1, count: 1 },
+      { date: "2026-11-05", income: 0, spending: -12.5, count: 2 },
+    ]);
+    expect(out.get("2026-03")).toEqual({ income: 1000.1, spending: 0.3, count: 4 });
+    expect(out.get("2026-11")).toEqual({ income: 0, spending: -12.5, count: 2 });
+    expect(out.has("2026-04")).toBe(false);
+  });
+
+  it("titles each period", () => {
+    expect(periodTitle("week", "2026-07-01")).toBe("Jun 28 – Jul 4, 2026");
+    expect(periodTitle("week", "2026-01-01")).toBe("Dec 28 – Jan 3, 2026");
+    expect(periodTitle("month", "2026-07-19")).toBe("July 2026");
+    expect(periodTitle("year", "2026-07-19")).toBe("2026");
   });
 });
 

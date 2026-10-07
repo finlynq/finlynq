@@ -14,6 +14,41 @@ import { daysInMonth, firstWeekday, monthKeyOf, monthTitle } from "../lib/month-
 
 const DAY_NAMES = ["S", "M", "T", "W", "T", "F", "S"];
 
+/**
+ * Period navigation row: previous / title (+ "Back to today" when `onToday` is
+ * given) / next. Shared by the month grid and the week / year views, so every
+ * calendar header looks and reads the same.
+ */
+export function CalendarHeader({
+  title,
+  unit,
+  onShift,
+  onToday,
+}: {
+  title: string;
+  /** "month" / "week" / "year" — used in the arrows' accessibility labels. */
+  unit: string;
+  onShift: (delta: number) => void;
+  /** Omit when the period on screen already contains today. */
+  onToday?: () => void;
+}) {
+  const { colors } = useTheme();
+  return (
+    <View style={styles.head}>
+      <TouchableOpacity onPress={() => onShift(-1)} hitSlop={10} accessibilityLabel={`Previous ${unit}`}>
+        <Icon name="back" size={20} color={colors.foreground} />
+      </TouchableOpacity>
+      <TouchableOpacity disabled={!onToday} onPress={onToday}>
+        <Text style={[styles.title, { color: colors.foreground }]}>{title}</Text>
+        {onToday && <Text style={[styles.todayLink, { color: colors.primary }]}>Back to today</Text>}
+      </TouchableOpacity>
+      <TouchableOpacity onPress={() => onShift(1)} hitSlop={10} accessibilityLabel={`Next ${unit}`}>
+        <Icon name="chevronRight" size={20} color={colors.foreground} />
+      </TouchableOpacity>
+    </View>
+  );
+}
+
 export interface MonthCalendarProps {
   year: number;
   /** 0-based (January = 0). */
@@ -55,18 +90,12 @@ export function MonthCalendar({
 
   return (
     <>
-      <View style={styles.head}>
-        <TouchableOpacity onPress={() => onShiftMonth(-1)} hitSlop={10} accessibilityLabel="Previous month">
-          <Icon name="back" size={20} color={colors.foreground} />
-        </TouchableOpacity>
-        <TouchableOpacity disabled={isCurrentMonth} onPress={onToday}>
-          <Text style={[styles.title, { color: colors.foreground }]}>{label}</Text>
-          {!isCurrentMonth && <Text style={[styles.todayLink, { color: colors.primary }]}>Back to today</Text>}
-        </TouchableOpacity>
-        <TouchableOpacity onPress={() => onShiftMonth(1)} hitSlop={10} accessibilityLabel="Next month">
-          <Icon name="chevronRight" size={20} color={colors.foreground} />
-        </TouchableOpacity>
-      </View>
+      <CalendarHeader
+        title={label}
+        unit="month"
+        onShift={onShiftMonth}
+        onToday={isCurrentMonth ? undefined : onToday}
+      />
       <View style={styles.weekRow}>
         {DAY_NAMES.map((d, i) => (
           <Text key={i} style={[styles.weekday, { color: colors.mutedForeground }]}>{d}</Text>

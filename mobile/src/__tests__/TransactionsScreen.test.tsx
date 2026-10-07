@@ -6,12 +6,23 @@ import { ThemeContext } from "../theme";
 import type { Theme } from "../theme";
 import { lightColors } from "../theme/colors";
 import { localDateISO } from "../lib/subscriptions";
-import { datePartsOf, dayTitle, isoDay, monthKeyOf, shiftYearMonth } from "../lib/month-calendar";
+import {
+  datePartsOf,
+  dayTitle,
+  isoDay,
+  monthKeyOf,
+  monthTitle,
+  periodRange,
+  shiftAnchor,
+  shiftYearMonth,
+} from "../lib/month-calendar";
+import { addDays } from "../lib/subscriptions";
 
 jest.mock("../api/client", () => ({
   endpoints: {
     getTransactions: jest.fn(),
     getTransactionsCalendar: jest.fn(),
+    getTransactionsCalendarRange: jest.fn(),
     deleteTransaction: jest.fn(),
   },
 }));
@@ -272,6 +283,9 @@ describe("TransactionsScreen calendar view", () => {
     jest.clearAllMocks();
     mockTransactionsByQuery();
     (endpoints.getTransactionsCalendar as jest.Mock).mockResolvedValue({ success: true, data: calendarPayload });
+    (endpoints.getTransactionsCalendarRange as jest.Mock).mockImplementation((start: string, end: string) =>
+      Promise.resolve({ success: true, data: { ...calendarPayload, month: undefined, start, end } }),
+    );
   });
 
   it("toggles between the list and the calendar", async () => {
@@ -291,10 +305,10 @@ describe("TransactionsScreen calendar view", () => {
     expect(getByText("+$2,834.50")).toBeTruthy(); // net = income − spending
 
     // Day 4 had income and spending; day 10 spending only.
-    expect(getByTestId("income-dot-4")).toBeTruthy();
-    expect(getByTestId("spending-dot-4")).toBeTruthy();
-    expect(queryByTestId("income-dot-10")).toBeNull();
-    expect(getByTestId("spending-dot-10")).toBeTruthy();
+    expect(getByTestId(`income-dot-${day4}`)).toBeTruthy();
+    expect(getByTestId(`spending-dot-${day4}`)).toBeTruthy();
+    expect(queryByTestId(`income-dot-${day10}`)).toBeNull();
+    expect(getByTestId(`spending-dot-${day10}`)).toBeTruthy();
     expect(getByLabelText(/ 4, 2 transactions, income \$3,000\.00, spending \$45\.50$/)).toBeTruthy();
   });
 
@@ -363,5 +377,138 @@ describe("TransactionsScreen calendar view", () => {
     fireEvent.press(getByText("Retry"));
     await waitFor(() => expect(getByText("$3,000.00")).toBeTruthy());
     expect(queryByText(/needs a newer Finlynq server/)).toBeNull();
+  });
+});
+
+describe("TransactionsScreen calendar — week and year views", () => {
+  const today = localDateISO();
+  const thisYear = today.slice(0, 4);
+  // Two months that are never the current one, so the rollup is date-proof.
+  const mA = (now.month + 4) % 12;
+  const mB = (now.month + 8) % 12;
+  const keyA = monthKeyOf(now.year, mA);
+  const keyB = monthKeyOf(now.year, mB);
+  const nameA = monthTitle(now.year, mA).split(" ")[0];
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    mockTransactionsByQuery();
+    (endpoints.getTransactionsCalendar as jest.Mock).mockResolvedValue({ success: true, data: calendarPayload });
+    (endpoints.getTransactionsCalendarRange as jest.Mock).mockImplementation((start: string, end: string) =>
+      Promise.resolve({
+        success: true,
+        data: {
+          start,
+          end,
+          displayCurrency: "USD",
+          // Two months of the year, so the year tiles have something to roll up.
+          days: [
+            { date: `${keyA}-02`, income: 1000, spending: 200, count: 3 },
+            { date: `${keyA}-20`, income: 0, spending: 50.25, count: 1 },
+            { date: `${keyB}-05`, income: 0, spending: 10, count: 1 },
+          ],
+          totals: { income: 4000, spending: 305.75, count: 7 },
+        },
+      }),
+    );
+  });
+
+  it("week view asks for the Sunday–Saturday range and draws seven days", async () => {
+    const { getByText, getByTestId, queryByLabelText, getByLabelText } = await openCalendar();
+    fireEvent.press(getByText("Week"));
+    const week = periodRange("week", today);
+    await waitFor(() =>
+      expect(endpoints.getTransactionsCalendarRange).toHaveBeenLastCalledWith(week.start, week.end),
+    );
+    expect(new Date(`${week.start}T00:00:00Z`).getUTCDay()).toBe(0);
+    for (let i = 0; i < 7; i++) expect(getByTestId(`week-day-${addDays(week.start, i)}`)).toBeTruthy();
+    expect(getByLabelText("Next week")).toBeTruthy();
+    expect(queryByLabelText("Next month")).toBeNull();
+    // Whole-week totals with no day selected.
+    await waitFor(() => expect(getByText("Net for the week")).toBeTruthy());
+    expect(getByText("+$3,694.25")).toBeTruthy();
+
+    // A day in the week lists that day's transactions.
+    fireEvent.press(getByTestId(`week-day-${week.start}`));
+    await waitFor(() =>
+      expect(endpoints.getTransactions).toHaveBeenLastCalledWith(
+        expect.stringContaining(`startDate=${week.start}&endDate=${week.start}`),
+      ),
+    );
+
+    // Next week moves the range by seven days and clears the selection.
+    fireEvent.press(getByLabelText("Next week"));
+    const next = periodRange("week", shiftAnchor("week", today, 1));
+    await waitFor(() =>
+      expect(endpoints.getTransactionsCalendarRange).toHaveBeenLastCalledWith(next.start, next.end),
+    );
+    expect(getByText("Back to today")).toBeTruthy();
+  });
+
+  it("year view rolls the year up into twelve tiles, and a tile opens its month", async () => {
+    const { getByText, getByTestId, getByLabelText } = await openCalendar();
+    fireEvent.press(getByText("Year"));
+    await waitFor(() =>
+      expect(endpoints.getTransactionsCalendarRange).toHaveBeenLastCalledWith(`${thisYear}-01-01`, `${thisYear}-12-31`),
+    );
+    for (let m = 1; m <= 12; m++) {
+      expect(getByTestId(`year-month-${thisYear}-${String(m).padStart(2, "0")}`)).toBeTruthy();
+    }
+    expect(getByText(thisYear)).toBeTruthy();
+    await waitFor(() => expect(getByText("Net for the year")).toBeTruthy());
+    // Month A = two days rolled up.
+    expect(getByLabelText(`Open ${nameA} ${thisYear}, 4 transactions`)).toBeTruthy();
+    expect(getByText("+$1,000")).toBeTruthy();
+    expect(getByText("−$250")).toBeTruthy();
+    expect(getByText("4 tx")).toBeTruthy();
+
+    fireEvent.press(getByTestId(`year-month-${keyA}`));
+    await waitFor(() => expect(endpoints.getTransactionsCalendar).toHaveBeenLastCalledWith(keyA));
+    expect(getByLabelText("Next month")).toBeTruthy();
+    expect(getByText("Net for the month")).toBeTruthy();
+  });
+
+  it("keeps the selected day across a switch to Week, and clears it for Year", async () => {
+    const { getByText, getByTestId, queryByText } = await openCalendar();
+    fireEvent.press(getByTestId("calendar-day-4"));
+    await waitFor(() => expect(getByText("Corner Bakery")).toBeTruthy());
+
+    fireEvent.press(getByText("Week"));
+    const week = periodRange("week", day4);
+    await waitFor(() =>
+      expect(endpoints.getTransactionsCalendarRange).toHaveBeenLastCalledWith(week.start, week.end),
+    );
+    expect(getByTestId(`week-day-${day4}`).props.accessibilityState).toEqual({ selected: true });
+    expect(getByText("Corner Bakery")).toBeTruthy();
+
+    fireEvent.press(getByText("Year"));
+    await waitFor(() => expect(queryByText("Corner Bakery")).toBeNull());
+    expect(getByText("Net for the year")).toBeTruthy();
+  });
+
+  it("Back to today in Year view goes to this year without selecting a day", async () => {
+    const { getByText, getByLabelText } = await openCalendar();
+    fireEvent.press(getByText("Year"));
+    fireEvent.press(getByLabelText("Previous year"));
+    const lastYear = String(Number(thisYear) - 1);
+    await waitFor(() =>
+      expect(endpoints.getTransactionsCalendarRange).toHaveBeenLastCalledWith(`${lastYear}-01-01`, `${lastYear}-12-31`),
+    );
+    (endpoints.getTransactions as jest.Mock).mockClear();
+    fireEvent.press(getByText("Back to today"));
+    await waitFor(() =>
+      expect(endpoints.getTransactionsCalendarRange).toHaveBeenLastCalledWith(`${thisYear}-01-01`, `${thisYear}-12-31`),
+    );
+    expect(endpoints.getTransactions).not.toHaveBeenCalled();
+  });
+
+  it("explains a server that only knows month=", async () => {
+    (endpoints.getTransactionsCalendarRange as jest.Mock).mockResolvedValue({
+      success: false,
+      error: "month must be YYYY-MM",
+    });
+    const { getByText } = await openCalendar();
+    fireEvent.press(getByText("Week"));
+    await waitFor(() => expect(getByText(/Week and Year views need a newer Finlynq server/)).toBeTruthy());
   });
 });

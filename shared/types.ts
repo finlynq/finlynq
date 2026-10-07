@@ -1367,7 +1367,8 @@ export interface CategoryDetailResponse {
 }
 
 // ─── Transactions calendar (2026-10) ────────────────────────────────────────
-// GET /api/transactions/calendar?month=YYYY-MM[&accountId=][&categoryId=].
+// GET /api/transactions/calendar?month=YYYY-MM[&accountId=][&categoryId=], or
+// ?start=YYYY-MM-DD&end=YYYY-MM-DD (≤366 days; the week and year views).
 // apiHandler envelope `{ success, data }` (request() passes it through, so
 // `res.data` is the payload below). Only days WITH transactions appear in
 // `days`. Amounts are already in `displayCurrency` and follow the Reports flow
@@ -1383,7 +1384,11 @@ export interface TransactionsCalendarDay {
 }
 
 export interface TransactionsCalendarResponse {
-  month: string;
+  /** Present only for a `month=` request. */
+  month?: string;
+  /** The inclusive range served (newer servers send it for both forms). */
+  start?: string;
+  end?: string;
   displayCurrency: string;
   days: TransactionsCalendarDay[];
   totals: { income: number; spending: number; count: number };

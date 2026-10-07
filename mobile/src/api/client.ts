@@ -603,6 +603,18 @@ export const endpoints = {
     if (opts?.categoryId != null) q.set("categoryId", String(opts.categoryId));
     return api.get<TransactionsCalendarResponse>(`/api/transactions/calendar?${q.toString()}`);
   },
+  // Same totals for any inclusive range up to 366 days (the week and year
+  // views). Servers that only know `month=` answer 400 "month must be YYYY-MM".
+  getTransactionsCalendarRange: (
+    start: string,
+    end: string,
+    opts?: { accountId?: number; categoryId?: number },
+  ) => {
+    const q = new URLSearchParams({ start, end });
+    if (opts?.accountId != null) q.set("accountId", String(opts.accountId));
+    if (opts?.categoryId != null) q.set("categoryId", String(opts.categoryId));
+    return api.get<TransactionsCalendarResponse>(`/api/transactions/calendar?${q.toString()}`);
+  },
 
   // Transaction splits — view metadata that divides a parent across rows. All
   // three return bare JSON: GET → Split[] (decrypted), POST → Split[] (201,

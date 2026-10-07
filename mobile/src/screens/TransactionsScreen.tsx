@@ -1,9 +1,9 @@
-// Transactions tab — the newest 50 rows as a searchable List, or a month
-// Calendar (in-app feedback 2026-10-07, mirrors the web Transactions page's
-// calendar view). The calendar's per-day income / spending / count come from
-// GET /api/transactions/calendar, which follows the Reports money rules;
-// tapping a day lists that day's transactions from the same /api/transactions
-// path the list uses.
+// Transactions tab — the newest 50 rows as a searchable List, or a Calendar
+// with Week / Month / Year views (in-app feedback 2026-10-07, mirrors the web
+// Transactions page's calendar view). The per-day income / spending / count
+// come from GET /api/transactions/calendar, which follows the Reports money
+// rules; tapping a day lists that day's transactions from the same
+// /api/transactions path the list uses, and a Year tile opens its month.
 import React, { useEffect, useState, useCallback, useMemo, useRef } from "react";
 import {
   View,
@@ -24,14 +24,21 @@ import { logger } from "../lib/logger";
 import { formatCurrency, safeName, formatShortDate } from "../lib/format";
 import { localDateISO } from "../lib/subscriptions";
 import { DEFAULT_DISPLAY_CURRENCY } from "../lib/dashboard";
-import { datePartsOf, dayTitle, isoDay, monthKeyOf, shiftYearMonth } from "../lib/month-calendar";
-import { MonthCalendar } from "../components/MonthCalendar";
+import {
+  datePartsOf,
+  dayTitle,
+  isoDay,
+  periodRange,
+  periodTitle,
+  rollupByMonth,
+  shiftAnchor,
+  type CalendarMode,
+  type PeriodTotals,
+} from "../lib/month-calendar";
+import { CalendarHeader, MonthCalendar } from "../components/MonthCalendar";
+import { DayIndicators, IndicatorLegend, WeekGrid, YearGrid } from "../components/transactions/CalendarPeriods";
 import { StatTile } from "../components/StatTile";
-import type {
-  Transaction,
-  TransactionsCalendarDay,
-  TransactionsCalendarResponse,
-} from "../../../shared/types";
+import type { Transaction, TransactionsCalendarResponse } from "../../../shared/types";
 import type { NativeStackScreenProps } from "@react-navigation/native-stack";
 import type { TransactionsStackParamList } from "../navigation/TransactionsStack";
 import { useIsFocused } from "@react-navigation/native";
@@ -53,12 +60,23 @@ function dayQuery(iso: string): string {
   return params.toString();
 }
 
-/** A server older than the 2026-10 web release has no calendar route. */
+/** A server older than the 2026-10 web release has no calendar route; one
+ *  from before the week/year views refuses a `start`/`end` range. */
 function calendarError(error: string): string {
-  return error === "Not found" || error === "HTTP 404"
-    ? "The calendar needs a newer Finlynq server. Update your server, or use the List view."
-    : error;
+  if (error === "Not found" || error === "HTTP 404") {
+    return "The calendar needs a newer Finlynq server. Update your server, or use the List view.";
+  }
+  if (error === "month must be YYYY-MM") {
+    return "Week and Year views need a newer Finlynq server. Month view still works.";
+  }
+  return error;
 }
+
+const MODES: { key: CalendarMode; label: string }[] = [
+  { key: "week", label: "Week" },
+  { key: "month", label: "Month" },
+  { key: "year", label: "Year" },
+];
 
 export default function TransactionsScreen({ navigation }: Props) {
   const { colors } = useTheme();
@@ -113,17 +131,22 @@ export default function TransactionsScreen({ navigation }: Props) {
 
   // ── calendar view ────────────────────────────────────────────────────────
   const today = localDateISO();
-  // (year, 0-based month, selected day). No day selected → month totals.
-  const [cal, setCal] = useState(() => {
-    const t = datePartsOf(localDateISO());
-    return { year: t.year, month: t.month, day: null as number | null };
-  });
-  const monthKey = monthKeyOf(cal.year, cal.month);
-  const selectedIso = cal.day != null ? isoDay(cal.year, cal.month, cal.day) : null;
+  // Week / month / year (month by default, as on the web). `calAnchor` is any
+  // ISO day inside the visible period; `calDay` the selected day, if any. No
+  // day selected → the whole period's totals.
+  const [calMode, setCalMode] = useState<CalendarMode>("month");
+  const [calAnchor, setCalAnchor] = useState(() => localDateISO());
+  const [calDay, setCalDay] = useState<string | null>(null);
+  const { start: periodStart, end: periodEnd } = periodRange(calMode, calAnchor);
+  // The request for the visible period: month view keeps `month=` (what the
+  // first calendar release sent); week and year ask for the range.
+  const periodKey =
+    calMode === "month" ? `month=${calAnchor.slice(0, 7)}` : `start=${periodStart}&end=${periodEnd}`;
+  const selectedIso = calDay;
 
   // The last calendar payload is kept across refetches (the grid never blanks);
-  // it is only DRAWN while it belongs to the month on screen.
-  const [calData, setCalData] = useState<TransactionsCalendarResponse | null>(null);
+  // it is only DRAWN while it belongs to the period on screen.
+  const [calData, setCalData] = useState<{ key: string; data: TransactionsCalendarResponse } | null>(null);
   const [calLoading, setCalLoading] = useState(false);
   const [calRefreshing, setCalRefreshing] = useState(false);
   const [calError, setCalError] = useState<string | null>(null);
@@ -134,20 +157,24 @@ export default function TransactionsScreen({ navigation }: Props) {
   const [dayError, setDayError] = useState<{ date: string; message: string } | null>(null);
   const dayReq = useRef(0);
 
-  const fetchCalendar = useCallback(async (month: string, isRefresh = false) => {
+  const fetchCalendar = useCallback(async (key: string, isRefresh = false) => {
     const req = ++calReq.current;
     if (isRefresh) setCalRefreshing(true);
     else setCalLoading(true);
     try {
-      const res = await endpoints.getTransactionsCalendar(month);
-      if (req !== calReq.current) return; // a newer month was requested
+      const q = new URLSearchParams(key);
+      const month = q.get("month");
+      const res = month
+        ? await endpoints.getTransactionsCalendar(month)
+        : await endpoints.getTransactionsCalendarRange(q.get("start") ?? "", q.get("end") ?? "");
+      if (req !== calReq.current) return; // a newer period was requested
       if (res.success && res.data) {
-        setCalData(res.data);
+        setCalData({ key, data: res.data });
         setCalError(null);
-        logger.info("transactions", `calendar ${month}: ${res.data.days?.length ?? 0} days`);
+        logger.info("transactions", `calendar ${key}: ${res.data.days?.length ?? 0} days`);
       } else {
         const err = res.success ? "Unexpected response" : res.error;
-        logger.warn("transactions", "calendar fetch failed", { month, error: err });
+        logger.warn("transactions", "calendar fetch failed", { key, error: err });
         setCalError(calendarError(err));
       }
     } catch (e) {
@@ -185,40 +212,56 @@ export default function TransactionsScreen({ navigation }: Props) {
 
   // Refetch on focus too, so an edit/delete made on TransactionDetail shows up.
   useEffect(() => {
-    if (isFocused && view === "calendar") fetchCalendar(monthKey);
-  }, [isFocused, view, monthKey, fetchCalendar]);
+    if (isFocused && view === "calendar") fetchCalendar(periodKey);
+  }, [isFocused, view, periodKey, fetchCalendar]);
 
   useEffect(() => {
     if (isFocused && view === "calendar" && selectedIso) fetchDay(selectedIso);
   }, [isFocused, view, selectedIso, fetchDay]);
 
   const refreshCalendar = () => {
-    fetchCalendar(monthKey, true);
+    fetchCalendar(periodKey, true);
     if (selectedIso) fetchDay(selectedIso);
   };
 
-  const monthData = calData && calData.month === monthKey ? calData : null;
-  const byDay = useMemo(() => {
-    const map = new Map<number, TransactionsCalendarDay>();
-    for (const d of monthData?.days ?? []) map.set(Number(d.date.slice(8, 10)), d);
+  const periodData = calData && calData.key === periodKey ? calData.data : null;
+  const byDate = useMemo(() => {
+    const map = new Map<string, PeriodTotals>();
+    for (const d of periodData?.days ?? []) map.set(d.date, d);
     return map;
-  }, [monthData]);
-  const currency = monthData?.displayCurrency ?? calData?.displayCurrency ?? DEFAULT_DISPLAY_CURRENCY;
-  const totals = monthData?.totals ?? { income: 0, spending: 0, count: 0 };
+  }, [periodData]);
+  const monthTotals = useMemo(() => rollupByMonth(periodData?.days ?? []), [periodData]);
+  const currency = periodData?.displayCurrency ?? calData?.data.displayCurrency ?? DEFAULT_DISPLAY_CURRENCY;
+  const totals = periodData?.totals ?? { income: 0, spending: 0, count: 0 };
   const net = totals.income - totals.spending;
-  // Tiles read "—" until the month on screen has loaded, never a fake $0.
-  const money = (n: number) => (monthData ? formatCurrency(n, currency) : "—");
+  // Tiles read "—" until the period on screen has loaded, never a fake $0.
+  const money = (n: number) => (periodData ? formatCurrency(n, currency) : "—");
   const dayList = dayRows && dayRows.date === selectedIso ? dayRows.rows : null;
   const dayErrorMessage = dayError && dayError.date === selectedIso ? dayError.message : null;
-  const selectedSummary = cal.day != null ? byDay.get(cal.day) : undefined;
+  const selectedSummary = calDay ? byDate.get(calDay) : undefined;
+  const anchorParts = datePartsOf(calAnchor);
+  const isCurrentPeriod = today >= periodStart && today <= periodEnd;
 
-  const shiftMonth = (delta: number) => {
-    const next = shiftYearMonth(cal.year, cal.month, delta);
-    setCal({ year: next.year, month: next.month, day: null });
+  // Mirrors the web's calendar handlers (transactions-workspace.tsx).
+  const shiftPeriod = (delta: number) => {
+    setCalAnchor((a) => shiftAnchor(calMode, a, delta));
+    setCalDay(null);
   };
   const goToToday = () => {
-    const t = datePartsOf(localDateISO());
-    setCal({ year: t.year, month: t.month, day: t.day });
+    const t = localDateISO();
+    setCalAnchor(t);
+    setCalDay(calMode === "year" ? null : t);
+  };
+  const changeMode = (mode: CalendarMode) => {
+    // Keep the selected day (or the anchor) in view across the switch.
+    if (calDay) setCalAnchor(calDay);
+    if (mode === "year") setCalDay(null);
+    setCalMode(mode);
+  };
+  const openMonth = (firstOfMonth: string) => {
+    setCalMode("month");
+    setCalAnchor(firstOfMonth);
+    setCalDay(null);
   };
 
   // ── shared row + actions ─────────────────────────────────────────────────
@@ -237,7 +280,7 @@ export default function TransactionsScreen({ navigation }: Props) {
               if (res.success) {
                 setTransactions((prev) => prev.filter((t) => t.id !== tx.id));
                 setDayRows((prev) => (prev ? { ...prev, rows: prev.rows.filter((t) => t.id !== tx.id) } : prev));
-                if (view === "calendar") fetchCalendar(monthKey);
+                if (view === "calendar") fetchCalendar(periodKey);
               }
             } catch {
               Alert.alert("Error", "Cannot connect to server");
@@ -356,9 +399,21 @@ export default function TransactionsScreen({ navigation }: Props) {
 
   const dayCountLabel = (n: number) => `${n} transaction${n === 1 ? "" : "s"}`;
 
-  const dayView = cal.day != null && (
+  const dayLabel = (iso: string) => {
+    const d = byDate.get(iso);
+    if (!d) return "";
+    const parts = [dayCountLabel(d.count)];
+    if (d.income) parts.push(`income ${formatCurrency(d.income, currency)}`);
+    if (d.spending) parts.push(`spending ${formatCurrency(d.spending, currency)}`);
+    return parts.join(", ");
+  };
+
+  const selectedParts = calDay ? datePartsOf(calDay) : null;
+  const dayView = selectedParts && (
     <View>
-      <Text style={[styles.dayTitle, { color: colors.foreground }]}>{dayTitle(cal.year, cal.month, cal.day)}</Text>
+      <Text style={[styles.dayTitle, { color: colors.foreground }]}>
+        {dayTitle(selectedParts.year, selectedParts.month, selectedParts.day)}
+      </Text>
       {selectedSummary ? (
         <Text style={[styles.daySub, { color: colors.mutedForeground }]}>
           {[
@@ -409,11 +464,11 @@ export default function TransactionsScreen({ navigation }: Props) {
       {calError ? (
         <View style={[styles.banner, { backgroundColor: colors.card, borderColor: colors.destructive }]}>
           <Text style={[styles.bannerText, { color: colors.destructive }]}>
-            {monthData ? `${calError} — showing your last loaded data.` : calError}
+            {periodData ? `${calError} — showing your last loaded data.` : calError}
           </Text>
           <TouchableOpacity
             style={[styles.retryBtn, { borderColor: colors.border }]}
-            onPress={() => fetchCalendar(monthKey)}
+            onPress={() => fetchCalendar(periodKey)}
             accessibilityRole="button"
           >
             <Text style={[styles.retryText, { color: colors.primary }]}>Retry</Text>
@@ -422,62 +477,78 @@ export default function TransactionsScreen({ navigation }: Props) {
       ) : null}
 
       <View style={[styles.calCard, { backgroundColor: colors.card, borderColor: colors.border }]}>
-        <MonthCalendar
-          year={cal.year}
-          month={cal.month}
-          today={today}
-          selectedDay={cal.day}
-          onSelectDay={(day) => setCal((c) => ({ ...c, day }))}
-          onShiftMonth={shiftMonth}
-          onToday={goToToday}
-          cellHeight={56}
-          dayLabel={(day) => {
-            const d = byDay.get(day);
-            if (!d) return "";
-            const parts = [dayCountLabel(d.count)];
-            if (d.income) parts.push(`income ${formatCurrency(d.income, currency)}`);
-            if (d.spending) parts.push(`spending ${formatCurrency(d.spending, currency)}`);
-            return parts.join(", ");
-          }}
-          renderDay={(day) => {
-            const d = byDay.get(day);
-            if (!d) return null;
-            // Phone width: dots + the day's count (amounts don't fit a cell).
-            return (
-              <>
-                <View style={styles.calDots}>
-                  {d.income > 0 && <View testID={`income-dot-${day}`} style={[styles.calDot, { backgroundColor: colors.pos }]} />}
-                  {d.spending > 0 && <View testID={`spending-dot-${day}`} style={[styles.calDot, { backgroundColor: colors.neg }]} />}
-                  {!(d.income > 0) && !(d.spending > 0) && (
-                    <View style={[styles.calDot, { backgroundColor: colors.mutedForeground }]} />
-                  )}
-                </View>
-                <Text style={[styles.calCount, { color: colors.mutedForeground }]}>{d.count}</Text>
-              </>
-            );
-          }}
-        />
-        <View style={styles.legend}>
-          {[
-            { label: "Income", color: colors.pos },
-            { label: "Spending", color: colors.neg },
-          ].map((l) => (
-            <View key={l.label} style={styles.legendItem}>
-              <View style={[styles.calDot, { backgroundColor: l.color }]} />
-              <Text style={[styles.legendText, { color: colors.mutedForeground }]}>{l.label}</Text>
-            </View>
+        <View style={[styles.modeSegment, { backgroundColor: colors.secondary }]}>
+          {MODES.map((m) => (
+            <TouchableOpacity
+              key={m.key}
+              onPress={() => changeMode(m.key)}
+              style={[styles.modeBtn, calMode === m.key && { backgroundColor: colors.card }]}
+              accessibilityState={{ selected: calMode === m.key }}
+            >
+              <Text style={[styles.modeText, { color: calMode === m.key ? colors.foreground : colors.mutedForeground }]}>
+                {m.label}
+              </Text>
+            </TouchableOpacity>
           ))}
-          <View style={styles.legendItem}>
-            <Text style={[styles.calCount, styles.legendCount, { color: colors.mutedForeground }]}>#</Text>
-            <Text style={[styles.legendText, { color: colors.mutedForeground }]}>Transactions</Text>
-          </View>
         </View>
+
+        {calMode === "month" ? (
+          <MonthCalendar
+            year={anchorParts.year}
+            month={anchorParts.month}
+            today={today}
+            selectedDay={calDay && calDay.slice(0, 7) === calAnchor.slice(0, 7) ? Number(calDay.slice(8, 10)) : null}
+            onSelectDay={(day) => setCalDay(day == null ? null : isoDay(anchorParts.year, anchorParts.month, day))}
+            onShiftMonth={shiftPeriod}
+            onToday={goToToday}
+            cellHeight={56}
+            dayLabel={(day) => dayLabel(isoDay(anchorParts.year, anchorParts.month, day))}
+            renderDay={(day) => {
+              const iso = isoDay(anchorParts.year, anchorParts.month, day);
+              return <DayIndicators date={iso} totals={byDate.get(iso)} />;
+            }}
+          />
+        ) : calMode === "week" ? (
+          <>
+            <CalendarHeader
+              title={periodTitle("week", calAnchor)}
+              unit="week"
+              onShift={shiftPeriod}
+              onToday={isCurrentPeriod ? undefined : goToToday}
+            />
+            <WeekGrid
+              start={periodStart}
+              today={today}
+              selectedDay={calDay}
+              byDate={byDate}
+              onSelectDay={setCalDay}
+              dayLabel={dayLabel}
+            />
+          </>
+        ) : (
+          <>
+            <CalendarHeader
+              title={periodTitle("year", calAnchor)}
+              unit="year"
+              onShift={shiftPeriod}
+              onToday={isCurrentPeriod ? undefined : goToToday}
+            />
+            <YearGrid
+              year={anchorParts.year}
+              today={today}
+              months={monthTotals}
+              currency={currency}
+              onOpenMonth={openMonth}
+            />
+          </>
+        )}
+        {calMode !== "year" ? <IndicatorLegend /> : null}
         {calLoading ? (
           <ActivityIndicator style={styles.calSpinner} size="small" color={colors.primary} />
         ) : null}
       </View>
 
-      {cal.day != null ? (
+      {calDay ? (
         dayView
       ) : (
         <>
@@ -485,15 +556,15 @@ export default function TransactionsScreen({ navigation }: Props) {
             <StatTile label="Income" value={money(totals.income)} color={colors.pos} />
             <StatTile label="Spending" value={money(totals.spending)} color={colors.neg} />
             <StatTile
-              label="Net"
-              value={monthData && net > 0 ? `+${money(net)}` : money(net)}
-              color={!monthData ? undefined : net >= 0 ? colors.pos : colors.neg}
+              label={`Net for the ${calMode}`}
+              value={periodData && net > 0 ? `+${money(net)}` : money(net)}
+              color={!periodData ? undefined : net >= 0 ? colors.pos : colors.neg}
             />
-            <StatTile label="Transactions" value={monthData ? String(totals.count) : "—"} />
+            <StatTile label="Transactions" value={periodData ? String(totals.count) : "—"} />
           </View>
           <Text style={[styles.hint, styles.calHint, { color: colors.mutedForeground }]}>
-            Tap a day to see its transactions. Transfers between your accounts and investment trades are counted but
-            aren't income or spending. Totals in {currency}.
+            {calMode === "year" ? "Tap a month to open it." : "Tap a day to see its transactions."} Transfers between
+            your accounts and investment trades are counted but aren't income or spending. Totals in {currency}.
           </Text>
         </>
       )}
@@ -600,15 +671,11 @@ const styles = StyleSheet.create({
     overflow: "hidden",
     padding: 10,
   },
-  calDots: { flexDirection: "row", marginTop: 3, height: 6 },
-  calDot: { width: 6, height: 6, borderRadius: 3, marginHorizontal: 1 },
-  calCount: { fontSize: 10, fontWeight: "600", marginTop: 2, fontVariant: ["tabular-nums"] },
-  legendCount: { marginTop: 0 },
   calSpinner: { marginTop: 6 },
   calHint: { fontSize: 12, marginTop: 4, lineHeight: 17, paddingHorizontal: 8 },
-  legend: { flexDirection: "row", justifyContent: "center", flexWrap: "wrap", marginTop: 8 },
-  legendItem: { flexDirection: "row", alignItems: "center", marginHorizontal: 6 },
-  legendText: { fontSize: 11, marginLeft: 4 },
+  modeSegment: { flexDirection: "row", borderRadius: 8, padding: 2, marginBottom: 10 },
+  modeBtn: { flex: 1, alignItems: "center", paddingVertical: 6, borderRadius: 6 },
+  modeText: { fontSize: 13, fontWeight: "700" },
   tiles: { flexDirection: "row", flexWrap: "wrap", justifyContent: "space-between", marginTop: 4 },
   dayTitle: { fontSize: 16, fontWeight: "700", marginTop: 8 },
   daySub: { fontSize: 12, marginTop: 2, marginBottom: 4 },

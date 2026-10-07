@@ -308,6 +308,14 @@ describe("API Client", () => {
       );
     });
 
+    it("getTransactionsCalendarRange requests a start/end range", async () => {
+      await endpoints.getTransactionsCalendarRange("2026-06-28", "2026-07-04", { accountId: 3 });
+      expect(mockFetch).toHaveBeenCalledWith(
+        "http://localhost:3000/api/transactions/calendar?start=2026-06-28&end=2026-07-04&accountId=3",
+        expect.any(Object)
+      );
+    });
+
     it("getFxPreview requests the pair, date and amount and wraps the plain JSON", async () => {
       const body = { from: "USD", to: "EUR", date: "2026-10-07", rate: 0.92, source: "yahoo", amount: 100, converted: 92 };
       mockFetch.mockResolvedValue({ ok: true, status: 200, json: () => Promise.resolve(body) });
