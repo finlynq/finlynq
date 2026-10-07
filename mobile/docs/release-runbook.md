@@ -125,3 +125,10 @@ npx eas build --platform ios --profile production --auto-submit --non-interactiv
   "use the web app" refusal. **Transfers edit as a pair** through `PUT /api/transactions/transfer`;
   the server refuses single-leg money edits on the generic route since PR #369, and the app shows
   that message if it ever hits it.
+- **1.0.21 / vc29 (Android + iOS)**: everything in 1.0.20 (iOS's first build with it) plus **Week and
+  Year calendar views** on the Transactions tab (week = seven days, year = twelve month tiles that open
+  the month) — Week/Year need the `start`/`end` form of `GET /api/transactions/calendar` (prod since
+  2026-10-07, PR #368; older servers show "Week and Year views need a newer Finlynq server"). And
+  **portfolio-operation legs edit in the portfolio form**: any row whose `kind` is a portfolio op
+  (incl. the bank-side leg of a brokerage deposit/withdrawal), or that links a holding, shows
+  "In Portfolio" instead of the generic Edit (mirrors the web's `startEdit` mapping).
