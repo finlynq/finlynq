@@ -10,7 +10,7 @@ const marketFetch = vi.fn();
 vi.mock("@/lib/market-fetch", () => ({ marketFetch: (...a: unknown[]) => marketFetch(...a) }));
 
 import { isIsin, normalizeIsin } from "@/lib/securities/isin";
-import { pickIsinQuote, resolveIsin, resolveTickerInput } from "@/lib/securities/isin-resolve";
+import { pickIsinQuote, resolveIsin, resolveIsinTickersInPlace, resolveTickerInput } from "@/lib/securities/isin-resolve";
 
 const read = (rel: string) => readFileSync(path.resolve(__dirname, "..", rel), "utf8");
 const okJson = (body: unknown) => ({ ok: true, json: async () => body });
@@ -102,6 +102,47 @@ describe("resolveTickerInput", () => {
 
   it("returns anything else unchanged", async () => {
     expect(await resolveTickerInput(" VCN.TO ")).toEqual({ symbol: "VCN.TO", resolvedFromIsin: null, name: null });
+  });
+});
+
+describe("resolveIsinTickersInPlace (imports)", () => {
+  it("rewrites ISIN tickers to their symbols, looking each ISIN up once", async () => {
+    marketFetch.mockImplementation(async (url: string) =>
+      okJson({
+        quotes: url.includes("INE002A01018")
+          ? [{ symbol: "RELIANCE.NS", quoteType: "EQUITY" }]
+          : [{ symbol: "0P0000XVYH.BO", quoteType: "MUTUALFUND" }],
+      }),
+    );
+    const rows = [
+      { ticker: "INE002A01018" },
+      { ticker: "ine002a01018" },
+      { ticker: "INF209K01YN0" },
+      { ticker: "AAPL" },
+      { ticker: undefined },
+    ];
+    expect(await resolveIsinTickersInPlace(rows)).toBe(3);
+    expect(rows.map((r) => r.ticker)).toEqual(["RELIANCE.NS", "RELIANCE.NS", "0P0000XVYH.BO", "AAPL", undefined]);
+    expect(marketFetch).toHaveBeenCalledTimes(2);
+  });
+
+  it("leaves an ISIN Yahoo can't place exactly as it was", async () => {
+    marketFetch.mockResolvedValue(okJson({ quotes: [] }));
+    const rows = [{ ticker: "US0378331005" }];
+    expect(await resolveIsinTickersInPlace(rows)).toBe(0);
+    expect(rows[0].ticker).toBe("US0378331005");
+  });
+
+  it("does nothing (no network) when no row holds an ISIN", async () => {
+    expect(await resolveIsinTickersInPlace([{ ticker: "VCN.TO" }, {}])).toBe(0);
+    expect(marketFetch).not.toHaveBeenCalled();
+  });
+
+  it("statement staging runs it before writing the staged rows", () => {
+    const src = read("src/lib/import/stage-statement-file.ts");
+    const at = src.indexOf("await resolveIsinTickersInPlace(shaped)");
+    expect(at).toBeGreaterThan(-1);
+    expect(at).toBeLessThan(src.indexOf("const buildStagedRow"));
   });
 });
 

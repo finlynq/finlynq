@@ -14,7 +14,7 @@ import { OnboardingTips } from "@/components/onboarding-tips";
 import { Badge } from "@/components/ui/badge";
 import { Plus, SlidersHorizontal, ChevronDown, Receipt, Search, X, AlertTriangle, ArrowRightLeft, Columns3, TrendingUp, Download, List, CalendarDays } from "lucide-react";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { isoDay } from "@/components/month-calendar";
+import { periodRange, shiftAnchor, type CalendarMode } from "@/lib/transactions/calendar";
 import { Pagination } from "@/components/ui/pagination";
 import { DropdownMenu, DropdownMenuTrigger, DropdownMenuContent, DropdownMenuGroup, DropdownMenuLabel, DropdownMenuCheckboxItem, DropdownMenuItem, DropdownMenuSeparator } from "@/components/ui/dropdown-menu";
 import { SplitDialog } from "./split-dialog";
@@ -33,7 +33,7 @@ import type {
 import { useLookups, useTxColumnPrefs, useTxSortPref, useTxFilterPrefs } from "../_hooks/use-tx-prefs";
 import { useTransactions } from "../_hooks/use-transactions";
 import { TransactionTable } from "./transaction-table";
-import { TransactionsCalendar, refreshTransactionsCalendar } from "./transactions-calendar";
+import { TransactionsCalendar, describeCalendarSelection, refreshTransactionsCalendar } from "./transactions-calendar";
 import { buildTransactionQuery } from "@/lib/transactions/build-query";
 import { buildTxDrillUrl } from "@/lib/transactions/drill-url";
 import { exportCsv, type CsvColumn } from "@/lib/csv-export";
@@ -128,32 +128,41 @@ export function TransactionsWorkspace({
   const [view, setView] = useState<"list" | "calendar">(() =>
     !locked && urlParams.get("view") === "calendar" ? "calendar" : "list",
   );
-  const [cal, setCal] = useState(() => {
-    const t = localDateISO();
-    return { year: Number(t.slice(0, 4)), month: Number(t.slice(5, 7)) - 1, day: null as number | null };
-  });
-  const calRange = useMemo(() => {
-    if (cal.day != null) {
-      const d = isoDay(cal.year, cal.month, cal.day);
-      return { start: d, end: d };
-    }
-    const last = new Date(Date.UTC(cal.year, cal.month + 1, 0)).getUTCDate();
-    return { start: isoDay(cal.year, cal.month, 1), end: isoDay(cal.year, cal.month, last) };
-  }, [cal]);
+  // Week / month / year (in-app feedback asked for all three); `calAnchor` is
+  // any date inside the visible period, `calDay` the selected day if any.
+  const [calMode, setCalMode] = useState<CalendarMode>("month");
+  const [calAnchor, setCalAnchor] = useState(() => localDateISO());
+  const [calDay, setCalDay] = useState<string | null>(null);
+  const calRange = useMemo(
+    () => (calDay ? { start: calDay, end: calDay } : periodRange(calMode, calAnchor)),
+    [calDay, calMode, calAnchor],
+  );
   const listFilters = useMemo(
     () => (view === "calendar" ? { ...filters, startDate: calRange.start, endDate: calRange.end } : filters),
     [view, filters, calRange],
   );
-  const shiftCalMonth = (delta: number) => {
-    setCal((c) => {
-      const total = c.year * 12 + c.month + delta;
-      return { year: Math.floor(total / 12), month: ((total % 12) + 12) % 12, day: null };
-    });
+  const shiftCal = (delta: number) => {
+    setCalAnchor((a) => shiftAnchor(calMode, a, delta));
+    setCalDay(null);
     setPage(0);
   };
   const calToday = () => {
     const t = localDateISO();
-    setCal({ year: Number(t.slice(0, 4)), month: Number(t.slice(5, 7)) - 1, day: Number(t.slice(8, 10)) });
+    setCalAnchor(t);
+    setCalDay(calMode === "year" ? null : t);
+    setPage(0);
+  };
+  const changeCalMode = (mode: CalendarMode) => {
+    // Keep the selected day (or the anchor) in view across the switch.
+    if (calDay) setCalAnchor(calDay);
+    if (mode === "year") setCalDay(null);
+    setCalMode(mode);
+    setPage(0);
+  };
+  const openCalMonth = (firstOfMonth: string) => {
+    setCalMode("month");
+    setCalAnchor(firstOfMonth);
+    setCalDay(null);
     setPage(0);
   };
 
@@ -1022,31 +1031,29 @@ export function TransactionsWorkspace({
       {view === "calendar" && (
         <>
           <TransactionsCalendar
-            year={cal.year}
-            month={cal.month}
-            selectedDay={cal.day}
+            mode={calMode}
+            anchor={calAnchor}
+            selectedDay={calDay}
             accountId={filters.accountId}
             categoryId={filters.categoryId}
+            onModeChange={changeCalMode}
             onSelectDay={(day) => {
-              setCal((c) => ({ ...c, day }));
+              setCalDay(day);
               setPage(0);
             }}
-            onShiftMonth={shiftCalMonth}
+            onShift={shiftCal}
             onToday={calToday}
+            onOpenMonth={openCalMonth}
           />
           <div className="flex flex-wrap items-center gap-2 text-sm">
-            <span className="font-medium">
-              {cal.day != null
-                ? `Transactions on ${new Date(Date.UTC(cal.year, cal.month, cal.day)).toLocaleDateString(undefined, { weekday: "long", month: "long", day: "numeric", year: "numeric", timeZone: "UTC" })}`
-                : `All transactions in ${new Date(Date.UTC(cal.year, cal.month, 1)).toLocaleDateString(undefined, { month: "long", year: "numeric", timeZone: "UTC" })}`}
-            </span>
-            {cal.day != null && (
+            <span className="font-medium">{describeCalendarSelection(calMode, calAnchor, calDay)}</span>
+            {calDay != null && (
               <button
                 type="button"
-                onClick={() => { setCal((c) => ({ ...c, day: null })); setPage(0); }}
+                onClick={() => { setCalDay(null); setPage(0); }}
                 className="text-xs text-muted-foreground hover:text-foreground underline-offset-4 hover:underline"
               >
-                Show the whole month
+                Show the whole {calMode === "week" ? "week" : "month"}
               </button>
             )}
           </div>

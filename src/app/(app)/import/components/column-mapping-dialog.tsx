@@ -114,7 +114,7 @@ const NONE = "__none__";
 // numeric; `ticker` / `portfolioHolding` are the security SYMBOL / NAME.
 type InvestmentColumnField = "ticker" | "portfolioHolding" | "quantity";
 const INVESTMENT_FIELD_LABELS: Record<InvestmentColumnField, string> = {
-  ticker: "Ticker / Symbol",
+  ticker: "Ticker / Symbol / ISIN",
   portfolioHolding: "Security name",
   quantity: "Quantity",
 };
@@ -506,8 +506,8 @@ export function ColumnMappingDialog({
                 Investment columns (this is an investment account)
               </Label>
               <p className="text-xs text-muted-foreground">
-                Map the security ticker/symbol, name, and quantity from your
-                brokerage export. These are captured with the imported rows for
+                Map the security ticker/symbol (an ISIN works too; it&apos;s looked up
+                for you), name, and quantity from your brokerage export. These are captured with the imported rows for
                 now; they aren&apos;t yet turned into buy/sell positions.
               </p>
               <div className="rounded-lg border divide-y">

@@ -78,3 +78,47 @@ export async function resolveTickerInput(raw: string): Promise<{ symbol: string;
     ? { symbol: match.symbol, resolvedFromIsin: normalizeIsin(trimmed), name: match.name }
     : { symbol: trimmed, resolvedFromIsin: null, name: null };
 }
+
+const BATCH_CONCURRENCY = 4;
+
+/**
+ * Imports (GH #365): rewrite every row whose `ticker` is an ISIN to the Yahoo
+ * symbol it trades under, in place. Brokers such as Zerodha export holdings
+ * and tradebooks keyed by ISIN; resolving at staging time means rules and the
+ * investment-op matching downstream see a priceable ticker. Each distinct ISIN
+ * is looked up once (a few at a time, and the resolver caches); an ISIN Yahoo
+ * can't place is left untouched rather than guessed. Returns how many rows
+ * changed.
+ */
+export async function resolveIsinTickersInPlace<T extends { ticker?: string | null }>(rows: T[]): Promise<number> {
+  const isins = [
+    ...new Set(
+      rows
+        .map((r) => r.ticker?.trim() ?? "")
+        .filter((t) => isIsin(t))
+        .map(normalizeIsin),
+    ),
+  ];
+  if (isins.length === 0) return 0;
+
+  const resolved = new Map<string, string>();
+  for (let i = 0; i < isins.length; i += BATCH_CONCURRENCY) {
+    const batch = isins.slice(i, i + BATCH_CONCURRENCY);
+    const matches = await Promise.all(batch.map((isin) => resolveIsin(isin)));
+    matches.forEach((m, j) => {
+      if (m) resolved.set(batch[j], m.symbol);
+    });
+  }
+
+  let changed = 0;
+  for (const r of rows) {
+    const t = r.ticker?.trim() ?? "";
+    if (!isIsin(t)) continue;
+    const symbol = resolved.get(normalizeIsin(t));
+    if (symbol) {
+      r.ticker = symbol;
+      changed++;
+    }
+  }
+  return changed;
+}

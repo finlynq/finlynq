@@ -66,6 +66,7 @@ import { parseOfxToCanonical } from "@/lib/external-import/parsers/ofx";
 import { parseQfxToCanonical } from "@/lib/external-import/parsers/qfx";
 import type { RawTransaction } from "@/lib/import-pipeline";
 import { findUnreasonableAmountError } from "@/lib/import-pipeline";
+import { resolveIsinTickersInPlace } from "@/lib/securities/isin-resolve";
 
 /** 60 days — matches the route + stage-email-import.ts. */
 const STAGE_TTL_MS = 60 * 24 * 60 * 60 * 1000;
@@ -567,6 +568,12 @@ export async function writeStagedImport(
       dedupStatus: "new",
     });
   }
+
+  // GH #365 — a Ticker column holding ISINs (Zerodha and other brokers export
+  // by ISIN) is resolved to the Yahoo symbol the position trades under, so the
+  // rules and investment-op matching downstream see a priceable ticker. The
+  // import hash covers date/amount/payee only, so dedup is unaffected.
+  await resolveIsinTickersInPlace(shaped);
 
   // ─── File → bank_transactions dedup (exact-only) ─────────────────────────
   const fitIds = shaped.filter((r) => r.fitId).map((r) => r.fitId!);

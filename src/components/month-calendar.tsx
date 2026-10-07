@@ -5,11 +5,48 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { ChevronLeft, ChevronRight } from "lucide-react";
 
-const DAY_NAMES = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+export const DAY_NAMES = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
 
 /** `YYYY-MM-DD` for a day of a (year, 0-based month). */
 export function isoDay(year: number, month: number, day: number): string {
   return `${year}-${String(month + 1).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
+}
+
+/**
+ * Previous / title / Today / next row shared by every calendar period view
+ * (MonthCalendar, and the Transactions calendar's week and year views).
+ * `onToday` omitted ⇒ no Today button (already showing the current period).
+ */
+export function CalendarHeader({
+  title,
+  unit,
+  onShift,
+  onToday,
+  todayLabel = "Today",
+}: {
+  title: string;
+  /** "month" / "week" / "year" — only used in the arrow buttons' labels. */
+  unit: string;
+  onShift: (delta: number) => void;
+  onToday?: () => void;
+  todayLabel?: string;
+}) {
+  return (
+    <div className="flex items-center justify-between gap-2 mb-3">
+      <Button variant="outline" size="icon" onClick={() => onShift(-1)} aria-label={`Previous ${unit}`}>
+        <ChevronLeft className="h-4 w-4" />
+      </Button>
+      <div className="flex items-center gap-2">
+        <h2 className="text-lg font-semibold">{title}</h2>
+        {onToday && (
+          <Button variant="ghost" size="sm" onClick={onToday}>{todayLabel}</Button>
+        )}
+      </div>
+      <Button variant="outline" size="icon" onClick={() => onShift(1)} aria-label={`Next ${unit}`}>
+        <ChevronRight className="h-4 w-4" />
+      </Button>
+    </div>
+  );
 }
 
 /**
@@ -57,20 +94,12 @@ export function MonthCalendar({
 
   return (
     <>
-      <div className="flex items-center justify-between gap-2 mb-3">
-        <Button variant="outline" size="icon" onClick={() => onShiftMonth(-1)} aria-label="Previous month">
-          <ChevronLeft className="h-4 w-4" />
-        </Button>
-        <div className="flex items-center gap-2">
-          <h2 className="text-lg font-semibold">{monthLabel}</h2>
-          {!isCurrentMonth && (
-            <Button variant="ghost" size="sm" onClick={onToday}>Today</Button>
-          )}
-        </div>
-        <Button variant="outline" size="icon" onClick={() => onShiftMonth(1)} aria-label="Next month">
-          <ChevronRight className="h-4 w-4" />
-        </Button>
-      </div>
+      <CalendarHeader
+        title={monthLabel}
+        unit="month"
+        onShift={onShiftMonth}
+        onToday={isCurrentMonth ? undefined : onToday}
+      />
 
       <div className="grid grid-cols-7 gap-px mb-1">
         {DAY_NAMES.map((d) => (
