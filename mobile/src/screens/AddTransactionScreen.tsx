@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import {
   View,
   Text,
@@ -16,7 +16,7 @@ import { useNavigation, useRoute, type RouteProp } from "@react-navigation/nativ
 import { useTheme } from "../theme";
 import { endpoints } from "../api/client";
 import { logger } from "../lib/logger";
-import { safeName } from "../lib/format";
+import { formatCurrency, formatShortDate, safeName } from "../lib/format";
 import {
   parseDropdownOrder,
   sortByUserOrder,
@@ -29,6 +29,17 @@ import { PickerSheet, type PickerOption } from "../components/picker-sheet";
 import type { Account, Category } from "../../../shared/types";
 
 type Mode = "expense" | "income" | "transfer";
+
+/** Market-rate preview for a cross-currency transfer (GET /api/fx/preview). */
+type FxPreviewState =
+  | { state: "idle" }
+  | { state: "loading" }
+  | { state: "ok"; rate: number; source: string; converted: number; date: string; to: string }
+  | { state: "needs-override" }
+  | { state: "error"; message: string };
+
+const ISO_DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
+const FX_PREVIEW_DEBOUNCE_MS = 300;
 
 function todayStr(): string {
   const d = new Date();
@@ -68,6 +79,13 @@ export default function AddTransactionScreen() {
   // Transfer-only state
   const [fromAccountId, setFromAccountId] = useState<number | null>(null);
   const [toAccountId, setToAccountId] = useState<number | null>(null);
+  // Cross-currency transfers: what arrived in the To account, in ITS currency.
+  // Pre-filled from the market-rate preview until the user edits it; once
+  // touched it is never overwritten (a ref, so a preview still in flight when
+  // the user types sees the edit too).
+  const [receivedAmount, setReceivedAmount] = useState("");
+  const receivedTouched = useRef(false);
+  const [fxPreview, setFxPreview] = useState<FxPreviewState>({ state: "idle" });
 
   // Which picker sheet is open, if any.
   const [openPicker, setOpenPicker] = useState<null | "account" | "category" | "from" | "to">(null);
@@ -164,8 +182,66 @@ export default function AddTransactionScreen() {
   );
   const fromAccount = accounts.find((a) => a.id === fromAccountId);
   const toAccount = accounts.find((a) => a.id === toAccountId);
-  const currencyMismatch =
+  const isCrossCurrency =
     isTransfer && !!fromAccount && !!toAccount && fromAccount.currency !== toAccount.currency;
+  const fromCurrency = fromAccount?.currency ?? "";
+  const toCurrency = toAccount?.currency ?? "";
+  const fxPair = isCrossCurrency ? `${fromCurrency}>${toCurrency}` : "";
+
+  // An amount received typed for one currency pair means nothing for another:
+  // when the pair changes, drop it and let the preview fill the new one.
+  const lastFxPair = useRef(fxPair);
+  useEffect(() => {
+    if (lastFxPair.current === fxPair) return;
+    lastFxPair.current = fxPair;
+    receivedTouched.current = false;
+    setReceivedAmount("");
+  }, [fxPair]);
+
+  // Debounced market-rate preview (mirrors the web transfer dialog).
+  useEffect(() => {
+    const amountNum = parseFloat(amount);
+    if (!fxPair || !Number.isFinite(amountNum) || amountNum <= 0 || !ISO_DATE_RE.test(date)) {
+      setFxPreview({ state: "idle" });
+      return;
+    }
+    setFxPreview({ state: "loading" });
+    let cancelled = false;
+    const timer = setTimeout(async () => {
+      try {
+        const res = await endpoints.getFxPreview({ from: fromCurrency, to: toCurrency, date, amount: amountNum });
+        if (cancelled) return;
+        if (!res.success) {
+          setFxPreview({ state: "error", message: res.error || "Rate lookup failed" });
+          return;
+        }
+        if (res.data?.needsOverride === true) {
+          setFxPreview({ state: "needs-override" });
+          return;
+        }
+        const converted = Number(res.data?.converted ?? 0);
+        setFxPreview({
+          state: "ok",
+          rate: Number(res.data?.rate ?? 0),
+          source: String(res.data?.source ?? "—"),
+          converted,
+          date: String(res.data?.date ?? date),
+          to: toCurrency,
+        });
+        if (!receivedTouched.current) setReceivedAmount(converted.toFixed(2));
+      } catch (e) {
+        if (cancelled) return;
+        const detail = e instanceof Error ? `${e.name}: ${e.message}` : String(e);
+        logger.warn("add-tx", "fx preview threw", { detail });
+        setFxPreview({ state: "error", message: "Cannot connect to server" });
+      }
+    }, FX_PREVIEW_DEBOUNCE_MS);
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
+    // fromCurrency / toCurrency are folded into fxPair.
+  }, [fxPair, amount, date]);
 
   // Picker option lists + id→label helpers for the summary fields.
   // Both lists are sorted to mirror the web Add Transaction dialog:
@@ -270,12 +346,16 @@ export default function AddTransactionScreen() {
       Alert.alert("Error", "From and To must be different accounts");
       return;
     }
-    if (currencyMismatch) {
-      Alert.alert(
-        "Use the web app",
-        "Cross-currency (FX) transfers must be done on the web app where you can lock the exchange rate."
-      );
-      return;
+    // Cross-currency: send what the To account actually received. Blank →
+    // omitted, and the server converts at the market rate for the date.
+    let received: number | undefined;
+    if (isCrossCurrency && receivedAmount.trim()) {
+      const parsed = parseFloat(receivedAmount);
+      if (!Number.isFinite(parsed) || parsed < 0) {
+        Alert.alert("Error", `Please enter a valid amount received in ${toCurrency}`);
+        return;
+      }
+      received = parsed;
     }
 
     setSaving(true);
@@ -286,10 +366,18 @@ export default function AddTransactionScreen() {
         enteredAmount: Math.abs(parsedAmount),
         date,
         note: note || undefined,
+        ...(received != null ? { receivedAmount: received } : {}),
       });
       if (res.success) {
-        logger.info("add-tx", "transfer created");
+        logger.info("add-tx", "transfer created", { crossCurrency: isCrossCurrency });
         navigation.goBack();
+      } else if (res.code === "fx-currency-needs-override") {
+        logger.warn("add-tx", "transfer needs an amount received", { error: res.error });
+        setFxPreview({ state: "needs-override" });
+        Alert.alert(
+          "Enter the amount received",
+          `There's no market exchange rate for ${fromCurrency} to ${toCurrency} on ${date}. Type the amount that arrived in ${toCurrency}.`
+        );
       } else {
         logger.warn("add-tx", "transfer rejected", { error: res.error });
         Alert.alert("Error", "error" in res ? res.error : "Failed to create transfer");
@@ -381,6 +469,78 @@ export default function AddTransactionScreen() {
     </TouchableOpacity>
   );
 
+  // Cross-currency transfer: the editable amount received + the rate it implies.
+  const renderReceivedField = () => {
+    const sentNum = parseFloat(amount);
+    const recvNum = parseFloat(receivedAmount);
+    const impliedRate =
+      Number.isFinite(sentNum) && sentNum > 0 && Number.isFinite(recvNum) && recvNum > 0
+        ? recvNum / sentNum
+        : null;
+    // "Matches" = the amount received IS the market conversion, to the cent.
+    // The pre-fill is rounded to 2 dp, so comparing 6-dp rates alone would call
+    // an untouched pre-fill "entered".
+    const preview = fxPreview.state === "ok" ? fxPreview : null;
+    const matchesPreview =
+      !!preview &&
+      impliedRate != null &&
+      (Math.abs(recvNum - preview.converted) < 0.005 || Math.abs(impliedRate - preview.rate) < 1e-6);
+    const caption =
+      impliedRate != null
+        ? `rate ${impliedRate.toFixed(6)} · ${matchesPreview && preview ? preview.source : "entered"}`
+        : fxPreview.state === "loading"
+          ? "Calculating…"
+          : preview
+            ? `rate ${preview.rate.toFixed(6)} · ${preview.source}`
+            : null;
+    return (
+      <View style={[styles.fxBox, { borderColor: colors.border, backgroundColor: colors.secondary }]}>
+        <View style={styles.fxHead}>
+          <Text style={[fieldStyles.label, styles.fxLabel, { color: colors.mutedForeground }]}>
+            AMOUNT RECEIVED ({toCurrency})
+          </Text>
+          {caption ? (
+            <Text style={[styles.fxCaption, { color: colors.mutedForeground }]}>{caption}</Text>
+          ) : null}
+        </View>
+        <TextInput
+          style={[
+            fieldStyles.input,
+            { color: colors.foreground, backgroundColor: colors.card, borderColor: colors.border },
+          ]}
+          value={receivedAmount}
+          onChangeText={(v) => {
+            receivedTouched.current = true;
+            setReceivedAmount(v);
+          }}
+          keyboardType="decimal-pad"
+          placeholder={preview ? preview.converted.toFixed(2) : "0.00"}
+          placeholderTextColor={colors.mutedForeground}
+          accessibilityLabel={`Amount received in ${toCurrency}`}
+        />
+        <Text style={[styles.fxNote, { color: colors.mutedForeground }]}>
+          The amount above leaves {safeName(fromAccount?.name, "the From account")} in {fromCurrency}. Pre-filled
+          from market FX. Override with the actual amount your bank credited.
+        </Text>
+        {preview && impliedRate != null && !matchesPreview ? (
+          <Text style={[styles.fxNote, { color: colors.mutedForeground }]}>
+            Market rate on {formatShortDate(preview.date)}: {preview.rate.toFixed(6)} ({preview.source}) →{" "}
+            {formatCurrency(preview.converted, preview.to)}
+          </Text>
+        ) : null}
+        {fxPreview.state === "needs-override" ? (
+          <Text style={[styles.fxNote, { color: colors.neg }]}>
+            No market rate is available for {fromCurrency} to {toCurrency} on this date. Type the amount
+            received.
+          </Text>
+        ) : null}
+        {fxPreview.state === "error" ? (
+          <Text style={[styles.fxNote, { color: colors.destructive }]}>{fxPreview.message}</Text>
+        ) : null}
+      </View>
+    );
+  };
+
   return (
     <SafeAreaView style={[styles.safe, { backgroundColor: colors.background }]} edges={["top"]}>
       <KeyboardAvoidingView
@@ -437,6 +597,7 @@ export default function AddTransactionScreen() {
               style={[styles.amountInput, { color: colors.foreground }]}
               value={amount}
               onChangeText={setAmount}
+              accessibilityLabel="Amount"
               keyboardType="decimal-pad"
               placeholder="0.00"
               placeholderTextColor={colors.mutedForeground}
@@ -473,11 +634,7 @@ export default function AddTransactionScreen() {
                     setOpenPicker("to")
                   )}
                 </View>
-                {currencyMismatch && (
-                  <Text style={[styles.warning, { color: colors.neg }]}>
-                    Cross-currency transfer — do this on the web app to lock the FX rate.
-                  </Text>
-                )}
+                {isCrossCurrency && renderReceivedField()}
               </>
             ) : (
               <>
@@ -633,6 +790,16 @@ const styles = StyleSheet.create({
     marginBottom: 12,
   },
   warning: { fontSize: 13, marginTop: 4, marginBottom: 8 },
+  fxBox: {
+    borderRadius: 10,
+    borderWidth: StyleSheet.hairlineWidth,
+    padding: 12,
+    marginBottom: 16,
+  },
+  fxHead: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap" },
+  fxLabel: { marginRight: 8 },
+  fxCaption: { fontSize: 11, marginBottom: 6, fontVariant: ["tabular-nums"] },
+  fxNote: { fontSize: 12, lineHeight: 17, marginTop: 6 },
   emptyState: { flex: 1, alignItems: "center", justifyContent: "center", padding: 32 },
   emptyTitle: { fontSize: 18, fontWeight: "700", marginBottom: 16 },
   emptyLine: { fontSize: 14, textAlign: "center", lineHeight: 20, marginBottom: 4 },

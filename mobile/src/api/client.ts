@@ -155,7 +155,13 @@ async function request<T>(
         return request<T>(path, options, true);
       }
     }
-    return { success: false, error };
+    // Keep the server's machine-readable `code` (e.g. a 409
+    // `fx-currency-needs-override`) so a screen can branch on it.
+    const code =
+      body && typeof body === "object" && typeof (body as { code?: unknown }).code === "string"
+        ? (body as { code: string }).code
+        : undefined;
+    return code ? { success: false, error, code } : { success: false, error };
   }
 
   // Already enveloped? (no REST route does this today, but be defensive.)
@@ -380,6 +386,7 @@ import type {
   CategoryOverviewResponse,
   CategoryDetailResponse,
   TransactionsCalendarResponse,
+  FxPreview,
 } from "../../../shared/types";
 
 // Shared report query params. The date range + business + display currency are
@@ -723,10 +730,21 @@ export const endpoints = {
   createPortfolioHolding: (payload: HoldingFormData) =>
     api.post<{ id: number }>("/api/portfolio", payload),
 
-  // Transfer — atomic same-currency pair. Cross-currency (FX) transfers are
-  // refused server-side (409 fx-currency-needs-override) and must use the web.
+  // Transfer — an atomic two-leg pair. Cross-currency transfers are supported:
+  // `receivedAmount` (To account's currency) books the rate the bank actually
+  // gave; without it the server converts at the market rate for the date, or
+  // answers 409 with `code: "fx-currency-needs-override"` (surfaced on
+  // res.code) when it has no rate and the user must enter the amount received.
   recordTransfer: (payload: TransferPayload) =>
     api.post<unknown>("/api/transactions/transfer", payload),
+
+  // FX conversion preview (read-only; plain JSON, request() wraps it).
+  getFxPreview: (p: { from: string; to: string; date?: string; amount?: number }) => {
+    const q = new URLSearchParams({ from: p.from, to: p.to });
+    if (p.date) q.set("date", p.date);
+    if (p.amount != null) q.set("amount", String(p.amount));
+    return api.get<FxPreview>(`/api/fx/preview?${q.toString()}`);
+  },
 
   // Budgets
   getBudgets: (month?: string, spending = true) =>

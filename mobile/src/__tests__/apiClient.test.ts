@@ -308,6 +308,37 @@ describe("API Client", () => {
       );
     });
 
+    it("getFxPreview requests the pair, date and amount and wraps the plain JSON", async () => {
+      const body = { from: "USD", to: "EUR", date: "2026-10-07", rate: 0.92, source: "yahoo", amount: 100, converted: 92 };
+      mockFetch.mockResolvedValue({ ok: true, status: 200, json: () => Promise.resolve(body) });
+      const res = await endpoints.getFxPreview({ from: "USD", to: "EUR", date: "2026-10-07", amount: 100 });
+      expect(mockFetch).toHaveBeenCalledWith(
+        "http://localhost:3000/api/fx/preview?from=USD&to=EUR&date=2026-10-07&amount=100",
+        expect.any(Object)
+      );
+      expect(res).toEqual({ success: true, data: body });
+    });
+
+    it("recordTransfer sends receivedAmount and surfaces a 409 error code", async () => {
+      mockFetch.mockResolvedValue({
+        ok: false,
+        status: 409,
+        json: () =>
+          Promise.resolve({ error: "No FX rate available for EUR.", code: "fx-currency-needs-override", currency: "EUR" }),
+      });
+      const payload = { fromAccountId: 1, toAccountId: 2, enteredAmount: 100, receivedAmount: 91.5, date: "2026-10-07" };
+      const res = await endpoints.recordTransfer(payload);
+      expect(mockFetch).toHaveBeenCalledWith(
+        "http://localhost:3000/api/transactions/transfer",
+        expect.objectContaining({ method: "POST", body: JSON.stringify(payload) })
+      );
+      expect(res).toEqual({
+        success: false,
+        error: "No FX rate available for EUR.",
+        code: "fx-currency-needs-override",
+      });
+    });
+
     it("deleteTransaction calls correct path", async () => {
       await endpoints.deleteTransaction(42);
       expect(mockFetch).toHaveBeenCalledWith(

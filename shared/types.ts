@@ -11,6 +11,9 @@ export type ApiSuccessResponse<T> = {
 export type ApiErrorResponse = {
   success: false;
   error: string;
+  /** Machine-readable reason when the server sends one (e.g.
+   *  `fx-currency-needs-override`); `error` stays the human message. */
+  code?: string;
 };
 
 export type ApiResponse<T> = ApiSuccessResponse<T> | ApiErrorResponse;
@@ -865,10 +868,28 @@ export interface OperationLoadData {
 export interface TransferPayload {
   fromAccountId: number;
   toAccountId: number;
+  /** What left the From account, in the From account's currency. */
   enteredAmount: number;
+  /** Cross-currency only: what arrived in the To account, in ITS currency.
+   *  Omitted → the server converts at the market rate for the date (409
+   *  `fx-currency-needs-override` when it has none). */
+  receivedAmount?: number;
   date?: string;
   note?: string;
   tags?: string;
+}
+
+/** GET /api/fx/preview — plain JSON (not enveloped). `converted` is `amount`
+ *  in `to` at `rate`; `needsOverride` = no market rate for the pair/date. */
+export interface FxPreview {
+  from: string;
+  to: string;
+  date: string;
+  rate: number;
+  source: string;
+  amount: number | null;
+  converted: number | null;
+  needsOverride?: boolean;
 }
 
 // --- Create-flow form payloads (mobile) ---
