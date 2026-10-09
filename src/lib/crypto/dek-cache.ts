@@ -54,12 +54,23 @@ const cache: Map<string, Entry> = g.__pfDekCache;
  * the simplest "core dump after logout still has the DEK" exposure (M-7).
  */
 function zeroAndDrop(key: string, entry: Entry): void {
+  cache.delete(key);
+  zeroUnlessShared(entry.dek);
+}
+
+/**
+ * Zero `buf` unless another live cache entry still holds the SAME Buffer
+ * object. Promoting a pending-MFA DEK onto a session via putDEK(newJti, buf)
+ * and then deleteDEK(pendingJti) used to zero the session's key too (all-zero
+ * DEK after MFA login). Callers should still pass a copy; this is the backstop.
+ */
+function zeroUnlessShared(buf: Buffer): void {
+  for (const v of cache.values()) if (v.dek === buf) return;
   try {
-    entry.dek.fill(0);
+    buf.fill(0);
   } catch {
     // Defensive — Buffer.fill should never throw on a normal Buffer.
   }
-  cache.delete(key);
 }
 
 // Background sweeper — runs once per process. Avoids unbounded memory if a
@@ -95,13 +106,8 @@ export function putDEK(
   // If we're overwriting an existing entry for this jti, zero its old buffer
   // first — pending-token replacement on MFA verify hits this path.
   const existing = cache.get(sessionId);
-  if (existing) {
-    try {
-      existing.dek.fill(0);
-    } catch {
-      // ignore
-    }
-  }
+  cache.delete(sessionId);
+  if (existing && existing.dek !== dek) zeroUnlessShared(existing.dek);
   cache.set(sessionId, {
     userId,
     dek,
