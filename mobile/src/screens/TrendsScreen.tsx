@@ -41,6 +41,7 @@ const PERIODS: { key: ReportPeriod; label: string }[] = [
   { key: "weekly", label: "Weekly" },
   { key: "monthly", label: "Monthly" },
   { key: "quarterly", label: "Quarterly" },
+  { key: "yearly", label: "Yearly" },
 ];
 
 // Line chart inner vertical padding — must match scalePoints' default padY so

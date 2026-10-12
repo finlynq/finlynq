@@ -1008,7 +1008,41 @@ export interface TransactionFormData {
 // current rate). The balance sheet ignores endDate: it is always TODAY's
 // balances, whatever range the caller passes.
 
-export type ReportPeriod = "daily" | "weekly" | "monthly" | "quarterly";
+// Mirrors REPORT_PERIODS in src/lib/reports/period.ts — keep in sync.
+export type ReportPeriod = "daily" | "weekly" | "monthly" | "quarterly" | "yearly";
+
+// One row of GET /api/loans (bare array). Every amount is in the loan's own
+// `currency`; the `*Display` companions are the server's current-rate
+// conversion into `displayCurrency` and the only figures safe to sum across
+// loans. `remainingBalance` / `periodsRemaining` are null for a loan the
+// server could not schedule (it also carries `dataIntegrity`).
+export interface LoanSummary {
+  id: number;
+  name: string | null;
+  type: string;
+  currency: string;
+  principal: number;
+  annualRate: number;
+  termMonths: number | null;
+  startDate: string;
+  paymentFrequency: string;
+  monthlyPayment: number | null;
+  paymentPerPeriod?: number | null;
+  totalInterest: number | null;
+  payoffDate: string | null;
+  remainingBalance: number | null;
+  balanceSource: "account" | "projection" | null;
+  principalPaid: number | null;
+  interestPaid: number | null;
+  periodsRemaining: number | null;
+  accountId: number | null;
+  accountName: string | null;
+  scheduleMode?: "calculated" | "manual";
+  displayCurrency?: string;
+  remainingBalanceDisplay?: number | null;
+  monthlyEquivalentPaymentDisplay?: number | null;
+  dataIntegrity?: { error: string; value: unknown };
+}
 export type ReportGroupBy = "category" | "group";
 
 export interface IncomeStatementRow {

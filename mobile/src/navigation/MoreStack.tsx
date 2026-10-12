@@ -3,6 +3,7 @@ import { createNativeStackNavigator } from "@react-navigation/native-stack";
 import MoreScreen from "../screens/MoreScreen";
 import BudgetsScreen from "../screens/BudgetsScreen";
 import GoalsScreen from "../screens/GoalsScreen";
+import LoansScreen from "../screens/LoansScreen";
 import CategoriesScreen from "../screens/CategoriesScreen";
 import ImportScreen from "../screens/ImportScreen";
 import SettingsScreen from "../screens/SettingsScreen";
@@ -39,6 +40,7 @@ export type MoreStackParamList = {
   MoreHome: undefined;
   Budgets: undefined;
   Goals: undefined;
+  Loans: undefined;
   Categories: undefined;
   Import: undefined;
   Inbox: { accountId?: number } | undefined;
@@ -74,6 +76,7 @@ export default function MoreStack() {
       <Stack.Screen name="MoreHome" component={MoreScreen} />
       <Stack.Screen name="Budgets" component={BudgetsScreen} />
       <Stack.Screen name="Goals" component={GoalsScreen} />
+      <Stack.Screen name="Loans" component={LoansScreen} />
       <Stack.Screen name="Subscriptions" component={SubscriptionsScreen} />
       <Stack.Screen name="CategoryReports" component={CategoryReportsScreen} />
       <Stack.Screen name="CategoryDetail" component={CategoryDetailScreen} />

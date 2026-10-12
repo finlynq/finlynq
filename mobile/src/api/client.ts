@@ -341,6 +341,7 @@ import type {
   DashboardData,
   HealthScoreData,
   GoalWithProgress,
+  LoanSummary,
   PortfolioOverview,
   PortfolioHoldingRow,
   PortfolioPerformance,
@@ -671,6 +672,9 @@ export const endpoints = {
   },
   getCategoryDetail: (categoryId: number, months = 12) =>
     api.get<CategoryDetailResponse>(`/api/reports/category?categoryId=${categoryId}&months=${months}`),
+
+  // Loans — bare array, read-only on mobile (set up on the web app).
+  getLoans: () => api.get<LoanSummary[]>("/api/loans"),
 
   // Goals — bare array of Goal + server-computed progress fields.
   getGoals: () => api.get<GoalWithProgress[]>("/api/goals"),

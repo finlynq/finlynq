@@ -116,6 +116,7 @@ export default function MoreScreen() {
       rows: [
         { icon: "budgets", label: "Budgets", onPress: () => navigation.navigate("Budgets") },
         { icon: "goals", label: "Goals", onPress: () => navigation.navigate("Goals") },
+        { icon: "loans", label: "Loans", onPress: () => navigation.navigate("Loans") },
         { icon: "subscriptions", label: "Subscriptions", onPress: () => navigation.navigate("Subscriptions") },
         { icon: "reports", label: "Reports", onPress: () => navigation.navigate("Reports") },
         { icon: "inbox", label: "Reconcile", onPress: () => navigation.navigate("Inbox") },
@@ -182,9 +183,6 @@ export default function MoreScreen() {
           </View>
         ))}
 
-        <Text style={[styles.webNote, { color: colors.mutedForeground }]}>
-          Loans — manage on the web app.
-        </Text>
       </ScrollView>
     </SafeAreaView>
   );
@@ -223,5 +221,4 @@ const styles = StyleSheet.create({
     marginRight: 12,
   },
   rowLabel: { flex: 1, fontSize: 15, fontWeight: "500" },
-  webNote: { fontSize: 12, textAlign: "center", marginTop: 16, paddingHorizontal: 24, lineHeight: 18 },
 });

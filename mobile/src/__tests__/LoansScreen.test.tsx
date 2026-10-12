@@ -1,0 +1,192 @@
+import React from "react";
+import { render, waitFor, fireEvent } from "@testing-library/react-native";
+import LoansScreen from "../screens/LoansScreen";
+import { isLoanCompleted, loanPaidPct, loanTotals, loanTypeLabel, splitLoans } from "../lib/loans";
+import { endpoints } from "../api/client";
+import { ThemeContext } from "../theme";
+import type { Theme } from "../theme";
+import { lightColors } from "../theme/colors";
+import type { LoanSummary } from "../../../shared/types";
+
+jest.mock("@react-navigation/native", () => ({
+  ...jest.requireActual("@react-navigation/native"),
+  useIsFocused: jest.fn(() => true),
+}));
+
+jest.mock("../api/client", () => ({
+  endpoints: { getLoans: jest.fn() },
+}));
+
+const theme: Theme = {
+  mode: "light",
+  colors: lightColors,
+  spacing: { xs: 4, sm: 8, md: 12, lg: 16, xl: 24, xxl: 32 },
+  borderRadius: { sm: 7, md: 10, lg: 12, xl: 17, full: 9999 },
+  fontSize: { xs: 11, sm: 13, base: 15, lg: 17, xl: 20, "2xl": 24, "3xl": 30 },
+};
+
+function screen() {
+  return (
+    <ThemeContext.Provider value={{ ...theme, preference: "system", setPreference: () => {} }}>
+      <LoansScreen />
+    </ThemeContext.Provider>
+  );
+}
+
+function loan(over: Partial<LoanSummary>): LoanSummary {
+  return {
+    id: 1,
+    name: "Car loan",
+    type: "auto",
+    currency: "USD",
+    principal: 12000,
+    annualRate: 6,
+    termMonths: 24,
+    startDate: "2026-01-15",
+    paymentFrequency: "monthly",
+    monthlyPayment: 531.85,
+    paymentPerPeriod: 531.85,
+    totalInterest: 764.34,
+    payoffDate: "2028-01-15",
+    remainingBalance: 8000,
+    balanceSource: "projection",
+    principalPaid: 4000,
+    interestPaid: 300,
+    periodsRemaining: 16,
+    accountId: null,
+    accountName: null,
+    scheduleMode: "calculated",
+    displayCurrency: "USD",
+    remainingBalanceDisplay: 8000,
+    monthlyEquivalentPaymentDisplay: 531.85,
+    ...over,
+  };
+}
+
+const getLoans = endpoints.getLoans as jest.Mock;
+const ok = (data: LoanSummary[]) => ({ success: true, data });
+
+beforeEach(() => jest.clearAllMocks());
+
+describe("isLoanCompleted", () => {
+  it("is true once nothing is left to pay", () => {
+    expect(isLoanCompleted({ remainingBalance: 0, periodsRemaining: 0, scheduleMode: "calculated" })).toBe(true);
+    expect(isLoanCompleted({ remainingBalance: 0.4, periodsRemaining: 3, scheduleMode: "calculated" })).toBe(true);
+    expect(isLoanCompleted({ remainingBalance: 5000, periodsRemaining: 0, scheduleMode: "calculated" })).toBe(true);
+  });
+
+  it("is false while a balance and periods remain", () => {
+    expect(isLoanCompleted({ remainingBalance: 8000, periodsRemaining: 16, scheduleMode: "calculated" })).toBe(false);
+  });
+
+  // null <= 0.5 is true in JS; an unscheduled loan must never read as paid off.
+  it("is false for a loan the server could not schedule", () => {
+    expect(isLoanCompleted({ remainingBalance: null, periodsRemaining: null, scheduleMode: undefined })).toBe(false);
+  });
+
+  // A manual schedule is only as long as the rows supplied.
+  it("a manual schedule that stops short of payoff is not paid off", () => {
+    expect(isLoanCompleted({ remainingBalance: 9487, periodsRemaining: 0, scheduleMode: "manual" })).toBe(false);
+    expect(isLoanCompleted({ remainingBalance: 0, periodsRemaining: 0, scheduleMode: "manual" })).toBe(true);
+  });
+});
+
+describe("loan helpers", () => {
+  it("splits active from paid off", () => {
+    const { active, completed } = splitLoans([
+      loan({ id: 1 }),
+      loan({ id: 2, remainingBalance: 0, periodsRemaining: 0 }),
+    ]);
+    expect(active.map((l) => l.id)).toEqual([1]);
+    expect(completed.map((l) => l.id)).toEqual([2]);
+  });
+
+  it("works out the share paid, bounded to 0..100", () => {
+    expect(loanPaidPct({ principal: 12000, remainingBalance: 8000 })).toBeCloseTo(33.33, 1);
+    expect(loanPaidPct({ principal: 12000, remainingBalance: 13000 })).toBe(0);
+    expect(loanPaidPct({ principal: 12000, remainingBalance: null })).toBe(0);
+    expect(loanPaidPct({ principal: 0, remainingBalance: 0 })).toBe(0);
+  });
+
+  // Native amounts are in each loan's own currency; only the display-currency
+  // companions may be added together.
+  it("totals use the display-currency companions, never the native amounts", () => {
+    const totals = loanTotals([
+      loan({ currency: "USD", remainingBalance: 8000, remainingBalanceDisplay: 8000, monthlyEquivalentPaymentDisplay: 500 }),
+      loan({ currency: "RUB", remainingBalance: 8_000_000, remainingBalanceDisplay: 100_000, monthlyEquivalentPaymentDisplay: 900 }),
+    ]);
+    expect(totals).toEqual({ owed: 108_000, monthly: 1400 });
+  });
+
+  it("labels loan types, including ones it has no entry for", () => {
+    expect(loanTypeLabel("mortgage")).toBe("Mortgage");
+    expect(loanTypeLabel("home_equity")).toBe("Home equity");
+    expect(loanTypeLabel(null)).toBe("Loan");
+  });
+});
+
+describe("LoansScreen", () => {
+  it("lists active loans with their balance, payment and end date", async () => {
+    getLoans.mockResolvedValue(ok([loan({})]));
+    const { getByText, queryByText } = render(screen());
+    await waitFor(() => expect(getByText("Car loan")).toBeTruthy());
+    expect(getByText("Auto loan · 6%")).toBeTruthy();
+    expect(getByText(/33% paid of/)).toBeTruthy();
+    expect(getByText("2028-01-15")).toBeTruthy();
+    expect(queryByText(/paid-off/)).toBeNull();
+  });
+
+  // In-app feedback: a loan at zero should hide itself, with a button to see it.
+  it("keeps paid-off loans hidden until asked for", async () => {
+    getLoans.mockResolvedValue(
+      ok([loan({ id: 1 }), loan({ id: 2, name: "Old laptop", remainingBalance: 0, periodsRemaining: 0, remainingBalanceDisplay: 0 })]),
+    );
+    const { getByText, queryByText } = render(screen());
+    await waitFor(() => expect(getByText("Car loan")).toBeTruthy());
+    expect(queryByText("Old laptop")).toBeNull();
+
+    fireEvent.press(getByText("Show 1 paid-off loan"));
+    expect(getByText("Old laptop")).toBeTruthy();
+    expect(getByText(/Paid off/)).toBeTruthy();
+
+    fireEvent.press(getByText("Hide paid-off loans"));
+    expect(queryByText("Old laptop")).toBeNull();
+  });
+
+  it("when every loan is paid off, shows the toggle and no totals", async () => {
+    getLoans.mockResolvedValue(ok([loan({ remainingBalance: 0, periodsRemaining: 0 })]));
+    const { getByText, queryByText } = render(screen());
+    await waitFor(() => expect(getByText("Show 1 paid-off loan")).toBeTruthy());
+    expect(queryByText("TOTAL OWED")).toBeNull();
+    expect(queryByText("Car loan")).toBeNull();
+  });
+
+  it("a loan the server could not schedule stays visible and says what to do", async () => {
+    getLoans.mockResolvedValue(
+      ok([loan({ remainingBalance: null, periodsRemaining: null, monthlyPayment: null, payoffDate: null, totalInterest: null })]),
+    );
+    const { getByText } = render(screen());
+    await waitFor(() => expect(getByText("Car loan")).toBeTruthy());
+    expect(getByText(/could not be scheduled/)).toBeTruthy();
+  });
+
+  it("marks a manual schedule and does not treat a short one as paid off", async () => {
+    getLoans.mockResolvedValue(ok([loan({ scheduleMode: "manual", remainingBalance: 9487, periodsRemaining: 0 })]));
+    const { getByText, queryByText } = render(screen());
+    await waitFor(() => expect(getByText("Car loan")).toBeTruthy());
+    expect(getByText("Auto loan · Manual schedule")).toBeTruthy();
+    expect(queryByText(/paid-off/)).toBeNull();
+  });
+
+  it("shows the server's message when the list cannot be loaded", async () => {
+    getLoans.mockResolvedValue({ success: false, error: "Not found" });
+    const { getByText } = render(screen());
+    await waitFor(() => expect(getByText("Not found")).toBeTruthy());
+  });
+
+  it("says where to add a loan when there are none", async () => {
+    getLoans.mockResolvedValue(ok([]));
+    const { getByText } = render(screen());
+    await waitFor(() => expect(getByText(/No loans yet/)).toBeTruthy());
+  });
+});
