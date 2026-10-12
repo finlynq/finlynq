@@ -29,6 +29,7 @@ import { Icon } from "../components/icon";
 import {
   LOAN_FREQUENCY_LABEL,
   loanPaidPct,
+  loanRateLabel,
   loanTotals,
   loanTypeLabel,
   splitLoans,
@@ -132,7 +133,7 @@ export default function LoansScreen() {
             </Text>
             <Text style={[styles.meta, { color: colors.mutedForeground }]} numberOfLines={1}>
               {loanTypeLabel(loan.type)}
-              {loan.scheduleMode === "manual" ? " · Manual schedule" : ` · ${loan.annualRate}%`}
+              {` · ${loanRateLabel(loan)}`}
               {isCompleted ? " · Paid off" : ""}
             </Text>
           </View>

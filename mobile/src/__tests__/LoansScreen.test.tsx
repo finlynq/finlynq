@@ -1,7 +1,7 @@
 import React from "react";
 import { render, waitFor, fireEvent } from "@testing-library/react-native";
 import LoansScreen from "../screens/LoansScreen";
-import { isLoanCompleted, loanPaidPct, loanTotals, loanTypeLabel, splitLoans } from "../lib/loans";
+import { isLoanCompleted, loanPaidPct, loanRateLabel, loanTotals, loanTypeLabel, splitLoans } from "../lib/loans";
 import { endpoints } from "../api/client";
 import { ThemeContext } from "../theme";
 import type { Theme } from "../theme";
@@ -116,6 +116,17 @@ describe("loan helpers", () => {
       loan({ currency: "RUB", remainingBalance: 8_000_000, remainingBalanceDisplay: 100_000, monthlyEquivalentPaymentDisplay: 900 }),
     ]);
     expect(totals).toEqual({ owed: 108_000, monthly: 1400 });
+  });
+
+  // A loan quoted as a fixed interest amount is not driven by annualRate; the
+  // comparable yearly rate is what the server sends and what must be shown.
+  it("shows the effective rate for fixed-amount and total-interest loans", () => {
+    expect(loanRateLabel({ annualRate: 6, interestMethod: "rate", effectiveAnnualRate: 6, scheduleMode: "calculated" })).toBe("6%");
+    expect(loanRateLabel({ annualRate: 0, interestMethod: "flat", effectiveAnnualRate: 6.43, scheduleMode: "calculated" })).toBe("6.43% effective");
+    expect(loanRateLabel({ annualRate: 0, interestMethod: "total", effectiveAnnualRate: 6.43, scheduleMode: "calculated" })).toBe("6.43% effective");
+    // An older server that does not send the fields yet.
+    expect(loanRateLabel({ annualRate: 6, interestMethod: undefined, effectiveAnnualRate: undefined, scheduleMode: undefined })).toBe("6%");
+    expect(loanRateLabel({ annualRate: 6, interestMethod: "flat", effectiveAnnualRate: 6.4, scheduleMode: "manual" })).toBe("Manual schedule");
   });
 
   it("labels loan types, including ones it has no entry for", () => {

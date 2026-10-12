@@ -54,6 +54,21 @@ export function splitLoans(loans: LoanSummary[]): { active: LoanSummary[]; compl
   return { active, completed };
 }
 
+/**
+ * The rate to show for a loan. A fixed-amount or total-interest loan is not
+ * driven by `annualRate`, so its comparable yearly rate is shown instead and
+ * labelled as such; a manual schedule has no single rate.
+ */
+export function loanRateLabel(
+  loan: Pick<LoanSummary, "annualRate" | "interestMethod" | "effectiveAnnualRate" | "scheduleMode">,
+): string {
+  if (loan.scheduleMode === "manual") return "Manual schedule";
+  if ((loan.interestMethod ?? "rate") !== "rate" && loan.effectiveAnnualRate != null) {
+    return `${loan.effectiveAnnualRate}% effective`;
+  }
+  return `${loan.annualRate}%`;
+}
+
 /** Share of the original amount already paid down, 0 to 100. */
 export function loanPaidPct(loan: Pick<LoanSummary, "principal" | "remainingBalance">): number {
   if (loan.remainingBalance == null || !(loan.principal > 0)) return 0;

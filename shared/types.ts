@@ -1038,6 +1038,12 @@ export interface LoanSummary {
   accountId: number | null;
   accountName: string | null;
   scheduleMode?: "calculated" | "manual";
+  // rate: annualRate on the balance owed. flat: a fixed interest amount with
+  // every payment. total: the whole loan's interest spread on a declining
+  // balance. For the last two, `effectiveAnnualRate` is the comparable yearly
+  // rate and the one to show; `annualRate` is not what produces the interest.
+  interestMethod?: "rate" | "flat" | "total";
+  effectiveAnnualRate?: number | null;
   displayCurrency?: string;
   remainingBalanceDisplay?: number | null;
   monthlyEquivalentPaymentDisplay?: number | null;
