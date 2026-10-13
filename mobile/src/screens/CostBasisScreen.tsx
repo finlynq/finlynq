@@ -4,7 +4,7 @@
 // The same setting as the web's Settings → Investments card (GET/PUT
 // /api/settings/lot-allocation). Reached from the note on the Portfolio tab
 // and from Settings, so it is registered in both stacks and only ever goes
-// back. Changing which lots a sale used stays on the web app's Lot inspector.
+// back. Changing which lots a sale used is on the holding's page (LotSalesScreen).
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import {
   View,

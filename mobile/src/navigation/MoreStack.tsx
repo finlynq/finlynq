@@ -5,6 +5,8 @@ import BudgetsScreen from "../screens/BudgetsScreen";
 import GoalsScreen from "../screens/GoalsScreen";
 import LoansScreen from "../screens/LoansScreen";
 import LoanDetailScreen from "../screens/LoanDetailScreen";
+import LoanInterestScreen from "../screens/LoanInterestScreen";
+import AddLoanScreen from "../screens/AddLoanScreen";
 import CategoriesScreen from "../screens/CategoriesScreen";
 import ImportScreen from "../screens/ImportScreen";
 import SettingsScreen from "../screens/SettingsScreen";
@@ -51,6 +53,10 @@ export type MoreStackParamList = {
   Loans: undefined;
   // One loan and its payment schedule, opened from the Loans list.
   LoanDetail: { loan: LoanSummary };
+  // That loan's interest: what the schedule calculates beside what is booked.
+  LoanInterest: { loan: LoanSummary };
+  // `loan` present -> edit (prefill + PUT); absent -> create.
+  AddLoan: { loan?: LoanSummary } | undefined;
   Categories: undefined;
   Import: undefined;
   Inbox: { accountId?: number } | undefined;
@@ -90,6 +96,12 @@ export default function MoreStack() {
       <Stack.Screen name="Goals" component={GoalsScreen} />
       <Stack.Screen name="Loans" component={LoansScreen} />
       <Stack.Screen name="LoanDetail" component={LoanDetailScreen} />
+      <Stack.Screen name="LoanInterest" component={LoanInterestScreen} />
+      <Stack.Screen
+        name="AddLoan"
+        component={AddLoanScreen}
+        options={{ presentation: "modal" }}
+      />
       <Stack.Screen name="Subscriptions" component={SubscriptionsScreen} />
       <Stack.Screen name="CategoryReports" component={CategoryReportsScreen} />
       <Stack.Screen name="CategoryDetail" component={CategoryDetailScreen} />

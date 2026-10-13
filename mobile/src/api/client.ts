@@ -342,8 +342,13 @@ import type {
   HealthScoreData,
   GoalWithProgress,
   LoanSummary,
-  LoanSchedule,
-  LoanScheduleRequest,
+  LoanFormData,
+  LoanScheduleState,
+  LoanScheduleChange,
+  LoanInterestState,
+  HoldingLot,
+  LotClosure,
+  LotReassignPreview,
   LotAllocationStatus,
   PortfolioOverview,
   PortfolioHoldingRow,
@@ -676,12 +681,30 @@ export const endpoints = {
   getCategoryDetail: (categoryId: number, months = 12) =>
     api.get<CategoryDetailResponse>(`/api/reports/category?categoryId=${categoryId}&months=${months}`),
 
-  // Loans — bare array, read-only on mobile (set up on the web app).
+  // Loans — the list is a bare array.
   getLoans: () => api.get<LoanSummary[]>("/api/loans"),
-  // One loan's payment schedule. The route works it out from the terms in the
-  // body; `loanId` makes it apply the loan's own manual schedule, edited
-  // interest and interest method, so this matches the web's schedule panel.
-  getLoanSchedule: (body: LoanScheduleRequest) => api.post<LoanSchedule>("/api/loans", body),
+  // Create / edit / delete. POST and PUT answer bare JSON and refuse a loan
+  // that cannot be scheduled with a 400 and a message; DELETE is by `?id=`.
+  createLoan: (d: LoanFormData) => api.post<{ id: number }>("/api/loans", d),
+  // Any subset of the fields: the server merges them onto the stored loan.
+  updateLoan: (d: Partial<LoanFormData> & { id: number }) => api.put<{ id: number }>("/api/loans", d),
+  deleteLoan: (id: number) => api.delete<{ success?: boolean }>(`/api/loans?id=${id}`),
+  // A loan's schedule as the server computes it from the stored loan, with the
+  // loan's own manual schedule, edited interest and interest method applied
+  // (enveloped). The PUT applies one change and answers the same shape.
+  getLoanSchedule: (loanId: number) => api.get<LoanScheduleState>(`/api/loans/schedule?loanId=${loanId}`),
+  saveLoanSchedule: (change: LoanScheduleChange) => api.put<LoanScheduleState>("/api/loans/schedule", change),
+  // Interest entries on the loan's linked account (enveloped). GET reads the
+  // ledger under the loan's interest category; PUT remembers the category; POST
+  // books entries and refuses a payment already booked.
+  getLoanInterest: (loanId: number) => api.get<LoanInterestState>(`/api/loans/interest?loanId=${loanId}`),
+  setLoanInterestCategory: (loanId: number, categoryId: number) =>
+    api.put<{ interestCategoryId: number }>("/api/loans/interest", { loanId, categoryId }),
+  postLoanInterest: (loanId: number, categoryId: number, entries: { periodDate: string; amount: number }[]) =>
+    api.post<{ created: { periodDate: string; transactionId: number; amount: number; date: string }[] }>(
+      "/api/loans/interest",
+      { loanId, categoryId, entries },
+    ),
 
   // Goals — bare array of Goal + server-computed progress fields.
   getGoals: () => api.get<GoalWithProgress[]>("/api/goals"),
@@ -730,6 +753,21 @@ export const endpoints = {
   getLotAllocation: () => api.get<LotAllocationStatus>("/api/settings/lot-allocation"),
   setLotAllocation: (enabled: boolean) =>
     api.put<LotAllocationStatus>("/api/settings/lot-allocation", { enabled }),
+  // Every lot of one position and every sale that used them (bare JSON).
+  getHoldingLots: (holdingId: number, accountId?: number | null) =>
+    api.get<{ lots: HoldingLot[]; closures: LotClosure[] }>(
+      `/api/portfolio/holdings/${holdingId}/lots${accountId != null ? `?accountId=${accountId}` : ""}`
+    ),
+  // Re-point ONE sale onto chosen lots. `preview: true` writes nothing and
+  // answers what would change; `false` commits, all or nothing.
+  reassignLots: (
+    holdingId: number,
+    body: { closeTxId: number; perLotQty: { lotId: number; qty: number }[]; preview: boolean },
+  ) =>
+    api.post<{ preview: LotReassignPreview; committed: boolean }>(
+      `/api/portfolio/holdings/${holdingId}/lots/reassign`,
+      body,
+    ),
   getPortfolioLots: (holdingId: number, accountId?: number | null) =>
     api.get<{ lots: LotRow[] }>(
       `/api/portfolio/lots?holdingId=${holdingId}&openOnly=1${

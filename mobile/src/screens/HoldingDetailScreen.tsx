@@ -257,6 +257,42 @@ export default function HoldingDetailScreen({ navigation, route }: Props) {
           </>
         )}
 
+        {/* Sales and the lots they used: one row per account the position sits in. */}
+        {!isCash && members.length > 0 && (
+          <>
+            <Text style={[styles.section, { color: colors.mutedForeground }]}>Sales</Text>
+            <View style={[styles.listCard, { backgroundColor: colors.card, borderColor: colors.border }]}>
+              {members.map((m) => (
+                <TouchableOpacity
+                  key={m.id}
+                  accessibilityRole="button"
+                  accessibilityLabel={`Sales and lots in ${safeName(m.accountName)}`}
+                  activeOpacity={0.7}
+                  style={[styles.listRow, { borderBottomColor: colors.border }]}
+                  onPress={() =>
+                    navigation.navigate("LotSales", {
+                      holdingId: m.id,
+                      accountId: m.accountId ?? null,
+                      title: desc ?? ticker,
+                      accountName: m.accountName,
+                    })
+                  }
+                >
+                  <View style={styles.listMain}>
+                    <Text style={[styles.listTitle, { color: colors.foreground }]} numberOfLines={1}>
+                      {members.length > 1 ? safeName(m.accountName) : "Sales and the lots they used"}
+                    </Text>
+                    <Text style={[styles.listSub, { color: colors.mutedForeground }]} numberOfLines={1}>
+                      See each sale, and change which purchases it was matched to
+                    </Text>
+                  </View>
+                  <Icon name="chevronRight" size={16} color={colors.mutedForeground} />
+                </TouchableOpacity>
+              ))}
+            </View>
+          </>
+        )}
+
         {/* Transactions */}
         <Text style={[styles.section, { color: colors.mutedForeground }]}>Transactions</Text>
         <View style={[styles.listCard, { backgroundColor: colors.card, borderColor: colors.border }]}>

@@ -74,8 +74,8 @@ export const COST_BASIS_SIMPLE_TEXT =
 export const COST_BASIS_ADVANCED_TEXT =
   "Every purchase is kept as its own lot, and each sale is matched to specific lots: first in, first " +
   "out, unless you change it. Cost basis and unrealized gain then come only from the shares you still " +
-  "hold, and the realized gain on each sale follows the lots it used. You can change which lots a sale " +
-  "used from the Lot inspector on the web app.";
+  "hold, and the realized gain on each sale follows the lots it used. To change which lots a sale used, " +
+  "open the holding and tap Sales.";
 
 export const COST_BASIS_SWITCH_TEXT =
   "Switching never changes a transaction. Your lots are recorded either way, so you can switch back at " +

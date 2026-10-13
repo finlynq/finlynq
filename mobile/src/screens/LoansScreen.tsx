@@ -1,7 +1,7 @@
 // Loans — what is owed, what each payment is, and when each loan ends.
 //
-// Read-only: loans, their schedules and interest entries are set up on the web
-// app. Tapping a loan opens its payment schedule. Paid-off loans are kept out
+// "Add loan" enters a new one; tapping a loan opens its payment schedule, from
+// where it can be edited and its interest booked. Paid-off loans are kept out
 // of the way behind a "Show paid-off" row (in-app feedback: a loan at zero
 // should hide itself, with a way to see it).
 //
@@ -122,11 +122,11 @@ export default function LoansScreen() {
     return (
       <TouchableOpacity
         accessibilityRole="button"
-        accessibilityLabel={`${safeName(loan.name)}, payment schedule`}
+        accessibilityLabel={`${safeName(loan.name)}, ${broken ? "fix its details" : "payment schedule"}`}
         activeOpacity={0.7}
-        // A loan the server could not schedule has no schedule to open.
-        disabled={broken}
-        onPress={broken ? undefined : () => navigation.navigate("LoanDetail", { loan })}
+        // A loan the server could not schedule has no schedule to open; its
+        // form is where it gets fixed (or deleted).
+        onPress={() => (broken ? navigation.navigate("AddLoan", { loan }) : navigation.navigate("LoanDetail", { loan }))}
         style={[
           styles.card,
           { backgroundColor: colors.card, borderColor: colors.border },
@@ -156,7 +156,7 @@ export default function LoansScreen() {
 
         {broken ? (
           <Text style={[styles.detail, { color: colors.destructive }]}>
-            This loan could not be scheduled. Open it on the web app to fix its details.
+            This loan could not be scheduled. Tap to fix its details.
           </Text>
         ) : (
           <>
@@ -191,6 +191,15 @@ export default function LoansScreen() {
     <SafeAreaView style={[styles.safe, { backgroundColor: colors.background }]} edges={["top"]}>
       <View style={styles.headerRow}>
         <Text style={[styles.header, { color: colors.foreground }]}>Loans</Text>
+        <TouchableOpacity
+          accessibilityRole="button"
+          accessibilityLabel="Add loan"
+          style={[styles.addBtn, { borderColor: colors.border }]}
+          onPress={() => navigation.navigate("AddLoan")}
+        >
+          <Icon name="add" size={15} color={colors.primary} />
+          <Text style={[styles.addText, { color: colors.primary }]}>Add loan</Text>
+        </TouchableOpacity>
       </View>
 
       <FlatList
@@ -237,8 +246,7 @@ export default function LoansScreen() {
             case "note":
               return (
                 <Text style={[styles.note, { color: colors.mutedForeground }]}>
-                  Tap a loan for its payment schedule. Add or change loans, their schedules and interest on
-                  the web app.
+                  Tap a loan for its payment schedule, to change it, or to book its interest.
                 </Text>
               );
             default:
@@ -250,7 +258,7 @@ export default function LoansScreen() {
             <Text style={[styles.empty, { color: colors.destructive }]}>{error}</Text>
           ) : (
             <Text style={[styles.empty, { color: colors.mutedForeground }]}>
-              No loans yet. Add one on the web app and it will show here.
+              No loans yet. Tap Add loan to enter a mortgage, a car loan or any other debt.
             </Text>
           )
         }
@@ -262,7 +270,24 @@ export default function LoansScreen() {
 const styles = StyleSheet.create({
   safe: { flex: 1 },
   center: { flex: 1, alignItems: "center", justifyContent: "center" },
-  headerRow: { paddingHorizontal: 16, paddingTop: 16, paddingBottom: 8 },
+  headerRow: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "center",
+    paddingHorizontal: 16,
+    paddingTop: 16,
+    paddingBottom: 8,
+  },
+  addBtn: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 4,
+    paddingHorizontal: 12,
+    paddingVertical: 7,
+    borderRadius: 8,
+    borderWidth: StyleSheet.hairlineWidth,
+  },
+  addText: { fontSize: 14, fontWeight: "700" },
   header: { fontSize: 28, fontWeight: "800" },
   list: { paddingHorizontal: 16, paddingBottom: 32 },
   summary: {

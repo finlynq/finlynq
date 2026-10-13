@@ -2,10 +2,11 @@ import React from "react";
 import { render, waitFor, fireEvent } from "@testing-library/react-native";
 import LoansScreen from "../screens/LoansScreen";
 import {
+  buildLoanPayload,
   isLoanCompleted,
+  loanFormInit,
   loanPaidPct,
   loanRateLabel,
-  loanScheduleRequest,
   loanTotals,
   loanTypeLabel,
   splitLoans,
@@ -140,24 +141,6 @@ describe("loan helpers", () => {
     expect(loanRateLabel({ annualRate: 6, interestMethod: "flat", effectiveAnnualRate: 6.4, scheduleMode: "manual" })).toBe("Manual schedule");
   });
 
-  // The id is what makes the server apply the loan's own schedule settings.
-  it("asks for a schedule with the loan's stored terms and its id", () => {
-    expect(loanScheduleRequest(loan({ id: 7, paymentAmount: 550, extraPayment: 25, residualValue: 1000 }))).toEqual({
-      action: "amortization",
-      loanId: 7,
-      principal: 12000,
-      annualRate: 6,
-      termMonths: 24,
-      startDate: "2026-01-15",
-      paymentAmount: 550,
-      paymentFrequency: "monthly",
-      extraPayment: 25,
-      residualValue: 1000,
-    });
-    // An older server's list has none of the optional terms.
-    expect(loanScheduleRequest(loan({}))).toMatchObject({ paymentAmount: null, extraPayment: 0, residualValue: null });
-  });
-
   it("splits a schedule at today; a payment due today is still to come", () => {
     const rows = [{ date: "2026-02-15" }, { date: "2026-03-15" }, { date: "2026-04-15" }];
     expect(splitSchedule(rows, "2026-03-15")).toEqual({
@@ -175,7 +158,129 @@ describe("loan helpers", () => {
   });
 });
 
+describe("the loan form", () => {
+  const filled = () => ({
+    ...loanFormInit(null, "2026-10-13"),
+    name: " Car loan ",
+    principal: "12000",
+    currency: "usd",
+    annualRate: "6",
+    termMonths: "24",
+  });
+
+  it("a new loan starts as a monthly loan on a yearly rate, dated today", () => {
+    expect(loanFormInit(null, "2026-10-13")).toMatchObject({
+      type: "loan",
+      interestMethod: "rate",
+      paymentFrequency: "monthly",
+      startDate: "2026-10-13",
+      accountId: null,
+      currency: "",
+    });
+  });
+
+  // Seeding from the display-currency companions would rewrite the loan in
+  // another currency on save.
+  it("an edit starts from the loan's own figures, never the display-currency ones", () => {
+    const f = loanFormInit(
+      loan({
+        currency: "RUB",
+        principal: 8_116_000,
+        remainingBalanceDisplay: 100_000,
+        paymentAmount: 75_000,
+        extraPayment: 0,
+        accountId: 3,
+        interestMethod: "flat",
+        interestAmount: 87,
+      }),
+      "2026-10-13",
+    );
+    expect(f).toMatchObject({
+      currency: "RUB",
+      principal: "8116000",
+      paymentAmount: "75000",
+      extraPayment: "",
+      accountId: 3,
+      interestMethod: "flat",
+      interestAmount: "87",
+      startDate: "2026-01-15",
+    });
+  });
+
+  it("builds the request from a filled form", () => {
+    expect(buildLoanPayload(filled())).toEqual({
+      ok: true,
+      body: {
+        name: "Car loan",
+        type: "loan",
+        principal: 12000,
+        currency: "USD",
+        annualRate: 6,
+        interestMethod: "rate",
+        interestAmount: null,
+        termMonths: 24,
+        startDate: "2026-10-13",
+        paymentAmount: null,
+        paymentFrequency: "monthly",
+        extraPayment: 0,
+        residualValue: null,
+        accountId: null,
+      },
+    });
+  });
+
+  it("says what is missing", () => {
+    const err = (over: Partial<ReturnType<typeof filled>>) => {
+      const r = buildLoanPayload({ ...filled(), ...over });
+      return r.ok ? null : r.error;
+    };
+    expect(err({ name: "  " })).toBe("Please enter a name");
+    expect(err({ principal: "0" })).toMatch(/amount borrowed/);
+    expect(err({ currency: "" })).toBe("Please choose a currency");
+    expect(err({ annualRate: "" })).toMatch(/yearly rate/);
+    expect(err({ termMonths: "", paymentAmount: "" })).toBe("Enter a term in months, or the payment amount");
+    expect(err({ termMonths: "24.5" })).toBe("The term must be a whole number of months");
+    expect(err({ paymentAmount: "-5" })).toBe("The payment must be greater than 0");
+    expect(err({ startDate: "13/10/2026" })).toMatch(/start date/);
+    expect(err({ extraPayment: "-1" })).toBe("The extra payment must be 0 or more");
+  });
+
+  it("a payment alone is enough: the term is worked out from it", () => {
+    const r = buildLoanPayload({ ...filled(), termMonths: "", paymentAmount: "531,85" });
+    expect(r.ok && r.body).toMatchObject({ termMonths: null, paymentAmount: 531.85 });
+  });
+
+  // A loan quoted as "587 a payment, 87 of it interest" has no rate to give.
+  it("a fixed interest amount needs the amount, not a rate", () => {
+    const flat = { ...filled(), interestMethod: "flat" as const, annualRate: "", interestAmount: "87" };
+    const r = buildLoanPayload(flat);
+    expect(r.ok && r.body).toMatchObject({ interestMethod: "flat", interestAmount: 87, annualRate: 0 });
+    const missing = buildLoanPayload({ ...flat, interestAmount: "" });
+    expect(missing.ok ? null : missing.error).toBe("Please enter the interest in each payment, 0 or more");
+    const total = buildLoanPayload({ ...flat, interestMethod: "total", interestAmount: "" });
+    expect(total.ok ? null : total.error).toBe("Please enter the loan's total interest, 0 or more");
+  });
+
+  it("a buyout only exists for a lease, and must be less than what was borrowed", () => {
+    const withBuyout = { ...filled(), residualValue: "4000" };
+    const asLoan = buildLoanPayload(withBuyout);
+    expect(asLoan.ok && asLoan.body.residualValue).toBeNull();
+    const asLease = buildLoanPayload({ ...withBuyout, type: "lease" });
+    expect(asLease.ok && asLease.body.residualValue).toBe(4000);
+    const tooBig = buildLoanPayload({ ...withBuyout, type: "lease", residualValue: "12000" });
+    expect(tooBig.ok ? null : tooBig.error).toBe("The buyout must be less than the amount borrowed");
+  });
+});
+
 describe("LoansScreen", () => {
+  it("opens the form for a new loan", async () => {
+    getLoans.mockResolvedValue(ok([loan({})]));
+    const { getByLabelText, getByText } = render(screen());
+    await waitFor(() => expect(getByText("Car loan")).toBeTruthy());
+    fireEvent.press(getByLabelText("Add loan"));
+    expect(mockNavigate).toHaveBeenCalledWith("AddLoan");
+  });
+
   it("lists active loans with their balance, payment and end date", async () => {
     getLoans.mockResolvedValue(ok([loan({})]));
     const { getByText, queryByText } = render(screen());
@@ -229,15 +334,16 @@ describe("LoansScreen", () => {
     expect(mockNavigate).toHaveBeenCalledWith("LoanDetail", { loan: car });
   });
 
-  // No schedule exists for it, so there is nothing to open.
-  it("a loan the server could not schedule cannot be opened", async () => {
-    getLoans.mockResolvedValue(
-      ok([loan({ remainingBalance: null, periodsRemaining: null, monthlyPayment: null, payoffDate: null, totalInterest: null })]),
-    );
+  // No schedule exists for it, so there is nothing to show; its form is where
+  // it can be put right, or deleted.
+  it("a loan the server could not schedule opens its form instead of a schedule", async () => {
+    const bad = loan({ remainingBalance: null, periodsRemaining: null, monthlyPayment: null, payoffDate: null, totalInterest: null });
+    getLoans.mockResolvedValue(ok([bad]));
     const { getByText } = render(screen());
     await waitFor(() => expect(getByText("Car loan")).toBeTruthy());
     fireEvent.press(getByText("Car loan"));
-    expect(mockNavigate).not.toHaveBeenCalled();
+    expect(mockNavigate).toHaveBeenCalledWith("AddLoan", { loan: bad });
+    expect(mockNavigate).not.toHaveBeenCalledWith("LoanDetail", expect.anything());
   });
 
   it("marks a manual schedule and does not treat a short one as paid off", async () => {

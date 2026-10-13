@@ -145,3 +145,16 @@ npx eas build --platform ios --profile production --auto-submit --non-interactiv
   exist (the Loans screen shows the server's error; the cost basis note is simply absent). Adding or
   changing a loan, its schedule and its interest entries, and changing which lots a sale used, stay on
   the web app.
+- **1.0.23 / vc32 (Android internal testing only)** (2026-10-13; not promoted to production and no
+  iOS build, pending the owner's check on a device): the things 1.0.22 left to the web. **Loans**: add,
+  change and delete a loan (More → Loans → Add loan, or Edit on a loan), with the web form's three ways
+  of working out interest and the linked account. **Payment schedule**: tap a payment to set the
+  interest the lender really charged, reset edited payments, make the schedule your own and change its
+  rows, or go back to the calculated one (`GET/PUT /api/loans/schedule`; uploading a spreadsheet stays
+  on the web). **Interest entries** (on a loan): the calculated interest beside what is booked, booking
+  one payment or everything due, choosing the interest category, the booked-versus-calculated verdict
+  and applying its suggested rate (`/api/loans/interest`). **Sales and lots** (on a holding → Sales):
+  each sale with the purchases it was matched to, and changing them with a preview before saving
+  (`/api/portfolio/holdings/:id/lots` + `/lots/reassign`). **Currency decimals**: amounts use the
+  currency's own decimals (no decimals for yen, three for Kuwaiti dinar), as on the web. Needs the web
+  release of 2026-10-13 on the target backend.

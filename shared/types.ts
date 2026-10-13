@@ -681,6 +681,44 @@ export interface LotAllocationStatus {
   rebuilt?: number;
 }
 
+// --- Lots and sales of one position (GET /api/portfolio/holdings/:id/lots) ---
+// Every lot (open, closed, transferred out) and every closure that used one.
+export interface HoldingLot {
+  id: number;
+  accountId: number;
+  openTxId: number;
+  openDate: string;
+  side: "long" | "short";
+  origin: string;
+  status: string;
+  qtyOriginal: number;
+  qtyRemaining: number;
+  costPerShare: number;
+  currency: string;
+}
+
+export interface LotClosure {
+  id: number;
+  lotId: number;
+  // The sale (or transfer out) that used the lot. One sale can span lots.
+  closeTxId: number;
+  closeDate: string;
+  qtyClosed: number;
+  proceedsPerShare: number;
+  costPerShare: number;
+  realizedGain: number;
+  currency: string;
+  closeKind: string;
+  openAfterClose?: boolean;
+}
+
+// POST /api/portfolio/holdings/:id/lots/reassign -> { preview, committed }.
+export interface LotReassignPreview {
+  proposedClosures: { lotId: number; qtyClosed: number; realizedGain: number; isNewShortLot: boolean }[];
+  openedShortLots: { qty: number; currency: string }[];
+  realizedGainDeltaByYear: Record<string, number>;
+}
+
 // --- Lots (GET /api/portfolio/lots, enveloped { lots }) ---
 export interface LotRow {
   lotId: number;
@@ -1060,7 +1098,9 @@ export interface LoanSummary {
   // every payment. total: the whole loan's interest spread on a declining
   // balance. For the last two, `effectiveAnnualRate` is the comparable yearly
   // rate and the one to show; `annualRate` is not what produces the interest.
-  interestMethod?: "rate" | "flat" | "total";
+  interestMethod?: LoanInterestMethod;
+  // The fixed amount per payment ("flat") or the whole loan's interest ("total").
+  interestAmount?: number | null;
   effectiveAnnualRate?: number | null;
   displayCurrency?: string;
   remainingBalanceDisplay?: number | null;
@@ -1068,22 +1108,28 @@ export interface LoanSummary {
   dataIntegrity?: { error: string; value: unknown };
 }
 
-// Body of POST /api/loans { action: "amortization" }: the loan's terms, plus
-// its id so the server applies the loan's own schedule settings.
-export interface LoanScheduleRequest {
-  action: "amortization";
-  loanId: number;
+export type LoanInterestMethod = "rate" | "flat" | "total";
+
+// Body of POST /api/loans (create) and, with `id`, PUT /api/loans (edit). One
+// shape for both, so a field added to the form reaches create and edit together.
+export interface LoanFormData {
+  name: string;
+  type: string;
   principal: number;
+  currency: string;
   annualRate: number;
+  interestMethod: LoanInterestMethod;
+  interestAmount: number | null;
   termMonths: number | null;
   startDate: string;
   paymentAmount: number | null;
   paymentFrequency: string;
   extraPayment: number;
   residualValue: number | null;
+  accountId: number | null;
 }
 
-// One payment of a loan's schedule (POST /api/loans { action: "amortization" }).
+// One payment of a loan's schedule.
 export interface LoanScheduleRow {
   period: number;
   date: string;
@@ -1102,6 +1148,53 @@ export interface LoanSchedule {
   totalInterest: number;
   payoffDate: string;
   scheduleMode: "calculated" | "manual";
+}
+
+// A row the user supplied for a manual schedule (principal and balance are derived).
+export interface LoanManualRow {
+  date: string;
+  payment: number;
+  interest: number;
+}
+
+// GET / PUT /api/loans/schedule (enveloped). `summary` is the schedule as every
+// surface computes it, with the loan's own customizations applied.
+export interface LoanScheduleState {
+  mode: "calculated" | "manual";
+  manualSchedule: LoanManualRow[] | null;
+  // Payment date -> interest the user set for that calculated row.
+  interestOverrides: Record<string, number>;
+  summary: LoanSchedule;
+}
+
+// PUT /api/loans/schedule. Everything but `loanId` is optional; the server
+// refuses a change that cannot be scheduled and stores nothing.
+export interface LoanScheduleChange {
+  loanId: number;
+  // Rows that replace the calculation; null goes back to calculated.
+  manualSchedule?: LoanManualRow[] | null;
+  // With manualSchedule: lay the rows over the current schedule by date.
+  mergeRows?: boolean;
+  // Date -> interest for calculated rows; a null amount removes that edit.
+  interestOverrides?: Record<string, number | null> | null;
+  clearInterestOverrides?: boolean;
+}
+
+// One interest transaction on the loan's account (amount as stored: negative).
+export interface LoanInterestEntry {
+  transactionId: number;
+  date: string;
+  amount: number;
+}
+
+// GET /api/loans/interest?loanId= (enveloped).
+export interface LoanInterestState {
+  accountId: number | null;
+  // The category saved on the loan for its interest.
+  interestCategoryId: number | null;
+  // The category the entries below were read under.
+  categoryId: number | null;
+  entries: LoanInterestEntry[];
 }
 export type ReportGroupBy = "category" | "group";
 

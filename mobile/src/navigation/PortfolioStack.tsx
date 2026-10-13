@@ -9,6 +9,7 @@ import PerformanceScreen from "../screens/PerformanceScreen";
 import RealizedGainsScreen from "../screens/RealizedGainsScreen";
 import DividendsScreen from "../screens/DividendsScreen";
 import CostBasisScreen from "../screens/CostBasisScreen";
+import LotSalesScreen from "../screens/LotSalesScreen";
 import type {
   PortfolioHoldingSummary,
   EnrichedHolding,
@@ -35,6 +36,8 @@ export type PortfolioStackParamList = {
   Dividends: { displayCurrency?: string } | undefined;
   // Simple average or advanced lot allocation (also reachable from Settings).
   CostBasis: undefined;
+  // The sales of one position (a holding in one account) and the lots each used.
+  LotSales: { holdingId: number; accountId: number | null; title: string; accountName?: string };
 };
 
 const Stack = createNativeStackNavigator<PortfolioStackParamList>();
@@ -63,6 +66,7 @@ export default function PortfolioStack() {
       <Stack.Screen name="RealizedGains" component={RealizedGainsScreen} />
       <Stack.Screen name="Dividends" component={DividendsScreen} />
       <Stack.Screen name="CostBasis" component={CostBasisScreen} />
+      <Stack.Screen name="LotSales" component={LotSalesScreen} />
     </Stack.Navigator>
   );
 }
