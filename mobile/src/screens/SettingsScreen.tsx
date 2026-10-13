@@ -354,6 +354,26 @@ export default function SettingsScreen() {
           </TouchableOpacity>
         </View>
 
+        {/* Investments — how cost basis and gains are worked out. */}
+        <Text style={[styles.sectionTitle, { color: colors.mutedForeground }]}>INVESTMENTS</Text>
+        <View style={[styles.card, { backgroundColor: colors.card, borderColor: colors.border }]}>
+          <TouchableOpacity
+            style={styles.navRow}
+            onPress={() => navigation.navigate("CostBasis")}
+            activeOpacity={0.7}
+          >
+            <View style={styles.settingLeft}>
+              <Text style={[styles.settingLabel, { color: colors.foreground }]}>
+                Cost basis method
+              </Text>
+              <Text style={[styles.settingDesc, { color: colors.mutedForeground }]}>
+                Simple average, or advanced lot allocation.
+              </Text>
+            </View>
+            <Text style={[styles.navValue, { color: colors.mutedForeground }]}>›</Text>
+          </TouchableOpacity>
+        </View>
+
         {/* Security */}
         <Text style={[styles.sectionTitle, { color: colors.mutedForeground }]}>SECURITY</Text>
         <View style={[styles.card, { backgroundColor: colors.card, borderColor: colors.border }]}>

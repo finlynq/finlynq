@@ -4,6 +4,7 @@ import MoreScreen from "../screens/MoreScreen";
 import BudgetsScreen from "../screens/BudgetsScreen";
 import GoalsScreen from "../screens/GoalsScreen";
 import LoansScreen from "../screens/LoansScreen";
+import LoanDetailScreen from "../screens/LoanDetailScreen";
 import CategoriesScreen from "../screens/CategoriesScreen";
 import ImportScreen from "../screens/ImportScreen";
 import SettingsScreen from "../screens/SettingsScreen";
@@ -24,7 +25,14 @@ import SubscriptionsScreen from "../screens/SubscriptionsScreen";
 import AddSubscriptionScreen from "../screens/AddSubscriptionScreen";
 import CategoryReportsScreen from "../screens/CategoryReportsScreen";
 import CategoryDetailScreen from "../screens/CategoryDetailScreen";
-import type { Category, GoalWithProgress, Subscription, SubscriptionFormData } from "../../../shared/types";
+import CostBasisScreen from "../screens/CostBasisScreen";
+import type {
+  Category,
+  GoalWithProgress,
+  LoanSummary,
+  Subscription,
+  SubscriptionFormData,
+} from "../../../shared/types";
 
 /** Date range + display currency threaded from the Reports hub to a detail
  *  screen (trends/sankey/income-statement responses don't all carry currency). */
@@ -41,11 +49,15 @@ export type MoreStackParamList = {
   Budgets: undefined;
   Goals: undefined;
   Loans: undefined;
+  // One loan and its payment schedule, opened from the Loans list.
+  LoanDetail: { loan: LoanSummary };
   Categories: undefined;
   Import: undefined;
   Inbox: { accountId?: number } | undefined;
   Settings: undefined;
   ReconcileThresholds: undefined;
+  // Simple average or advanced lot allocation (also on the Portfolio tab).
+  CostBasis: undefined;
   AddTransaction:
     | { mode?: "expense" | "income" | "transfer"; preselectedAccountId?: number }
     | undefined;
@@ -77,6 +89,7 @@ export default function MoreStack() {
       <Stack.Screen name="Budgets" component={BudgetsScreen} />
       <Stack.Screen name="Goals" component={GoalsScreen} />
       <Stack.Screen name="Loans" component={LoansScreen} />
+      <Stack.Screen name="LoanDetail" component={LoanDetailScreen} />
       <Stack.Screen name="Subscriptions" component={SubscriptionsScreen} />
       <Stack.Screen name="CategoryReports" component={CategoryReportsScreen} />
       <Stack.Screen name="CategoryDetail" component={CategoryDetailScreen} />
@@ -85,6 +98,7 @@ export default function MoreStack() {
       <Stack.Screen name="Inbox" component={InboxScreen} />
       <Stack.Screen name="Settings" component={SettingsScreen} />
       <Stack.Screen name="ReconcileThresholds" component={ReconcileThresholdsScreen} />
+      <Stack.Screen name="CostBasis" component={CostBasisScreen} />
       <Stack.Screen
         name="AddTransaction"
         component={AddTransactionScreen}

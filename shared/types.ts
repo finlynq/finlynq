@@ -667,6 +667,20 @@ export interface DividendIncomeResult {
   filter: Record<string, unknown>;
 }
 
+// --- Cost-basis method (GET/PUT /api/settings/lot-allocation, enveloped) ---
+export interface LotAllocationStatus {
+  /** false = the simple average of every purchase; true = advanced lot allocation. */
+  enabled: boolean;
+  /** Positions with trades. */
+  positions: number;
+  /** Positions that have no lots yet (built when the method is turned on). */
+  withoutLots: number;
+  /** Positions whose lots do not add up to the shares held. */
+  mismatched: number;
+  /** PUT only: positions whose lots were built while turning the method on. */
+  rebuilt?: number;
+}
+
 // --- Lots (GET /api/portfolio/lots, enveloped { lots }) ---
 export interface LotRow {
   lotId: number;
@@ -1026,6 +1040,10 @@ export interface LoanSummary {
   termMonths: number | null;
   startDate: string;
   paymentFrequency: string;
+  // The loan's stored terms, sent back when asking for its schedule.
+  paymentAmount?: number | null;
+  extraPayment?: number | null;
+  residualValue?: number | null;
   monthlyPayment: number | null;
   paymentPerPeriod?: number | null;
   totalInterest: number | null;
@@ -1048,6 +1066,42 @@ export interface LoanSummary {
   remainingBalanceDisplay?: number | null;
   monthlyEquivalentPaymentDisplay?: number | null;
   dataIntegrity?: { error: string; value: unknown };
+}
+
+// Body of POST /api/loans { action: "amortization" }: the loan's terms, plus
+// its id so the server applies the loan's own schedule settings.
+export interface LoanScheduleRequest {
+  action: "amortization";
+  loanId: number;
+  principal: number;
+  annualRate: number;
+  termMonths: number | null;
+  startDate: string;
+  paymentAmount: number | null;
+  paymentFrequency: string;
+  extraPayment: number;
+  residualValue: number | null;
+}
+
+// One payment of a loan's schedule (POST /api/loans { action: "amortization" }).
+export interface LoanScheduleRow {
+  period: number;
+  date: string;
+  payment: number;
+  principal: number;
+  interest: number;
+  balance: number;
+  /** True when the user set this payment's interest by hand. */
+  interestOverridden?: boolean;
+}
+
+// The schedule itself plus the figures worked out from it. Amounts are in the
+// loan's own currency.
+export interface LoanSchedule {
+  schedule: LoanScheduleRow[];
+  totalInterest: number;
+  payoffDate: string;
+  scheduleMode: "calculated" | "manual";
 }
 export type ReportGroupBy = "category" | "group";
 

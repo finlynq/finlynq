@@ -1,6 +1,6 @@
 import React from "react";
 import { ActivityIndicator } from "react-native";
-import { render, waitFor } from "@testing-library/react-native";
+import { render, waitFor, fireEvent } from "@testing-library/react-native";
 import { useIsFocused } from "@react-navigation/native";
 import { ThemeContext } from "../theme";
 import type { Theme } from "../theme";
@@ -10,7 +10,7 @@ import { endpoints } from "../api/client";
 import type { PortfolioOverview, PortfolioHoldingSummary } from "../../../shared/types";
 
 jest.mock("../api/client", () => ({
-  endpoints: { getPortfolioOverview: jest.fn() },
+  endpoints: { getPortfolioOverview: jest.fn(), getLotAllocation: jest.fn() },
 }));
 
 const theme: Theme = {
@@ -97,6 +97,35 @@ describe("PortfolioScreen", () => {
       success: true,
       data: overview,
     });
+    (endpoints.getLotAllocation as jest.Mock).mockResolvedValue({
+      success: true,
+      data: { enabled: false, positions: 7, withoutLots: 0, mismatched: 0 },
+    });
+  });
+
+  it("says which cost-basis method the figures use, and opens its screen", async () => {
+    const { findByText, getByLabelText } = renderWithTheme(<PortfolioScreen {...props} />);
+    expect(await findByText(/Cost basis: simple average/)).toBeTruthy();
+    fireEvent.press(getByLabelText("Cost basis method"));
+    expect(nav.navigate).toHaveBeenCalledWith("CostBasis");
+  });
+
+  it("names lot allocation when that is the method in use", async () => {
+    (endpoints.getLotAllocation as jest.Mock).mockResolvedValue({
+      success: true,
+      data: { enabled: true, positions: 7, withoutLots: 0, mismatched: 0 },
+    });
+    const { findByText } = renderWithTheme(<PortfolioScreen {...props} />);
+    expect(await findByText(/Cost basis: advanced lot allocation/)).toBeTruthy();
+  });
+
+  // A server from before the setting existed answers 404: no note, no error.
+  it("shows no cost-basis note when the server has no such setting", async () => {
+    (endpoints.getLotAllocation as jest.Mock).mockResolvedValue({ success: false, error: "HTTP 404" });
+    const { findByText, queryByText } = renderWithTheme(<PortfolioScreen {...props} />);
+    expect(await findByText("Investment returns")).toBeTruthy();
+    expect(queryByText(/Cost basis:/)).toBeNull();
+    expect(queryByText("HTTP 404")).toBeNull();
   });
 
   it("renders the returns grid + a holding row from the overview fixture", async () => {

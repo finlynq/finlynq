@@ -1,16 +1,27 @@
 import React from "react";
 import { render, waitFor, fireEvent } from "@testing-library/react-native";
 import LoansScreen from "../screens/LoansScreen";
-import { isLoanCompleted, loanPaidPct, loanRateLabel, loanTotals, loanTypeLabel, splitLoans } from "../lib/loans";
+import {
+  isLoanCompleted,
+  loanPaidPct,
+  loanRateLabel,
+  loanScheduleRequest,
+  loanTotals,
+  loanTypeLabel,
+  splitLoans,
+  splitSchedule,
+} from "../lib/loans";
 import { endpoints } from "../api/client";
 import { ThemeContext } from "../theme";
 import type { Theme } from "../theme";
 import { lightColors } from "../theme/colors";
 import type { LoanSummary } from "../../../shared/types";
 
+const mockNavigate = jest.fn();
 jest.mock("@react-navigation/native", () => ({
   ...jest.requireActual("@react-navigation/native"),
   useIsFocused: jest.fn(() => true),
+  useNavigation: () => ({ navigate: mockNavigate }),
 }));
 
 jest.mock("../api/client", () => ({
@@ -129,6 +140,34 @@ describe("loan helpers", () => {
     expect(loanRateLabel({ annualRate: 6, interestMethod: "flat", effectiveAnnualRate: 6.4, scheduleMode: "manual" })).toBe("Manual schedule");
   });
 
+  // The id is what makes the server apply the loan's own schedule settings.
+  it("asks for a schedule with the loan's stored terms and its id", () => {
+    expect(loanScheduleRequest(loan({ id: 7, paymentAmount: 550, extraPayment: 25, residualValue: 1000 }))).toEqual({
+      action: "amortization",
+      loanId: 7,
+      principal: 12000,
+      annualRate: 6,
+      termMonths: 24,
+      startDate: "2026-01-15",
+      paymentAmount: 550,
+      paymentFrequency: "monthly",
+      extraPayment: 25,
+      residualValue: 1000,
+    });
+    // An older server's list has none of the optional terms.
+    expect(loanScheduleRequest(loan({}))).toMatchObject({ paymentAmount: null, extraPayment: 0, residualValue: null });
+  });
+
+  it("splits a schedule at today; a payment due today is still to come", () => {
+    const rows = [{ date: "2026-02-15" }, { date: "2026-03-15" }, { date: "2026-04-15" }];
+    expect(splitSchedule(rows, "2026-03-15")).toEqual({
+      past: [{ date: "2026-02-15" }],
+      upcoming: [{ date: "2026-03-15" }, { date: "2026-04-15" }],
+    });
+    expect(splitSchedule(rows, "2027-01-01").upcoming).toEqual([]);
+    expect(splitSchedule([], "2026-03-15")).toEqual({ past: [], upcoming: [] });
+  });
+
   it("labels loan types, including ones it has no entry for", () => {
     expect(loanTypeLabel("mortgage")).toBe("Mortgage");
     expect(loanTypeLabel("home_equity")).toBe("Home equity");
@@ -179,6 +218,26 @@ describe("LoansScreen", () => {
     const { getByText } = render(screen());
     await waitFor(() => expect(getByText("Car loan")).toBeTruthy());
     expect(getByText(/could not be scheduled/)).toBeTruthy();
+  });
+
+  it("opens a loan's payment schedule when it is tapped", async () => {
+    const car = loan({ id: 4 });
+    getLoans.mockResolvedValue(ok([car]));
+    const { getByText } = render(screen());
+    await waitFor(() => expect(getByText("Car loan")).toBeTruthy());
+    fireEvent.press(getByText("Car loan"));
+    expect(mockNavigate).toHaveBeenCalledWith("LoanDetail", { loan: car });
+  });
+
+  // No schedule exists for it, so there is nothing to open.
+  it("a loan the server could not schedule cannot be opened", async () => {
+    getLoans.mockResolvedValue(
+      ok([loan({ remainingBalance: null, periodsRemaining: null, monthlyPayment: null, payoffDate: null, totalInterest: null })]),
+    );
+    const { getByText } = render(screen());
+    await waitFor(() => expect(getByText("Car loan")).toBeTruthy());
+    fireEvent.press(getByText("Car loan"));
+    expect(mockNavigate).not.toHaveBeenCalled();
   });
 
   it("marks a manual schedule and does not treat a short one as paid off", async () => {

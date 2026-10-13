@@ -1,7 +1,7 @@
 // Loans — pure helpers for the Loans screen. Mirrors the web rule in
 // pf-app `src/lib/loan-status.ts`; keep the two in sync.
 
-import type { LoanSummary } from "../../../shared/types";
+import type { LoanScheduleRequest, LoanScheduleRow, LoanSummary } from "../../../shared/types";
 
 export const LOAN_FREQUENCY_LABEL: Record<string, string> = {
   weekly: "Weekly",
@@ -67,6 +67,41 @@ export function loanRateLabel(
     return `${loan.effectiveAnnualRate}% effective`;
   }
   return `${loan.annualRate}%`;
+}
+
+/**
+ * What to send to get one loan's schedule: its stored terms and its id. The
+ * id is what makes the server apply the loan's own manual schedule, edited
+ * interest and interest method. Same fields the web's schedule panel sends.
+ */
+export function loanScheduleRequest(loan: LoanSummary): LoanScheduleRequest {
+  return {
+    action: "amortization",
+    loanId: loan.id,
+    principal: loan.principal,
+    annualRate: loan.annualRate,
+    termMonths: loan.termMonths,
+    startDate: loan.startDate,
+    paymentAmount: loan.paymentAmount ?? null,
+    paymentFrequency: loan.paymentFrequency,
+    extraPayment: loan.extraPayment ?? 0,
+    residualValue: loan.residualValue ?? null,
+  };
+}
+
+/**
+ * A schedule split at `today` ("YYYY-MM-DD"): payments already due, and those
+ * still to come. A payment due today counts as still to come, so the first
+ * upcoming row is the next one to make.
+ */
+export function splitSchedule<T extends Pick<LoanScheduleRow, "date">>(
+  rows: readonly T[],
+  today: string,
+): { past: T[]; upcoming: T[] } {
+  const past: T[] = [];
+  const upcoming: T[] = [];
+  for (const r of rows) (r.date < today ? past : upcoming).push(r);
+  return { past, upcoming };
 }
 
 /** Share of the original amount already paid down, 0 to 100. */

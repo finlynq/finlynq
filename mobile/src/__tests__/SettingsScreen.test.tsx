@@ -1,5 +1,6 @@
 import React from "react";
 import { render, fireEvent, waitFor } from "@testing-library/react-native";
+import { useNavigation } from "@react-navigation/native";
 import SettingsScreen from "../screens/SettingsScreen";
 import { ThemeContext } from "../theme";
 import type { Theme } from "../theme";
@@ -67,6 +68,15 @@ describe("SettingsScreen", () => {
     expect(getByText("CONNECTION")).toBeTruthy();
     expect(getByText("Server URL")).toBeTruthy();
     expect(getByDisplayValue("http://localhost:3000")).toBeTruthy();
+  });
+
+  it("opens the cost basis method from the Investments section", () => {
+    const navigate = jest.fn();
+    (useNavigation as jest.Mock).mockReturnValue({ navigate });
+    const { getByText } = renderWithTheme(<SettingsScreen />);
+    expect(getByText("INVESTMENTS")).toBeTruthy();
+    fireEvent.press(getByText("Cost basis method"));
+    expect(navigate).toHaveBeenCalledWith("CostBasis");
   });
 
   it("shows SECURITY section", () => {

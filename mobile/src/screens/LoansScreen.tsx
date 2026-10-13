@@ -1,8 +1,9 @@
 // Loans — what is owed, what each payment is, and when each loan ends.
 //
 // Read-only: loans, their schedules and interest entries are set up on the web
-// app. Paid-off loans are kept out of the way behind a "Show paid-off" row
-// (in-app feedback: a loan at zero should hide itself, with a way to see it).
+// app. Tapping a loan opens its payment schedule. Paid-off loans are kept out
+// of the way behind a "Show paid-off" row (in-app feedback: a loan at zero
+// should hide itself, with a way to see it).
 //
 // Every per-loan figure is in the LOAN's own currency. The two totals at the
 // top use the server's display-currency companions, the only figures that are
@@ -19,7 +20,8 @@ import {
   TouchableOpacity,
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
-import { useIsFocused } from "@react-navigation/native";
+import { useIsFocused, useNavigation } from "@react-navigation/native";
+import type { NativeStackNavigationProp } from "@react-navigation/native-stack";
 import { useTheme } from "../theme";
 import { endpoints } from "../api/client";
 import { logger } from "../lib/logger";
@@ -35,6 +37,7 @@ import {
   splitLoans,
 } from "../lib/loans";
 import type { LoanSummary } from "../../../shared/types";
+import type { MoreStackParamList } from "../navigation/MoreStack";
 
 type Row =
   | { kind: "summary" }
@@ -46,6 +49,7 @@ type Row =
 export default function LoansScreen() {
   const { colors } = useTheme();
   const isFocused = useIsFocused();
+  const navigation = useNavigation<NativeStackNavigationProp<MoreStackParamList, "Loans">>();
   const [loans, setLoans] = useState<LoanSummary[]>([]);
   // Full-screen spinner only until the first response; focus refetches after
   // that update the list in place.
@@ -116,7 +120,13 @@ export default function LoansScreen() {
     const payment = loan.paymentPerPeriod ?? loan.monthlyPayment;
     const frequency = LOAN_FREQUENCY_LABEL[loan.paymentFrequency] ?? "Payment";
     return (
-      <View
+      <TouchableOpacity
+        accessibilityRole="button"
+        accessibilityLabel={`${safeName(loan.name)}, payment schedule`}
+        activeOpacity={0.7}
+        // A loan the server could not schedule has no schedule to open.
+        disabled={broken}
+        onPress={broken ? undefined : () => navigation.navigate("LoanDetail", { loan })}
         style={[
           styles.card,
           { backgroundColor: colors.card, borderColor: colors.border },
@@ -173,7 +183,7 @@ export default function LoansScreen() {
             )}
           </>
         )}
-      </View>
+      </TouchableOpacity>
     );
   };
 
@@ -227,7 +237,8 @@ export default function LoansScreen() {
             case "note":
               return (
                 <Text style={[styles.note, { color: colors.mutedForeground }]}>
-                  Add or change loans, their schedules and interest on the web app.
+                  Tap a loan for its payment schedule. Add or change loans, their schedules and interest on
+                  the web app.
                 </Text>
               );
             default:

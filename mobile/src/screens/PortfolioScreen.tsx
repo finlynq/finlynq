@@ -24,6 +24,7 @@ import { AllocationDonut, type AllocationSlice } from "../components/portfolio/A
 import { GainerLoserRow } from "../components/portfolio/GainerLoserRow";
 import { findHoldingInOverview, holdingDescription } from "../lib/portfolio/holdings";
 import { formatQty, signedMoney } from "../lib/portfolio/format";
+import { costBasisNoteLabel } from "../lib/portfolio/cost-basis";
 import type {
   PortfolioOverview,
   PortfolioHoldingSummary,
@@ -60,6 +61,9 @@ export default function PortfolioScreen({ navigation }: Props) {
   // background: the content (and scroll position) stays put instead of being
   // swapped for a full-screen spinner every time the tab regains focus.
   const hasOverviewRef = useRef(false);
+  // Which cost-basis method the figures use. Null until known; a server with
+  // no such setting leaves it null and the note below is simply not shown.
+  const [lotAllocation, setLotAllocation] = useState<boolean | null>(null);
 
   const fetchOverview = useCallback(async (isRefresh = false) => {
     if (isRefresh) setRefreshing(true);
@@ -83,9 +87,21 @@ export default function PortfolioScreen({ navigation }: Props) {
     }
   }, []);
 
+  const fetchMethod = useCallback(async () => {
+    try {
+      const res = await endpoints.getLotAllocation();
+      // A failed refresh keeps the last known method on screen.
+      if (res.success) setLotAllocation(res.data.enabled);
+    } catch {
+      // the note is optional
+    }
+  }, []);
+
   useEffect(() => {
-    if (isFocused) fetchOverview();
-  }, [isFocused, fetchOverview]);
+    if (!isFocused) return;
+    fetchOverview();
+    fetchMethod();
+  }, [isFocused, fetchOverview, fetchMethod]);
 
   // Server always sends displayCurrency; USD is the app-wide default (FINLYNQ-183).
   const currency = overview?.displayCurrency ?? "USD";
@@ -201,6 +217,19 @@ export default function PortfolioScreen({ navigation }: Props) {
             {/* Investment returns */}
             <Text style={[styles.section, { color: colors.mutedForeground }]}>Investment returns</Text>
             <MetricGrid items={metrics} />
+            {lotAllocation != null ? (
+              <TouchableOpacity
+                accessibilityRole="button"
+                accessibilityLabel="Cost basis method"
+                onPress={() => navigation.navigate("CostBasis")}
+                style={styles.methodNote}
+              >
+                <Text style={[styles.methodNoteText, { color: colors.mutedForeground }]}>
+                  Cost basis: {costBasisNoteLabel(lotAllocation)} ·{" "}
+                  <Text style={{ color: colors.primary }}>How it works</Text>
+                </Text>
+              </TouchableOpacity>
+            ) : null}
 
             {/* Reporting chips */}
             <View style={styles.chipRow}>
@@ -353,6 +382,8 @@ const styles = StyleSheet.create({
   heroStatValue: { fontSize: 13, fontWeight: "700", fontVariant: ["tabular-nums"] },
   section: { fontSize: 12, fontWeight: "700", textTransform: "uppercase", marginBottom: 8, marginTop: 4 },
   card: { borderRadius: 12, borderWidth: StyleSheet.hairlineWidth, padding: 14, marginBottom: 12 },
+  methodNote: { marginTop: -4, marginBottom: 12, paddingVertical: 4 },
+  methodNoteText: { fontSize: 12 },
   chipRow: { flexDirection: "row", gap: 8, marginBottom: 12 },
   navChip: {
     flex: 1,

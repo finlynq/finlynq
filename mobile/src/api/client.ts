@@ -342,6 +342,9 @@ import type {
   HealthScoreData,
   GoalWithProgress,
   LoanSummary,
+  LoanSchedule,
+  LoanScheduleRequest,
+  LotAllocationStatus,
   PortfolioOverview,
   PortfolioHoldingRow,
   PortfolioPerformance,
@@ -675,6 +678,10 @@ export const endpoints = {
 
   // Loans — bare array, read-only on mobile (set up on the web app).
   getLoans: () => api.get<LoanSummary[]>("/api/loans"),
+  // One loan's payment schedule. The route works it out from the terms in the
+  // body; `loanId` makes it apply the loan's own manual schedule, edited
+  // interest and interest method, so this matches the web's schedule panel.
+  getLoanSchedule: (body: LoanScheduleRequest) => api.post<LoanSchedule>("/api/loans", body),
 
   // Goals — bare array of Goal + server-computed progress fields.
   getGoals: () => api.get<GoalWithProgress[]>("/api/goals"),
@@ -718,6 +725,11 @@ export const endpoints = {
     api.get<DividendIncomeResult>(
       `/api/portfolio/dividends${params ? `?${params}` : ""}`
     ),
+  // Cost-basis method (simple average or advanced lot allocation) — enveloped.
+  // A server older than 2026-10-13 has no such route and answers 404.
+  getLotAllocation: () => api.get<LotAllocationStatus>("/api/settings/lot-allocation"),
+  setLotAllocation: (enabled: boolean) =>
+    api.put<LotAllocationStatus>("/api/settings/lot-allocation", { enabled }),
   getPortfolioLots: (holdingId: number, accountId?: number | null) =>
     api.get<{ lots: LotRow[] }>(
       `/api/portfolio/lots?holdingId=${holdingId}&openOnly=1${
