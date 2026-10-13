@@ -132,7 +132,8 @@ npx eas build --platform ios --profile production --auto-submit --non-interactiv
   **portfolio-operation legs edit in the portfolio form**: any row whose `kind` is a portfolio op
   (incl. the bank-side leg of a brokerage deposit/withdrawal), or that links a holding, shows
   "In Portfolio" instead of the generic Edit (mirrors the web's `startEdit` mapping).
-- **1.0.22 / vc30 (Android)**: everything that reached the web on 2026-10-12/13. **Loans** (More →
+- **1.0.22 / vc31 (Android)** (the `mobile-release-v30` run was cancelled before its publish step, so
+  vc30 was never uploaded): everything that reached the web on 2026-10-12/13. **Loans** (More →
   Loans): what is owed, each payment and end date, paid-off loans behind a toggle; tap a loan for its
   **payment schedule** (the server applies the loan's own manual schedule, edited interest and
   interest method). An account that a loan tracks shows **View loan**. **Cost basis method** (the note

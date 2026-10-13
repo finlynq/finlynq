@@ -104,13 +104,24 @@ describe("LoanDetailScreen", () => {
     expect(await findByText("Payment schedule")).toBeTruthy();
     expect(getByText("Car loan")).toBeTruthy();
     expect(getByText("Auto loan · USD")).toBeTruthy();
-    expect(getByText("Monthly payment")).toBeTruthy();
+    expect(getByText("$531.85 · monthly")).toBeTruthy();
     expect(getByText("6%")).toBeTruthy();
     expect(getByText("2028-01-15")).toBeTruthy();
     // The id is what makes the server apply the loan's own schedule settings.
     expect(getSchedule).toHaveBeenCalledWith(
       expect.objectContaining({ action: "amortization", loanId: 9, principal: 12000, startDate: "2026-01-15" }),
     );
+  });
+
+  // "Every 2 weeks payment" read badly; the frequency follows the amount.
+  it("puts the payment frequency after the amount, or leaves it out when unknown", async () => {
+    getSchedule.mockResolvedValue({ success: true, data: schedule(fourRows) });
+    const biweekly = render(screen(loan({ paymentFrequency: "biweekly", paymentPerPeriod: 250 })));
+    expect(await biweekly.findByText("$250.00 · every 2 weeks")).toBeTruthy();
+    biweekly.unmount();
+
+    const unknown = render(screen(loan({ paymentFrequency: "fortnightly-ish", paymentPerPeriod: 250 })));
+    expect(await unknown.findByText("$250.00")).toBeTruthy();
   });
 
   it("lists the payments still to come and marks the next one", async () => {

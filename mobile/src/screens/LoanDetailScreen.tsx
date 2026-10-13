@@ -113,7 +113,8 @@ export default function LoanDetailScreen({ navigation, route }: Props) {
   const completed = isLoanCompleted(loan);
   const pct = loanPaidPct(loan);
   const payment = loan.paymentPerPeriod ?? loan.monthlyPayment;
-  const frequency = LOAN_FREQUENCY_LABEL[loan.paymentFrequency] ?? "Payment";
+  // "every 2 weeks", "monthly"; nothing for a frequency this app has no name for.
+  const frequency = LOAN_FREQUENCY_LABEL[loan.paymentFrequency]?.toLowerCase();
   const totalInterest = schedule?.totalInterest ?? loan.totalInterest;
   const manual = (schedule?.scheduleMode ?? loan.scheduleMode) === "manual";
 
@@ -135,7 +136,10 @@ export default function LoanDetailScreen({ navigation, route }: Props) {
           {pct.toFixed(0)}% paid of {formatCurrency(loan.principal, currency, { decimals: 0 })}
         </Text>
         <View style={styles.kvBlock}>
-          <KV k={frequency === "Payment" ? "Payment" : `${frequency} payment`} v={formatCurrency(payment ?? 0, currency)} />
+          <KV
+            k="Payment"
+            v={`${formatCurrency(payment ?? 0, currency)}${frequency ? ` · ${frequency}` : ""}`}
+          />
           <KV k="Rate" v={loanRateLabel(loan)} />
           {totalInterest != null ? <KV k="Total interest" v={formatCurrency(totalInterest, currency)} /> : null}
           {loan.payoffDate ? <KV k="Ends" v={loan.payoffDate} /> : null}
