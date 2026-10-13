@@ -132,3 +132,14 @@ npx eas build --platform ios --profile production --auto-submit --non-interactiv
   **portfolio-operation legs edit in the portfolio form**: any row whose `kind` is a portfolio op
   (incl. the bank-side leg of a brokerage deposit/withdrawal), or that links a holding, shows
   "In Portfolio" instead of the generic Edit (mirrors the web's `startEdit` mapping).
+- **1.0.22 / vc30 (Android)**: everything that reached the web on 2026-10-12/13. **Loans** (More →
+  Loans): what is owed, each payment and end date, paid-off loans behind a toggle; tap a loan for its
+  **payment schedule** (the server applies the loan's own manual schedule, edited interest and
+  interest method). An account that a loan tracks shows **View loan**. **Cost basis method** (the note
+  under Investment returns on the Portfolio tab, and Settings → Investments): simple average or
+  advanced lot allocation, the same setting as the web. Reports: a **Yearly** trend period and
+  **5 years** / **All time** ranges. Needs the web release of 2026-10-13 (PR #374/#375) on the target
+  backend: before it `/api/loans` is Developer-mode only and `/api/settings/lot-allocation` does not
+  exist (the Loans screen shows the server's error; the cost basis note is simply absent). Adding or
+  changing a loan, its schedule and its interest entries, and changing which lots a sale used, stay on
+  the web app.
