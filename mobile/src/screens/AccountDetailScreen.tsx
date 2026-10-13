@@ -127,6 +127,30 @@ export default function AccountDetailScreen({ route, navigation }: Props) {
     }
   }, [isFocused, fetchTransactions, loadDetail]);
 
+  // Loans that track this account, so the account can link straight to them.
+  // A convenience only: any failure leaves the list empty and the screen as is.
+  const [linkedLoans, setLinkedLoans] = useState<{ id: number; name: string }[]>([]);
+  useEffect(() => {
+    if (!isFocused) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await endpoints.getLoans();
+        if (cancelled || !res.success) return;
+        setLinkedLoans(
+          (Array.isArray(res.data) ? res.data : [])
+            .filter((l) => l.accountId === accountId)
+            .map((l) => ({ id: l.id, name: (l.name ?? "").trim() || "Loan" })),
+        );
+      } catch {
+        // the link is optional
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [isFocused, accountId]);
+
   const onRefresh = async () => {
     setRefreshing(true);
     try {
@@ -232,10 +256,17 @@ export default function AccountDetailScreen({ route, navigation }: Props) {
   type RootTabNav = {
     navigate: {
       (tab: "More", params: { screen: "Inbox"; params: { accountId: number } }): void;
+      (tab: "More", params: { screen: "Loans"; initial: false }): void;
       (tab: "Portfolio", params: NavigatorScreenParams<PortfolioStackParamList>): void;
     };
   };
   const tabNav = () => navigation.getParent() as unknown as RootTabNav | undefined;
+
+  // `initial: false` keeps the More menu underneath, so Back from Loans lands
+  // there rather than on a one-screen stack.
+  const goToLoans = () => {
+    tabNav()?.navigate("More", { screen: "Loans", initial: false });
+  };
 
   const goToReconcile = () => {
     tabNav()?.navigate("More", {
@@ -343,6 +374,20 @@ export default function AccountDetailScreen({ route, navigation }: Props) {
                 </Text>
               </TouchableOpacity>
             )}
+            {/* The loan this account tracks, when there is one. */}
+            {linkedLoans.map((l) => (
+              <TouchableOpacity
+                key={l.id}
+                accessibilityRole="button"
+                style={[styles.reconcileBtn, { borderColor: colors.border }]}
+                onPress={goToLoans}
+              >
+                <Icon name="loans" size={15} color={colors.primary} />
+                <Text style={[styles.reconcileText, { color: colors.primary }]} numberOfLines={1}>
+                  {linkedLoans.length === 1 ? "View loan" : `View loan: ${l.name}`}
+                </Text>
+              </TouchableOpacity>
+            ))}
             <Text style={[styles.activityLabel, { color: colors.mutedForeground }]}>
               Recent activity
             </Text>

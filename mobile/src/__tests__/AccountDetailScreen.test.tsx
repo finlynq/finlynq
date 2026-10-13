@@ -55,6 +55,7 @@ jest.mock("../api/client", () => ({
     getTransactions: jest.fn(),
     getAccountsDetailed: jest.fn(),
     getAccountBalances: jest.fn(),
+    getLoans: jest.fn(),
     updateAccount: jest.fn(),
     deleteAccountById: jest.fn(),
   },
@@ -188,5 +189,59 @@ describe("AccountDetailScreen", () => {
     });
     expect(endpoints.getTransactions).toHaveBeenCalledTimes(2);
     expect(endpoints.getAccountsDetailed).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe("AccountDetailScreen — link to the loan this account tracks", () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+    (endpoints.getTransactions as jest.Mock).mockResolvedValue({ success: true, data: [] });
+    (endpoints.getAccountsDetailed as jest.Mock).mockResolvedValue({ success: true, data: [detailRow()] });
+    (endpoints.getAccountBalances as jest.Mock).mockResolvedValue({ success: true, data: [cash] });
+  });
+
+  it("shows a View loan button that opens the Loans screen", async () => {
+    (endpoints.getLoans as jest.Mock).mockResolvedValue({
+      success: true,
+      data: [
+        { id: 3, name: "Car loan", accountId: 7 },
+        { id: 4, name: "Someone else's account", accountId: 99 },
+        { id: 5, name: "Unlinked", accountId: null },
+      ],
+    });
+    const { getByText, queryByText } = renderScreen();
+    await waitFor(() => expect(getByText("View loan")).toBeTruthy());
+    expect(queryByText(/Someone else/)).toBeNull();
+    fireEvent.press(getByText("View loan"));
+    expect(mockParentNavigate).toHaveBeenCalledWith("More", { screen: "Loans", initial: false });
+  });
+
+  it("names each loan when the account tracks more than one", async () => {
+    (endpoints.getLoans as jest.Mock).mockResolvedValue({
+      success: true,
+      data: [
+        { id: 3, name: "Car loan", accountId: 7 },
+        { id: 6, name: "Top-up", accountId: 7 },
+      ],
+    });
+    const { getByText } = renderScreen();
+    await waitFor(() => expect(getByText("View loan: Car loan")).toBeTruthy());
+    expect(getByText("View loan: Top-up")).toBeTruthy();
+  });
+
+  it("shows nothing for an account with no loan", async () => {
+    (endpoints.getLoans as jest.Mock).mockResolvedValue({ success: true, data: [{ id: 3, name: "Car loan", accountId: 99 }] });
+    const { queryByText, getByText } = renderScreen();
+    await waitFor(() => expect(getByText("Recent activity")).toBeTruthy());
+    expect(queryByText(/View loan/)).toBeNull();
+  });
+
+  // The link is a convenience; a failing loans request must not disturb the screen.
+  it("a failed loans request leaves the screen working and shows no link", async () => {
+    (endpoints.getLoans as jest.Mock).mockRejectedValue(new Error("network"));
+    const { queryByText, getByText } = renderScreen();
+    await waitFor(() => expect(getByText("Recent activity")).toBeTruthy());
+    expect(queryByText(/View loan/)).toBeNull();
+    expect(queryByText("Cannot connect to server")).toBeNull();
   });
 });
