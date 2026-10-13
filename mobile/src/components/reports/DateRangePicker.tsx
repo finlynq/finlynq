@@ -1,5 +1,5 @@
 // Lightweight date-range control for the Reports filters: a row of preset
-// chips (MTD/QTD/YTD/Last month/-quarter/-year/12mo) + a "Custom" chip that
+// chips (MTD/QTD/YTD/Last month/-quarter/-year/12mo/5 years/All time) + a "Custom" chip that
 // opens a month-range modal (two scrollable month chip-rows). No date library
 // — pure Date math lives in lib/reports/date-range.ts.
 import React, { useState } from "react";

@@ -1,6 +1,7 @@
 // Pure date-range helpers for the Reports filters. Mirrors the web
-// /reports `getPresetRange` exactly (MTD/QTD/YTD/last-month/-quarter/-year/12mo)
-// so mobile + web show identical ranges. No date library — plain Date math.
+// /reports `getPresetRange` exactly (MTD/QTD/YTD/last-month/-quarter/-year/12mo,
+// plus the multi-year "5 years" and "All time") so mobile + web show identical
+// ranges. No date library — plain Date math.
 // `now` is injectable so the preset math is deterministically unit-testable.
 //
 // Every date is the device's LOCAL calendar day. `toISOString()` is UTC, so
@@ -8,6 +9,7 @@
 // PREVIOUS day as "today" while the start was built from local components —
 // MTD/QTD/YTD came out with start > end.
 import { localDateISO } from "../subscriptions";
+import type { ReportPeriod } from "../../../../shared/types";
 
 export type DateRange = { start: string; end: string };
 
@@ -25,7 +27,12 @@ export const RANGE_PRESETS: PresetDef[] = [
   { key: "last-quarter", label: "Last quarter" },
   { key: "last-year", label: "Last year" },
   { key: "last-12", label: "12 mo" },
+  { key: "last-5-years", label: "5 years" },
+  { key: "all-time", label: "All time" },
 ];
+
+/** Start of the "All time" range. Mirrors the web's `ALL_TIME_START`. */
+export const ALL_TIME_START = "1970-01-01";
 
 function pad2(n: number): string {
   return String(n).padStart(2, "0");
@@ -71,6 +78,11 @@ export function getPresetRange(preset: string, now: Date = new Date()): DateRang
     }
     case "last-year":
       return { start: `${y - 1}-01-01`, end: `${y - 1}-12-31` };
+    case "last-5-years":
+      // Five calendar years including the current one, through today.
+      return { start: `${y - 4}-01-01`, end };
+    case "all-time":
+      return { start: ALL_TIME_START, end };
     case "last-12":
     default: {
       // 12 COMPLETE months (web parity): first day of the month 12 months
@@ -120,8 +132,20 @@ export function monthEnd(ym: string): string {
   return `${ym}-${pad2(lastDayOfMonth(y, m - 1))}`;
 }
 
+/**
+ * The period a trend opens on for a range. A range reaching back four or more
+ * calendar years (the "5 years" and "All time" presets, or a custom range that
+ * long) broken down monthly is 50+ bars on a phone, so it opens yearly; the
+ * period chips stay free to change. Same rule as the web Reports page.
+ */
+export function defaultTrendPeriod(start: string, end: string): ReportPeriod {
+  const years = parseInt(end.slice(0, 4), 10) - parseInt(start.slice(0, 4), 10);
+  return years >= 4 ? "yearly" : "monthly";
+}
+
 /** Human label for a concrete range, e.g. "Jan 2026 – Jun 2026". */
 export function formatRangeLabel(start: string, end: string): string {
+  if (start <= ALL_TIME_START) return "All time";
   const fmt = (d: string) => {
     const [y, m] = d.split("-");
     const mi = parseInt(m, 10) - 1;

@@ -1,4 +1,11 @@
-import { getPresetRange, monthEnd, formatRangeLabel } from "../lib/reports/date-range";
+import {
+  ALL_TIME_START,
+  RANGE_PRESETS,
+  defaultTrendPeriod,
+  getPresetRange,
+  monthEnd,
+  formatRangeLabel,
+} from "../lib/reports/date-range";
 
 // Local-time constructor (month is 0-based) so every assertion is about the
 // device's calendar day, whatever TZ the test runner is in.
@@ -44,6 +51,41 @@ describe("getPresetRange", () => {
     expect(getPresetRange("last-month", now)).toEqual({ start: "2025-12-01", end: "2025-12-31" });
     expect(getPresetRange("last-quarter", now)).toEqual({ start: "2025-10-01", end: "2025-12-31" });
     expect(getPresetRange("last-year", now)).toEqual({ start: "2025-01-01", end: "2025-12-31" });
+  });
+});
+
+describe("multi-year ranges", () => {
+  it("5 years = five calendar years including this one, through today (web parity)", () => {
+    expect(getPresetRange("last-5-years", at(2026, 9, 13))).toEqual({ start: "2022-01-01", end: "2026-10-13" });
+  });
+
+  it("All time starts where the web's does and ends today", () => {
+    expect(getPresetRange("all-time", at(2026, 9, 13))).toEqual({ start: ALL_TIME_START, end: "2026-10-13" });
+    expect(ALL_TIME_START).toBe("1970-01-01");
+  });
+
+  it("both are offered as chips", () => {
+    const keys = RANGE_PRESETS.map((p) => p.key);
+    expect(keys).toContain("last-5-years");
+    expect(keys).toContain("all-time");
+  });
+
+  it("All time is labelled as such, not as a 1970 start month", () => {
+    expect(formatRangeLabel(ALL_TIME_START, "2026-10-13")).toBe("All time");
+  });
+
+  it("a trend opens yearly on a multi-year range and monthly otherwise", () => {
+    const five = getPresetRange("last-5-years", at(2026, 9, 13));
+    const all = getPresetRange("all-time", at(2026, 9, 13));
+    const ytd = getPresetRange("ytd", at(2026, 9, 13));
+    const twelve = getPresetRange("last-12", at(2026, 0, 20));
+    expect(defaultTrendPeriod(five.start, five.end)).toBe("yearly");
+    expect(defaultTrendPeriod(all.start, all.end)).toBe("yearly");
+    expect(defaultTrendPeriod(ytd.start, ytd.end)).toBe("monthly");
+    expect(defaultTrendPeriod(twelve.start, twelve.end)).toBe("monthly");
+    // A custom range of the same length behaves like the preset.
+    expect(defaultTrendPeriod("2021-03-01", "2026-02-28")).toBe("yearly");
+    expect(defaultTrendPeriod("2024-01-01", "2026-12-31")).toBe("monthly");
   });
 });
 

@@ -26,6 +26,7 @@ import { endpoints } from "../api/client";
 import { formatCurrency } from "../lib/format";
 import { scalePoints, seriesRange } from "../lib/portfolio/chart";
 import { formatSavingsRate } from "../lib/reports/savings-rate";
+import { defaultTrendPeriod } from "../lib/reports/date-range";
 import { useReportData } from "../lib/reports/use-report-data";
 import { Icon } from "../components/icon";
 import { MetricGrid, type MetricItem } from "../components/portfolio/MetricGrid";
@@ -62,7 +63,8 @@ export default function TrendsScreen({ navigation, route }: Props) {
   const { colors } = useTheme();
   const { startDate, endDate, isBusiness, displayCurrency, rangeLabel } = route.params;
 
-  const [period, setPeriod] = useState<ReportPeriod>("monthly");
+  // A multi-year range opens yearly; anything shorter opens monthly.
+  const [period, setPeriod] = useState<ReportPeriod>(() => defaultTrendPeriod(startDate, endDate));
   const [groupBy, setGroupBy] = useState<ReportGroupBy>("category");
 
   const fetcher = useCallback(
