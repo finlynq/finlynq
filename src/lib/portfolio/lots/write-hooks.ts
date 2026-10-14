@@ -39,13 +39,13 @@ import { and, eq, inArray, ne, sql } from "drizzle-orm";
 import { db, schema } from "@/db";
 import {
   InvalidLinkPairError,
-  closeLotsForSell,
+  coverShortsForBuy,
   daysBetween,
   openLotForBuy,
+  planSellAgainstLongs,
   transferLot,
 } from "./engine";
 import { fxConversionHook, isFxConversionPair, type FxLegInfo } from "./fx-conversion";
-import { selectLotsToClose } from "./selection";
 import {
   closeCashLotsHook,
   inferCashCloseKind,
@@ -62,6 +62,7 @@ import {
   type AllocPlan,
   type AllocSpec,
 } from "./allocate";
+import { findLotBoughtAfterSale, shortOpenedBySale } from "./sale-lot-choices";
 import type {
   CashLegHint,
   HoldingLot,
@@ -179,20 +180,9 @@ export async function openLotForBuyHook(
 
     // Phase 3: short-close-first. If there are open short lots on the
     // same (holding, account), FIFO-close them against this buy before
-    // opening a new long lot. Returns the remaining buy qty (may be 0
-    // if the buy fully covers existing shorts).
-    const buyQty = tx.quantity;
-    const cashAmount = cashLeg
-      ? Math.abs(cashLeg.enteredAmount)
-      : Math.abs(tx.enteredAmount ?? tx.amount);
-    const buyPricePerShare = buyQty > 0 ? cashAmount / buyQty : 0;
-    const proceedsCurrency =
-      cashLeg?.enteredCurrency ??
-      cashLeg?.currency ??
-      tx.enteredCurrency ??
-      tx.currency ??
-      opts.holdingCurrency;
-
+    // opening a new long lot for what is left (none if the buy only closed
+    // shorts). The math is the pure `coverShortsForBuy`, shared with the
+    // rebuild replay so the two agree.
     const shortLotRows = await db
       .select()
       .from(schema.holdingLots)
@@ -206,59 +196,34 @@ export async function openLotForBuyHook(
         ),
       );
     const shortLots = shortLotRows.map(rowToLot);
-    // FIFO order
-    shortLots.sort((a, b) => a.openDate.localeCompare(b.openDate) || a.id - b.id);
-
-    let remaining = buyQty;
-    if (shortLots.length > 0) {
-      for (const lot of shortLots) {
-        if (remaining <= 1e-9) break;
-        const qtyToClose = Math.min(lot.qtyRemaining, remaining);
-        // Inverse formula: gain when buy_price < short_open cost.
-        const realizedGain = (lot.costPerShare - buyPricePerShare) * qtyToClose;
-        const daysHeld = daysBetween(lot.openDate, tx.date);
-        await db.insert(schema.holdingLotClosures).values({
-          userId: tx.userId,
-          lotId: lot.id,
-          closeTxId: tx.id,
-          closeDate: tx.date,
-          qtyClosed: qtyToClose,
-          proceedsPerShare: buyPricePerShare,
-          costPerShare: lot.costPerShare,
-          realizedGain,
-          currency: proceedsCurrency,
-          daysHeld,
-          closeKind: "short_close",
-          source: tx.source,
-        });
-        const newRemaining = lot.qtyRemaining - qtyToClose;
-        const closed = newRemaining <= 1e-9;
-        await db
-          .update(schema.holdingLots)
-          .set({
-            qtyRemaining: newRemaining,
-            status: closed ? "closed" : "open",
-            updatedAt: sql`NOW()`,
-          })
-          .where(eq(schema.holdingLots.id, lot.id));
-        remaining -= qtyToClose;
-      }
+    const shortLotById = new Map(shortLots.map((l) => [l.id, l]));
+    const cover = coverShortsForBuy({
+      tx,
+      lots: shortLots,
+      cashLeg,
+      holdingCurrency: opts.holdingCurrency,
+    });
+    for (const closure of cover.closures) {
+      await db.insert(schema.holdingLotClosures).values(closure);
+      const lot = shortLotById.get(closure.lotId);
+      const newRemaining = Math.max(0, (lot?.qtyRemaining ?? 0) - closure.qtyClosed);
+      const closed = newRemaining <= 1e-9;
+      await db
+        .update(schema.holdingLots)
+        .set({
+          qtyRemaining: newRemaining,
+          status: closed ? "closed" : "open",
+          updatedAt: sql`NOW()`,
+        })
+        .where(eq(schema.holdingLots.id, closure.lotId));
     }
 
     // If the buy fully closed shorts and has nothing left, don't open a long.
-    if (remaining <= 1e-9) return null;
-
-    // Open a long lot for the remainder, with cost basis sized to the
-    // remaining portion of the cash leg.
-    const proratedCashAmount = (cashAmount * remaining) / buyQty;
-    const partialTx: TxRowForLots = { ...tx, quantity: remaining };
-    const partialCashLeg: CashLegHint | undefined = cashLeg
-      ? { ...cashLeg, enteredAmount: proratedCashAmount, amount: proratedCashAmount }
-      : undefined;
+    if (!cover.remainderTx) return null;
 
     const plan = openLotForBuy({
-      tx: partialTx,
-      cashLeg: partialCashLeg,
+      tx: cover.remainderTx,
+      cashLeg: cover.remainderCashLeg,
       categoryIsDividend: opts.categoryIsDividend,
       holdingCurrency: opts.holdingCurrency,
       originOverride: opts.origin,
@@ -417,92 +382,51 @@ export async function closeLotsForSellHook(
       return closuresWritten;
     }
 
-    // Fallback: legacy FIFO / SPECIFIC-by-id path.
-    const availableLong = lots.reduce((s, l) => s + l.qtyRemaining, 0);
-    const closableQty = Math.min(sellQty, availableLong);
-    const overflowQty = Math.max(0, sellQty - availableLong);
-
-    let closuresWritten = 0;
-
-    if (closableQty > 0 && lots.length > 0) {
-      const plan = selectLotsToClose({
-        strategy: opts.strategy ?? "FIFO",
-        lots,
-        targetQty: closableQty,
-        lotIds: opts.lotIds,
-      });
-      if (plan.success) {
-        const lotsById = new Map(lots.map((l) => [l.id, l]));
-        // Override tx.quantity to the closable subset so the engine sizes
-        // proceeds against the same shares it's closing. Cost basis math
-        // uses Math.abs() so the sign convention is preserved.
-        const partialProceeds = (proceedsAmount * closableQty) / sellQty;
-        const partialTx: TxRowForLots = {
-          ...tx,
-          quantity: -closableQty,
-          enteredAmount: tx.enteredAmount != null ? -partialProceeds : null,
-          amount: -partialProceeds,
-        };
-        const partialCashLeg: CashLegHint | undefined = cashLeg
-          ? { ...cashLeg, enteredAmount: partialProceeds, amount: partialProceeds }
-          : undefined;
-        const result = closeLotsForSell({
-          tx: partialTx,
-          plan,
-          cashLeg: partialCashLeg,
-          holdingCurrency: opts.holdingCurrency,
-          lotsById,
-        });
-        if (result.closures.length > 0) {
-          await db.insert(schema.holdingLotClosures).values(result.closures);
-          for (const [lotId, delta] of result.qtyDeltas) {
-            const lot = lotsById.get(lotId);
-            if (!lot) continue;
-            // Math.max(0, …): float noise can push a full close a hair below
-            // zero, violating the `qty_remaining >= 0` check. Mirror of the
-            // LEAST() upper-clamp in reverseLotsForDeleteHook.
-            const newRemaining = Math.max(0, lot.qtyRemaining - delta);
-            const closed = newRemaining <= 1e-9;
-            await db
-              .update(schema.holdingLots)
-              .set({
-                qtyRemaining: newRemaining,
-                status: closed ? "closed" : "open",
-                updatedAt: sql`NOW()`,
-              })
-              .where(eq(schema.holdingLots.id, lotId));
-          }
-          closuresWritten += result.closures.length;
-        }
-      } else {
-
-        console.warn(
-          `${HOOK_LABEL} closeLotsForSellHook tx=${tx.id} SPECIFIC plan failed (shortfall=${plan.shortfall}); skipping long closure write`,
-        );
-      }
+    // Fallback: legacy FIFO / SPECIFIC-by-id path. Closes what the open long
+    // lots cover and opens a short for the rest — the pure
+    // `planSellAgainstLongs`, shared with the rebuild replay.
+    const sellPlan = planSellAgainstLongs({
+      tx,
+      lots,
+      cashLeg,
+      holdingCurrency: opts.holdingCurrency,
+      strategy: opts.strategy,
+      lotIds: opts.lotIds,
+    });
+    if (sellPlan.specificShortfall != null) {
+      console.warn(
+        `${HOOK_LABEL} closeLotsForSellHook tx=${tx.id} SPECIFIC plan failed (shortfall=${sellPlan.specificShortfall}); skipping long closure write`,
+      );
     }
 
-    if (overflowQty > 0) {
-      // Open a short lot for the excess at the sell price. cost_per_share
-      // = proceedsPerShare so when a future buy at price P closes this
-      // short, realized_gain = (proceeds - P) × qty.
-      await db.insert(schema.holdingLots).values({
-        userId: tx.userId,
-        holdingId: tx.portfolioHoldingId,
-        accountId: tx.accountId,
-        openTxId: tx.id,
-        openDate: tx.date,
-        qtyOriginal: overflowQty,
-        qtyRemaining: overflowQty,
-        costPerShare: proceedsPerShare,
-        currency: proceedsCurrency,
-        fxToUsdAtOpen: null,
-        origin: "buy",
-        parentLotId: null,
-        status: "open",
-        side: "short",
-        source: tx.source,
-      });
+    let closuresWritten = 0;
+    if (sellPlan.closures.length > 0) {
+      const lotsById = new Map(lots.map((l) => [l.id, l]));
+      await db.insert(schema.holdingLotClosures).values(sellPlan.closures);
+      for (const [lotId, delta] of sellPlan.qtyDeltas) {
+        const lot = lotsById.get(lotId);
+        if (!lot) continue;
+        // Math.max(0, …): float noise can push a full close a hair below
+        // zero, violating the `qty_remaining >= 0` check. Mirror of the
+        // LEAST() upper-clamp in reverseLotsForDeleteHook.
+        const newRemaining = Math.max(0, lot.qtyRemaining - delta);
+        const closed = newRemaining <= 1e-9;
+        await db
+          .update(schema.holdingLots)
+          .set({
+            qtyRemaining: newRemaining,
+            status: closed ? "closed" : "open",
+            updatedAt: sql`NOW()`,
+          })
+          .where(eq(schema.holdingLots.id, lotId));
+      }
+      closuresWritten += sellPlan.closures.length;
+    }
+
+    if (sellPlan.shortLot) {
+      // cost_per_share = the sale's per-share proceeds, so a future buy at
+      // price P closing this short realizes (proceeds − P) × qty.
+      await db.insert(schema.holdingLots).values(sellPlan.shortLot);
     }
 
     return closuresWritten;
@@ -1352,8 +1276,34 @@ export type ReassignError =
   | { ok: false; code: "close_tx_not_found" }
   | { ok: false; code: "no_closures" }
   | { ok: false; code: "not_reassignable"; closeKind: string }
-  | { ok: false; code: "qty_mismatch"; expected: number; got: number }
-  | { ok: false; code: "lot_not_in_scope"; lotId: number };
+  | {
+      ok: false;
+      code: "qty_mismatch";
+      expected: number;
+      got: number;
+      /** Of `expected`, the shares the sale sold beyond what was held. */
+      soldShort: number;
+    }
+  | { ok: false; code: "lot_not_in_scope"; lotId: number }
+  | {
+      ok: false;
+      code: "lot_bought_after_sale";
+      lotId: number;
+      lotOpenDate: string;
+      closeDate: string;
+      /** What the sale already takes from the lot (an out-of-order
+       *  leftover): the most it may keep. 0 for a lot it never used. */
+      alreadyTaken: number;
+    }
+  | {
+      ok: false;
+      code: "short_already_covered";
+      closeTxId: number;
+      /** Shares the sale sold beyond what was held. */
+      shortQty: number;
+      /** How many of those a later buy has already closed. */
+      coveredQty: number;
+    };
 
 export type ReassignOutcome =
   | ({ ok: true } & ReassignResult)
@@ -1367,7 +1317,19 @@ const REASSIGN_EPS = 1e-6;
  * `perLotQty` is the user's chosen allocation; Σ qty MUST equal the
  * closure's total qty (STRICT — else `{ ok:false, code:"qty_mismatch" }`,
  * no write). Every named lot must belong to the same (holding, account) as
- * the close-tx (else `{ ok:false, code:"lot_not_in_scope" }`).
+ * the close-tx (else `{ ok:false, code:"lot_not_in_scope" }`), and a sale
+ * can only use shares bought on or before its date (else
+ * `{ ok:false, code:"lot_bought_after_sale" }`). A lot bought later that the
+ * sale ALREADY uses (trades entered out of date order) may keep up to what it
+ * takes today, so that closure stays fixable; rule in `sale-lot-choices.ts`.
+ *
+ * A sale that sold more than was held opened a short for the rest. Σ qty must
+ * then reach the WHOLE sale, the short part entered as `SHORT_LOT_ID` (0), so
+ * the re-close opens it again (until 2026-10-14 the total was the long part
+ * only, and saving silently dropped the short). Once a later buy has closed
+ * any of that short, `{ ok:false, code:"short_already_covered" }`: reversing
+ * the sale deletes the short lot and, by cascade, that buy's closing of it,
+ * which nothing here replays.
  */
 export async function reassignClosureLots(
   userId: string,
@@ -1439,31 +1401,69 @@ export async function reassignClosureLots(
     source: c.source as TransactionSource,
   }));
 
-  // 3. STRICT qty validation: Σ perLotQty == closure total.
-  const closureTotal = originalClosures.reduce((s, c) => s + c.qtyClosed, 0);
-  const requestedTotal = perLotQty.reduce((s, p) => s + p.qty, 0);
-  if (Math.abs(requestedTotal - closureTotal) > REASSIGN_EPS) {
-    return {
-      ok: false,
-      code: "qty_mismatch",
-      expected: Math.round(closureTotal * 1e6) / 1e6,
-      got: Math.round(requestedTotal * 1e6) / 1e6,
-    };
-  }
-
-  // 4. Same-account-only scope: every named lot must belong to this
-  //    (user, holding, account). (Reading all the holding's lots once.)
+  // 3. The holding's lots in this account (every status: a short the sale
+  //    opened may already be fully closed).
   const liveLots = await loadLotsForHoldings(userId, [holdingId]);
   const lotsInScope = new Map(
     liveLots
       .filter((l) => l.accountId === accountId)
       .map((l) => [l.id, l]),
   );
+
+  // 3a. The short this sale opened for the part no lot covered. If a later
+  //     buy has closed any of it, re-matching would erase that buy's closing.
+  const saleShort = shortOpenedBySale([...lotsInScope.values()], closeTxId);
+  if (saleShort.covered > REASSIGN_EPS) {
+    return {
+      ok: false,
+      code: "short_already_covered",
+      closeTxId,
+      shortQty: saleShort.qty,
+      coveredQty: saleShort.covered,
+    };
+  }
+
+  // 3b. STRICT qty validation: Σ perLotQty == the whole sale (taken from
+  //     lots + sold short).
+  const closureTotal = originalClosures.reduce((s, c) => s + c.qtyClosed, 0);
+  const saleTotal = closureTotal + saleShort.qty;
+  const requestedTotal = perLotQty.reduce((s, p) => s + p.qty, 0);
+  if (Math.abs(requestedTotal - saleTotal) > REASSIGN_EPS) {
+    return {
+      ok: false,
+      code: "qty_mismatch",
+      expected: Math.round(saleTotal * 1e6) / 1e6,
+      got: Math.round(requestedTotal * 1e6) / 1e6,
+      soldShort: saleShort.qty,
+    };
+  }
+
+  // 4. Same-account-only scope: every named lot must belong to this
+  //    (user, holding, account). SHORT_LOT_ID (0) is "sold short", not a lot.
   for (const sel of perLotQty) {
-    if (sel.qty <= REASSIGN_EPS) continue;
+    if (sel.qty <= REASSIGN_EPS || sel.lotId === SHORT_LOT_ID) continue;
     if (!lotsInScope.has(sel.lotId)) {
       return { ok: false, code: "lot_not_in_scope", lotId: sel.lotId };
     }
+  }
+
+  // 4b. No shares bought after the sale. Only NEW choices are refused: a
+  //     later lot the sale already uses keeps up to what it takes today.
+  const laterLot = findLotBoughtAfterSale({
+    closeDate: originalClosures[0].closeDate,
+    lots: [...lotsInScope.values()],
+    closures: originalClosures,
+    perLotQty,
+  });
+  if (laterLot) {
+    return {
+      ok: false,
+      code: "lot_bought_after_sale",
+      lotId: laterLot.lotId,
+      lotOpenDate: laterLot.lotOpenDate,
+      closeDate: laterLot.closeDate,
+      alreadyTaken: laterLot.alreadyTaken,
+    };
   }
 
   // 5. Post-reversal inventory: restore the qty THIS close-tx's closures
@@ -1560,7 +1560,14 @@ export type AllocApplyError =
   | { ok: false; code: "no_editable_sells" }
   | { ok: false; code: "unknown_close_tx"; closeTxId: number }
   | { ok: false; code: "incomplete_spec"; missing: number[] }
-  | { ok: false; code: "plan_invalid"; preview: AllocPlan };
+  | { ok: false; code: "plan_invalid"; preview: AllocPlan }
+  | {
+      ok: false;
+      code: "short_already_covered";
+      closeTxId: number;
+      shortQty: number;
+      coveredQty: number;
+    };
 
 export type AllocApplyOutcome =
   | ({ ok: true } & AllocApplyResult)
@@ -1617,6 +1624,23 @@ export async function applyHoldingAllocation(
   }
   const editableTxIds = [...sellByTx.keys()];
   if (editableTxIds.length === 0) return { ok: false, code: "no_editable_sells" };
+
+  // 2b. The commit reverses every editable sell, which deletes the short lot
+  //     each oversold sale opened and, by cascade, any later buy's closing of
+  //     it. Those buys are not replayed, so the short would come back open
+  //     and the closing's gain would vanish. Refuse instead (preview too).
+  for (const id of editableTxIds) {
+    const saleShort = shortOpenedBySale(allLots, id);
+    if (saleShort.covered > ALLOC_EPS) {
+      return {
+        ok: false,
+        code: "short_already_covered",
+        closeTxId: id,
+        shortQty: saleShort.qty,
+        coveredQty: saleShort.covered,
+      };
+    }
+  }
 
   // 3. Load the sell tx rows for the authoritative needed qty (|quantity|).
   const sellTxRows = await db

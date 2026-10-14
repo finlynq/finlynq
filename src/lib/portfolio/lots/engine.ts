@@ -38,8 +38,10 @@ import type {
   HoldingLotClosure,
   LotClosurePlan,
   LotOrigin,
+  LotSelectionStrategy,
   TxRowForLots,
 } from "./types";
+import { selectLotsToClose } from "./selection";
 
 // ─── InvalidLinkPairError ────────────────────────────────────────────────
 //
@@ -428,6 +430,226 @@ export function transferLot(input: TransferLotInput): TransferLotResult {
   void holdingCurrency;
 
   return { closures, destLots, qtyDeltas, closedLotIds };
+}
+
+// ─── Shorts: a sale beyond the shares held, and the buy that closes it ───
+//
+// A sell larger than the open LONG lots closes all of them and opens ONE
+// short lot for the rest, at the sale's per-share proceeds. A later buy
+// closes open SHORT lots first (oldest first, `short_close`) and opens a long
+// lot only for what is left.
+//
+// Pure, and shared by the live write hooks (write-hooks.ts
+// `closeLotsForSellHook` / `openLotForBuyHook`) and the rebuild replay
+// (backfill.ts `buildLotsForUser`), so a rebuilt position matches the one
+// recorded trade by trade. Until 2026-10-14 the rebuild had its own copy of
+// the sell path with no short at all: an oversold sale was skipped whole and
+// the buy that closed the short became a new long lot.
+
+export interface SellAgainstLongsInput {
+  /** The sell (qty < 0). */
+  tx: TxRowForLots;
+  /** The position's lots; only OPEN LONG lots with shares left are used. */
+  lots: HoldingLot[];
+  cashLeg?: CashLegHint | null;
+  holdingCurrency: string;
+  /** Default FIFO. */
+  strategy?: LotSelectionStrategy;
+  /** For strategy 'SPECIFIC'. */
+  lotIds?: number[];
+  /** Origin stamped on the short lot (live writes 'buy', the rebuild 'backfill'). */
+  shortOrigin?: LotOrigin;
+}
+
+export interface SellAgainstLongsPlan {
+  /** `sell` closures for the part the long lots cover. */
+  closures: Array<Omit<HoldingLotClosure, "id">>;
+  /** Per-lot decrement of qty_remaining, keyed by lot id. */
+  qtyDeltas: Map<number, number>;
+  /** The short lot to open for the part no long lot covers, or null. */
+  shortLot: Omit<HoldingLot, "id"> | null;
+  /** A SPECIFIC pick the named lots couldn't fill: no long closures were
+   *  planned (the live hook logs and skips them). Absent otherwise. */
+  specificShortfall?: number;
+}
+
+export function planSellAgainstLongs(input: SellAgainstLongsInput): SellAgainstLongsPlan {
+  const { tx, cashLeg, holdingCurrency } = input;
+  const empty: SellAgainstLongsPlan = { closures: [], qtyDeltas: new Map(), shortLot: null };
+  if (tx.quantity == null || tx.quantity >= 0) return empty;
+  if (tx.portfolioHoldingId == null || tx.accountId == null) return empty;
+
+  const sellQty = Math.abs(tx.quantity);
+  const longLots = input.lots.filter(
+    (l) => l.side === "long" && l.status === "open" && l.qtyRemaining > 0,
+  );
+  const proceedsAmount = cashLeg
+    ? Math.abs(cashLeg.enteredAmount)
+    : Math.abs(tx.enteredAmount ?? tx.amount);
+  const proceedsCurrency =
+    cashLeg?.enteredCurrency ??
+    cashLeg?.currency ??
+    tx.enteredCurrency ??
+    tx.currency ??
+    holdingCurrency;
+  const proceedsPerShare = sellQty > 0 ? proceedsAmount / sellQty : 0;
+
+  const availableLong = longLots.reduce((s, l) => s + l.qtyRemaining, 0);
+  const closableQty = Math.min(sellQty, availableLong);
+  const overflowQty = Math.max(0, sellQty - availableLong);
+
+  const out: SellAgainstLongsPlan = { closures: [], qtyDeltas: new Map(), shortLot: null };
+
+  if (closableQty > 0 && longLots.length > 0) {
+    const plan = selectLotsToClose({
+      strategy: input.strategy ?? "FIFO",
+      lots: longLots,
+      targetQty: closableQty,
+      lotIds: input.lotIds,
+    });
+    if (plan.success) {
+      // Size proceeds to the shares actually closed against lots, so the
+      // long closures and the short share one per-share price.
+      const partialProceeds = (proceedsAmount * closableQty) / sellQty;
+      const partialTx: TxRowForLots = {
+        ...tx,
+        quantity: -closableQty,
+        enteredAmount: tx.enteredAmount != null ? -partialProceeds : null,
+        amount: -partialProceeds,
+      };
+      const partialCashLeg: CashLegHint | undefined = cashLeg
+        ? { ...cashLeg, enteredAmount: partialProceeds, amount: partialProceeds }
+        : undefined;
+      const result = closeLotsForSell({
+        tx: partialTx,
+        plan,
+        cashLeg: partialCashLeg,
+        holdingCurrency,
+        lotsById: new Map(longLots.map((l) => [l.id, l])),
+      });
+      out.closures = result.closures;
+      out.qtyDeltas = result.qtyDeltas;
+    } else {
+      out.specificShortfall = plan.shortfall;
+    }
+  }
+
+  if (overflowQty > 0) {
+    out.shortLot = {
+      userId: tx.userId,
+      holdingId: tx.portfolioHoldingId,
+      accountId: tx.accountId,
+      openTxId: tx.id,
+      openDate: tx.date,
+      qtyOriginal: overflowQty,
+      qtyRemaining: overflowQty,
+      // A later buy at price P closing it realizes (proceeds − P) × qty.
+      costPerShare: proceedsPerShare,
+      currency: proceedsCurrency,
+      fxToUsdAtOpen: null,
+      origin: input.shortOrigin ?? "buy",
+      parentLotId: null,
+      status: "open",
+      side: "short",
+      source: tx.source,
+    };
+  }
+  return out;
+}
+
+export interface CoverShortsForBuyInput {
+  /** The buy (qty > 0). */
+  tx: TxRowForLots;
+  /** The position's lots; only OPEN SHORT lots with shares left are closed. */
+  lots: HoldingLot[];
+  cashLeg?: CashLegHint | null;
+  holdingCurrency: string;
+}
+
+export interface CoverShortsForBuyPlan {
+  /** `short_close` closures, oldest short first. */
+  closures: Array<Omit<HoldingLotClosure, "id">>;
+  /** Per-lot decrement of qty_remaining, keyed by lot id. */
+  qtyDeltas: Map<number, number>;
+  /** Shares left to open a long lot with (0 when the buy only closed shorts). */
+  remainingQty: number;
+  /** The buy cut down to `remainingQty` (amounts prorated), for
+   *  `openLotForBuy`; null when nothing remains. */
+  remainderTx: TxRowForLots | null;
+  /** Its cash leg, prorated the same way. */
+  remainderCashLeg: CashLegHint | undefined;
+}
+
+export function coverShortsForBuy(input: CoverShortsForBuyInput): CoverShortsForBuyPlan {
+  const { tx, cashLeg, holdingCurrency } = input;
+  const buyQty = tx.quantity ?? 0;
+  const none: CoverShortsForBuyPlan = {
+    closures: [],
+    qtyDeltas: new Map(),
+    remainingQty: 0,
+    remainderTx: null,
+    remainderCashLeg: undefined,
+  };
+  if (buyQty <= 0) return none;
+
+  const cashAmount = cashLeg
+    ? Math.abs(cashLeg.enteredAmount)
+    : Math.abs(tx.enteredAmount ?? tx.amount);
+  const buyPricePerShare = cashAmount / buyQty;
+  const proceedsCurrency =
+    cashLeg?.enteredCurrency ??
+    cashLeg?.currency ??
+    tx.enteredCurrency ??
+    tx.currency ??
+    holdingCurrency;
+
+  const shorts = input.lots
+    .filter((l) => l.side === "short" && l.status === "open" && l.qtyRemaining > 1e-9)
+    .sort((a, b) => a.openDate.localeCompare(b.openDate) || a.id - b.id);
+
+  const closures: Array<Omit<HoldingLotClosure, "id">> = [];
+  const qtyDeltas = new Map<number, number>();
+  let remaining = buyQty;
+  for (const lot of shorts) {
+    if (remaining <= 1e-9) break;
+    const qty = Math.min(lot.qtyRemaining, remaining);
+    closures.push({
+      userId: tx.userId,
+      lotId: lot.id,
+      closeTxId: tx.id,
+      closeDate: tx.date,
+      qtyClosed: qty,
+      proceedsPerShare: buyPricePerShare,
+      costPerShare: lot.costPerShare,
+      // Inverse of a long: a gain when the buy is cheaper than the short.
+      realizedGain: (lot.costPerShare - buyPricePerShare) * qty,
+      currency: proceedsCurrency,
+      daysHeld: daysBetween(lot.openDate, tx.date),
+      closeKind: "short_close",
+      source: tx.source,
+    });
+    qtyDeltas.set(lot.id, (qtyDeltas.get(lot.id) ?? 0) + qty);
+    remaining -= qty;
+  }
+
+  if (remaining <= 1e-9) return { ...none, closures, qtyDeltas };
+
+  // Prorate the buy to what is left. Both the cash leg AND the row's own
+  // amounts: a buy with no paired cash leg is costed from the row itself, and
+  // leaving its full amount on a cut-down quantity overstated the long lot's
+  // cost per share.
+  const ratio = remaining / buyQty;
+  const remainderTx: TxRowForLots = {
+    ...tx,
+    quantity: remaining,
+    amount: tx.amount * ratio,
+    enteredAmount: tx.enteredAmount != null ? tx.enteredAmount * ratio : null,
+  };
+  const proratedCash = cashAmount * ratio;
+  const remainderCashLeg: CashLegHint | undefined = cashLeg
+    ? { ...cashLeg, enteredAmount: proratedCash, amount: proratedCash }
+    : undefined;
+  return { closures, qtyDeltas, remainingQty: remaining, remainderTx, remainderCashLeg };
 }
 
 // ─── helpers ─────────────────────────────────────────────────────────────

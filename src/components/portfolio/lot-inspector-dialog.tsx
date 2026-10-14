@@ -13,6 +13,19 @@
  * (opened shorts + restated realized gain) is fetched before they commit
  * (preview-then-commit, mirroring FINLYNQ-176). Posts to
  * POST /api/portfolio/holdings/[holdingId]/lots/reassign. Same-account only.
+ *
+ * The lot picker lists what `saleLotChoices` (lib/portfolio/lots/
+ * sale-lot-choices.ts, shared with the server's refusal) allows: every lot the
+ * sale already uses, including one it used up, plus lots bought on or before
+ * the sale that still hold shares. It used to list only lots still open, so a
+ * sale that used up its lot kept those shares in the total with no field to
+ * lower them, and could never be re-matched.
+ *
+ * A sale that sold more than was held opened a short for the rest: it gets a
+ * "Sold short" row (sent as lot 0) and the total is the whole sale, so saving
+ * opens the short again. Once a later buy has closed some of that short the
+ * editor explains and offers nothing to save; the server refuses it too
+ * (`short_already_covered`), since re-matching would erase that closing.
  */
 
 "use client";
@@ -30,6 +43,9 @@ import { Input } from "@/components/ui/input";
 import { ConfirmDialog } from "@/components/ui/confirm-dialog";
 import { LotAllocationMatrix } from "@/components/portfolio/lot-allocation-matrix";
 import { formatCurrency } from "@/lib/currency";
+import { saleLotChoices, shortOpenedBySale } from "@/lib/portfolio/lots/sale-lot-choices";
+import { SHORT_LOT_ID } from "@/lib/portfolio/lots/allocate";
+import { coveredShortMessage } from "@/lib/portfolio/lots/reassign-errors";
 
 interface LotRow {
   id: number;
@@ -178,20 +194,41 @@ export function LotInspectorDialog({
     return m;
   }, [closures]);
 
-  // Open LONG lots available to allocate against (the reassignment target
-  // pool). Same-account only — these are already scoped by the GET.
-  const openLongLots = useMemo(
-    () =>
-      lots.filter((l) => l.side === "long" && l.status === "open" && l.qtyRemaining > EPS),
-    [lots],
+  // The lots the sale being edited can use (the reassignment target pool):
+  // every lot it already uses, including one it used up, plus lots bought on
+  // or before the sale that still hold shares. Same-account only — the GET
+  // already scopes them. Rule shared with the server in sale-lot-choices.ts.
+  const editCloseDate = editTxId == null ? null : closuresByTx.get(editTxId)?.[0]?.closeDate ?? null;
+  const editChoices = useMemo(() => {
+    if (editTxId == null || editCloseDate == null) return [];
+    return saleLotChoices(lots, {
+      closeDate: editCloseDate,
+      closures: closuresByTx.get(editTxId) ?? [],
+    });
+  }, [lots, closuresByTx, editTxId, editCloseDate]);
+
+  // The short this sale opened for the part no lot covered (sold short).
+  const editShort = useMemo(
+    () => (editTxId == null ? { qty: 0, covered: 0 } : shortOpenedBySale(lots, editTxId)),
+    [lots, editTxId],
+  );
+  const shortCovered = editShort.covered > EPS;
+
+  // A lot bought after the sale may keep only what the sale already takes
+  // from it; the server refuses more, so don't offer to send it.
+  const laterLotOverLimit = editChoices.some(
+    (ch) => ch.boughtAfterSale && Number(alloc[ch.lot.id] || 0) > ch.available + EPS,
   );
 
   function startEdit(closeTxId: number) {
     const txClosures = closuresByTx.get(closeTxId) ?? [];
     const seed: Record<number, string> = {};
     for (const c of txClosures) {
-      seed[c.lotId] = String((seed[c.lotId] ? Number(seed[c.lotId]) : 0) + c.qtyClosed);
+      const next = (seed[c.lotId] ? Number(seed[c.lotId]) : 0) + c.qtyClosed;
+      seed[c.lotId] = String(Math.round(next * 1e6) / 1e6);
     }
+    const soldShort = shortOpenedBySale(lots, closeTxId).qty;
+    if (soldShort > EPS) seed[SHORT_LOT_ID] = String(soldShort);
     setEditTxId(closeTxId);
     setAlloc(seed);
     setPreview(null);
@@ -205,10 +242,12 @@ export function LotInspectorDialog({
     setReassignError(null);
   }
 
-  const closureTotalForEdit = useMemo(() => {
+  // The whole sale: shares taken from lots + any sold short.
+  const saleTotalForEdit = useMemo(() => {
     if (editTxId == null) return 0;
-    return (closuresByTx.get(editTxId) ?? []).reduce((s, c) => s + c.qtyClosed, 0);
-  }, [editTxId, closuresByTx]);
+    const fromLots = (closuresByTx.get(editTxId) ?? []).reduce((s, c) => s + c.qtyClosed, 0);
+    return Math.round((fromLots + editShort.qty) * 1e6) / 1e6;
+  }, [editTxId, closuresByTx, editShort]);
 
   const allocTotal = useMemo(
     () =>
@@ -219,7 +258,7 @@ export function LotInspectorDialog({
     [alloc],
   );
 
-  const sumMatches = Math.abs(allocTotal - closureTotalForEdit) <= EPS;
+  const sumMatches = Math.abs(allocTotal - saleTotalForEdit) <= EPS;
 
   function buildPerLotQty() {
     return Object.entries(alloc)
@@ -409,52 +448,104 @@ export function LotInspectorDialog({
             <div className="flex items-center justify-between">
               <h3 className="text-sm font-medium">
                 Reassign sell tx #{editTxId}
+                {editCloseDate ? (
+                  <span className="text-muted-foreground font-normal"> · sold {editCloseDate}</span>
+                ) : null}
               </h3>
               <span
                 className={`text-xs font-mono ${sumMatches ? "text-emerald-600 dark:text-emerald-400" : "text-rose-600 dark:text-rose-400"}`}
               >
-                {allocTotal.toLocaleString()} / {closureTotalForEdit.toLocaleString()} sh
+                {allocTotal.toLocaleString()} / {saleTotalForEdit.toLocaleString()} sh
               </span>
             </div>
             <p className="text-xs text-muted-foreground">
-              Choose how many shares to close from each open lot. The total must
-              equal {closureTotalForEdit.toLocaleString()} shares. Requesting more
+              Choose how many shares to close from each lot. The total must
+              equal {saleTotalForEdit.toLocaleString()} shares. Only lots
+              bought on or before the sale date are offered. Requesting more
               than a lot holds opens a short for the overflow.
             </p>
 
+            {shortCovered && (
+              <div className="rounded-md border border-amber-300 dark:border-amber-700 bg-amber-50/60 dark:bg-amber-950/30 px-3 py-2 text-xs text-amber-800 dark:text-amber-300">
+                {coveredShortMessage({ shortQty: editShort.qty, coveredQty: editShort.covered })}
+              </div>
+            )}
+
+            {!shortCovered && (
             <div className="space-y-1.5 max-h-[40vh] overflow-y-auto">
-              {openLongLots.length === 0 && (
+              {editChoices.length === 0 && editShort.qty <= EPS && (
                 <p className="text-xs text-muted-foreground">
-                  No open long lots available — the closure will open a short.
+                  No lots bought on or before this sale hold shares, so the
+                  closure will open a short.
                 </p>
               )}
-              {openLongLots.map((lot) => (
+              {editChoices.map(({ lot, current, available, boughtAfterSale }) => (
                 <div
                   key={lot.id}
-                  className="flex items-center justify-between gap-3 rounded-md border border-border px-3 py-1.5 text-xs"
+                  data-testid={`reassign-lot-${lot.id}`}
+                  className="rounded-md border border-border px-3 py-1.5 text-xs space-y-1"
                 >
-                  <span className="flex items-center gap-2">
-                    <span className="font-medium">Lot #{lot.id}</span>
+                  <div className="flex items-center justify-between gap-3">
+                    <span className="flex flex-wrap items-center gap-x-2 gap-y-0.5">
+                      <span className="font-medium">Lot #{lot.id}</span>
+                      <span className="text-muted-foreground">
+                        bought {lot.openDate} · up to {available.toLocaleString()} sh @{" "}
+                        {formatCurrency(lot.costPerShare, lot.currency)}
+                        {current > EPS ? ` · this sale takes ${current.toLocaleString()} now` : ""}
+                      </span>
+                    </span>
+                    <Input
+                      type="number"
+                      min={0}
+                      max={boughtAfterSale ? available : undefined}
+                      step="any"
+                      aria-label={`Shares from lot #${lot.id}`}
+                      className="h-7 w-24 shrink-0 text-right"
+                      value={alloc[lot.id] ?? ""}
+                      onChange={(e) => {
+                        const v = e.target.value;
+                        setPreview(null);
+                        setAlloc((a) => ({ ...a, [lot.id]: v }));
+                      }}
+                    />
+                  </div>
+                  {boughtAfterSale && (
+                    <p className="text-amber-700 dark:text-amber-400">
+                      ⚠ Bought after this sale (trades entered out of date order).
+                      It can keep up to {available.toLocaleString()} sh but cannot
+                      take more; move the rest to an earlier lot or rebuild the lots.
+                    </p>
+                  )}
+                </div>
+              ))}
+              {editShort.qty > EPS && (
+                <div
+                  data-testid="reassign-lot-short"
+                  className="flex items-center justify-between gap-3 rounded-md border border-rose-300/70 dark:border-rose-800/70 px-3 py-1.5 text-xs"
+                >
+                  <span className="flex flex-wrap items-center gap-x-2 gap-y-0.5">
+                    <span className="font-medium text-rose-700 dark:text-rose-400">Sold short</span>
                     <span className="text-muted-foreground">
-                      opened {lot.openDate} · {lot.qtyRemaining.toLocaleString()} sh @{" "}
-                      {formatCurrency(lot.costPerShare, lot.currency)}
+                      beyond the shares held · this sale sold {editShort.qty.toLocaleString()} sh short now
                     </span>
                   </span>
                   <Input
                     type="number"
                     min={0}
                     step="any"
-                    className="h-7 w-24 text-right"
-                    value={alloc[lot.id] ?? ""}
+                    aria-label="Shares sold short"
+                    className="h-7 w-24 shrink-0 text-right"
+                    value={alloc[SHORT_LOT_ID] ?? ""}
                     onChange={(e) => {
                       const v = e.target.value;
                       setPreview(null);
-                      setAlloc((a) => ({ ...a, [lot.id]: v }));
+                      setAlloc((a) => ({ ...a, [SHORT_LOT_ID]: v }));
                     }}
                   />
                 </div>
-              ))}
+              )}
             </div>
+            )}
 
             {reassignError && (
               <p className="text-xs text-rose-600 dark:text-rose-400">{reassignError}</p>
@@ -493,14 +584,14 @@ export function LotInspectorDialog({
                 variant="outline"
                 size="sm"
                 onClick={fetchPreview}
-                disabled={!sumMatches || previewBusy || reassignBusy}
+                disabled={!sumMatches || laterLotOverLimit || shortCovered || previewBusy || reassignBusy}
               >
                 {previewBusy ? "Previewing…" : "Preview"}
               </Button>
               <Button
                 size="sm"
                 onClick={commitReassign}
-                disabled={!sumMatches || reassignBusy}
+                disabled={!sumMatches || laterLotOverLimit || shortCovered || reassignBusy}
               >
                 {reassignBusy ? "Saving…" : "Reassign"}
               </Button>

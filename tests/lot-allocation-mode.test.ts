@@ -29,9 +29,15 @@ describe("reassignErrorMessage", () => {
     expect(reassignErrorMessage({ ok: false, code: "not_reassignable", closeKind: "transfer_out" })).toContain(
       "transfer_out",
     );
-    expect(reassignErrorMessage({ ok: false, code: "qty_mismatch", expected: 100, got: 90 })).toBe(
+    expect(reassignErrorMessage({ ok: false, code: "qty_mismatch", expected: 100, got: 90, soldShort: 0 })).toBe(
       "The chosen quantities (90) must total the closure quantity (100)",
     );
+    expect(reassignErrorMessage({ ok: false, code: "qty_mismatch", expected: 150, got: 100, soldShort: 50 })).toBe(
+      "The chosen quantities (100) must total the sale's 150 shares, 50 of them sold short beyond the shares held (enter those as lot 0)",
+    );
+    expect(
+      reassignErrorMessage({ ok: false, code: "short_already_covered", closeTxId: 89379, shortQty: 50, coveredQty: 50 }),
+    ).toContain("Sale #89379 sold 50 more shares than were held, and a later purchase has already closed 50 of them");
     expect(reassignErrorMessage({ ok: false, code: "lot_not_in_scope", lotId: 7 })).toContain("Lot #7");
   });
 
@@ -259,6 +265,14 @@ describe("MCP manage_lots", () => {
 
   it("previews a reassignment unless told to apply it", () => {
     expect(mcp).toContain("const dryRun = args.preview !== false");
+  });
+
+  it("refuses a reassignment with the web route's own wording (incl. a lot bought after the sale)", () => {
+    expect(mcp).toContain("err(reassignErrorMessage(result))");
+    expect(code("src/app/api/portfolio/holdings/[holdingId]/lots/reassign/route.ts")).toContain(
+      'case "lot_bought_after_sale":',
+    );
+    expect(code("src/lib/portfolio/lots/write-hooks.ts")).toContain("findLotBoughtAfterSale(");
   });
 
   it("refuses a rebuild without an explicit confirmation, before touching anything", () => {

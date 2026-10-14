@@ -3,8 +3,9 @@
  *
  * Walks every user transaction in chronological order, grouped by
  * (holding, account). Opens lots from buys + reinvested dividends, runs
- * FIFO depletion on sells, writes transfer-out closures + transfer-in
- * lots on in-kind move pairs.
+ * FIFO depletion on sells (a sale beyond the shares held opens a short, and
+ * a buy closes open shorts first), writes transfer-out closures +
+ * transfer-in lots on in-kind move pairs.
  *
  * Reuses the same engine functions as the live write-hooks so the
  * cost-basis substitution (#96), sell-branch skip (#128), per-currency
@@ -23,13 +24,13 @@ import { and, eq, inArray, isNotNull, isNull, or, sql } from "drizzle-orm";
 import { db, schema } from "@/db";
 import { resolveDividendsCategoryId } from "@/lib/dividends-category";
 import {
-  closeLotsForSell,
+  coverShortsForBuy,
   daysBetween,
   openLotForBuy,
+  planSellAgainstLongs,
   transferLot,
 } from "./engine";
 import { inferCashCloseKind } from "./cash-hooks";
-import { selectLotsToClose } from "./selection";
 import type {
   CashLegHint,
   HoldingLot,
@@ -543,69 +544,70 @@ export async function buildLotsForUser(
       continue;
     }
 
-    // Regular buy / dividend-reinvest / sell.
+    // Regular buy / dividend-reinvest / sell. Same math as the live write
+    // hooks (engine `coverShortsForBuy` / `planSellAgainstLongs`): a sale
+    // beyond the shares held opens a short for the rest, and a later buy
+    // closes open shorts first. Until 2026-10-14 this path had no shorts: an
+    // oversold sale was skipped whole ("sell shortfall") and the buy that
+    // closed the short opened a long lot, so a rebuilt position that ever went
+    // short held shares it didn't have.
+    const cashLeg = r.tradeLinkId
+      ? cashLegByTradeLinkId.get(r.tradeLinkId) ?? undefined
+      : undefined;
+    const arr = lotsByKey.get(key) ?? [];
+    const asEngineLots = () => arr.map((l) => ({ ...l, id: l.tmpId })) as HoldingLot[];
+    const applyDeltas = (qtyDeltas: Map<number, number>) => {
+      for (const [lotIdTmp, delta] of qtyDeltas) {
+        const lot = arr.find((l) => l.tmpId === lotIdTmp);
+        if (!lot) continue;
+        lot.qtyRemaining -= delta;
+        if (lot.qtyRemaining <= 1e-9) {
+          lot.status = "closed";
+          lot.qtyRemaining = 0;
+        }
+      }
+    };
+
     if (r.quantity != null && r.quantity > 0) {
-      const cashLeg = r.tradeLinkId
-        ? cashLegByTradeLinkId.get(r.tradeLinkId) ?? undefined
-        : undefined;
-      const categoryIsDividend =
-        dividendsCategoryId != null && r.categoryId === dividendsCategoryId;
-      const plan = openLotForBuy({
-        tx: txRow,
-        cashLeg,
-        categoryIsDividend,
-        holdingCurrency,
-        originOverride: "backfill",
-      });
-      const tmpId = nextTmpId++;
-      const lot: InMemLot = { ...plan.lot, tmpId, status: "open", side: "long" };
-      pendingLots.push(lot);
-      const arr = lotsByKey.get(key) ?? [];
-      arr.push(lot);
+      const cover = coverShortsForBuy({ tx: txRow, lots: asEngineLots(), cashLeg, holdingCurrency });
+      for (const cl of cover.closures) {
+        pendingClosures.push({ ...cl, tmpLotId: cl.lotId });
+      }
+      applyDeltas(cover.qtyDeltas);
+      if (cover.remainderTx) {
+        const categoryIsDividend =
+          dividendsCategoryId != null && r.categoryId === dividendsCategoryId;
+        const plan = openLotForBuy({
+          tx: cover.remainderTx,
+          cashLeg: cover.remainderCashLeg,
+          categoryIsDividend,
+          holdingCurrency,
+          originOverride: "backfill",
+        });
+        const lot: InMemLot = { ...plan.lot, tmpId: nextTmpId++, status: "open", side: "long" };
+        pendingLots.push(lot);
+        arr.push(lot);
+      }
       lotsByKey.set(key, arr);
     } else if (r.quantity != null && r.quantity < 0) {
       // Paired cash-leg already filtered above.
-      const cashLeg = r.tradeLinkId
-        ? cashLegByTradeLinkId.get(r.tradeLinkId) ?? undefined
-        : undefined;
-      const arr = (lotsByKey.get(key) ?? []).map((l) => ({
-        ...l,
-        id: l.tmpId,
-      })) as HoldingLot[];
-      const plan = selectLotsToClose({
-        strategy: "FIFO",
-        lots: arr,
-        targetQty: Math.abs(r.quantity),
-      });
-      if (!plan.success) {
-        errors.push(
-          `tx ${r.id} (${r.date}): sell shortfall ${plan.shortfall} — no matching open lot`,
-        );
-        txProcessed++;
-        continue;
-      }
-      const lotsById = new Map(arr.map((l) => [l.id, l]));
-      const result = closeLotsForSell({
+      const sell = planSellAgainstLongs({
         tx: txRow,
-        plan,
+        lots: asEngineLots(),
         cashLeg,
         holdingCurrency,
-        lotsById,
+        shortOrigin: "backfill",
       });
-      for (const cl of result.closures) {
+      for (const cl of sell.closures) {
         pendingClosures.push({ ...cl, tmpLotId: cl.lotId });
       }
-      const sourceArr = lotsByKey.get(key) ?? [];
-      for (const [lotIdTmp, delta] of result.qtyDeltas) {
-        const lot = sourceArr.find((l) => l.tmpId === lotIdTmp);
-        if (lot) {
-          lot.qtyRemaining -= delta;
-          if (lot.qtyRemaining <= 1e-9) {
-            lot.status = "closed";
-            lot.qtyRemaining = 0;
-          }
-        }
+      applyDeltas(sell.qtyDeltas);
+      if (sell.shortLot) {
+        const lot: InMemLot = { ...sell.shortLot, tmpId: nextTmpId++ };
+        pendingLots.push(lot);
+        arr.push(lot);
       }
+      lotsByKey.set(key, arr);
     }
     txProcessed++;
   }
@@ -626,6 +628,9 @@ export async function buildLotsForUser(
       origin: l.origin,
       parentLotId: null, // parent_lot_id is also tmp — TODO post-Phase-1 fixup
       status: l.status,
+      // Without this every rebuilt lot was stored as the column default
+      // 'long', including the cash-sleeve shorts FINLYNQ-278 builds.
+      side: l.side ?? "long",
       source: l.source,
     }));
     const inserted = await db
@@ -696,8 +701,9 @@ export async function buildLotsForUser(
  * short; replaying in date order opens the long first, so the sell closes it
  * as a long). Deletes ONLY holding_lots / holding_lot_closures — never any
  * `transactions` row. Returns the same shape as buildLotsForUser; `errors`
- * carries any sell shortfalls (genuine oversells) + cross-account-transfer
- * warnings.
+ * carries cross-account / cross-holding transfer warnings. A sale larger than
+ * the shares held is NOT an error: it opens a short, which a later buy
+ * closes, exactly as when the trades were recorded.
  *
  * @param holdingIds every portfolio_holding id clustering under the target
  *   security (resolve from securities/cluster); usually one for a single

@@ -392,3 +392,171 @@ describe("reassignClosureLots — tc-2 overflow opens a short (atomic)", () => {
     expect(writeSpy.inserts + writeSpy.updates + writeSpy.deletes).toBe(0);
   });
 });
+
+// ─── A sale cannot use shares bought after it (2026-10-14) ──────────────────
+//
+// `reassignClosureLots` is what both REST `/lots/reassign` and MCP
+// `manage_lots(op:"reassign")` call, so this refusal covers both surfaces.
+
+describe("reassignClosureLots — lots bought after the sale", () => {
+  // The sale (2025-06-01) used up lot 1. Lot 2 was bought earlier, lot 3 after.
+  const lotsForSale = () => [
+    liveLotRow({ id: 1, openTxId: 1, openDate: "2025-01-15", costPerShare: 100, qtyRemaining: 0, status: "closed" }),
+    liveLotRow({ id: 2, openDate: "2025-03-01", costPerShare: 120 }),
+    liveLotRow({ id: 3, openTxId: 3, openDate: "2025-07-01", costPerShare: 130 }),
+  ];
+
+  it("refuses a lot bought after the sale, in preview, and writes NOTHING", async () => {
+    writeSpy.results = [[closeTxRow], [sellClosureRow()], lotsForSale()];
+    const res = await reassignClosureLots(
+      "u",
+      { holdingId: 200, closeTxId: 99, perLotQty: [{ lotId: 3, qty: 10 }] },
+      { dryRun: true },
+    );
+    expect(res).toEqual({
+      ok: false,
+      code: "lot_bought_after_sale",
+      lotId: 3,
+      lotOpenDate: "2025-07-01",
+      closeDate: "2025-06-01",
+      alreadyTaken: 0,
+    });
+    expect(writeSpy.inserts + writeSpy.updates + writeSpy.deletes).toBe(0);
+  });
+
+  it("refuses it on commit too, before reversing anything", async () => {
+    writeSpy.results = [[closeTxRow], [sellClosureRow()], lotsForSale()];
+    const res = await reassignClosureLots(
+      "u",
+      { holdingId: 200, closeTxId: 99, perLotQty: [{ lotId: 2, qty: 5 }, { lotId: 3, qty: 5 }] },
+      { dryRun: false, dek: null },
+    );
+    expect(res.ok).toBe(false);
+    if (!res.ok) expect(res.code).toBe("lot_bought_after_sale");
+    expect(writeSpy.inserts + writeSpy.updates + writeSpy.deletes).toBe(0);
+  });
+
+  it("moving shares off a used-up lot onto an earlier one still previews", async () => {
+    writeSpy.results = [[closeTxRow], [sellClosureRow()], lotsForSale()];
+    const res = await reassignClosureLots(
+      "u",
+      { holdingId: 200, closeTxId: 99, perLotQty: [{ lotId: 2, qty: 10 }] },
+      { dryRun: true },
+    );
+    expect(res.ok).toBe(true);
+    if (res.ok) {
+      expect(res.preview.proposedClosures.map((c) => [c.lotId, c.qtyClosed])).toEqual([[2, 10]]);
+      expect(res.preview.openedShortLots).toHaveLength(0);
+      expect(res.preview.realizedGainDeltaByYear["2025"]).toBe(-200); // (150−120)×10 − 500
+    }
+  });
+
+  // Out-of-order leftovers stay fixable: a sale already matched to a later lot
+  // can keep (or lower) that share, but not raise it.
+  it("a later lot the sale already uses may keep its share but not grow it", async () => {
+    const outOfOrderClosures = [
+      sellClosureRow({ id: 1, lotId: 3, qtyClosed: 4, costPerShare: 130, realizedGain: 80 }),
+      sellClosureRow({ id: 2, lotId: 2, qtyClosed: 6, costPerShare: 120, realizedGain: 180 }),
+    ];
+    const lotsNow = () => [
+      liveLotRow({ id: 2, openDate: "2025-03-01", costPerShare: 120, qtyRemaining: 4 }),
+      liveLotRow({ id: 3, openTxId: 3, openDate: "2025-07-01", costPerShare: 130, qtyRemaining: 6 }),
+    ];
+
+    writeSpy.results = [[closeTxRow], outOfOrderClosures, lotsNow()];
+    const lower = await reassignClosureLots(
+      "u",
+      { holdingId: 200, closeTxId: 99, perLotQty: [{ lotId: 3, qty: 2 }, { lotId: 2, qty: 8 }] },
+      { dryRun: true },
+    );
+    expect(lower.ok).toBe(true);
+
+    writeSpy.results = [[closeTxRow], outOfOrderClosures, lotsNow()];
+    const raise = await reassignClosureLots(
+      "u",
+      { holdingId: 200, closeTxId: 99, perLotQty: [{ lotId: 3, qty: 5 }, { lotId: 2, qty: 5 }] },
+      { dryRun: true },
+    );
+    expect(raise).toMatchObject({ ok: false, code: "lot_bought_after_sale", lotId: 3, alreadyTaken: 4 });
+    expect(writeSpy.inserts + writeSpy.updates + writeSpy.deletes).toBe(0);
+  });
+});
+
+describe("reassignErrorMessage — lot_bought_after_sale (REST + MCP wording)", () => {
+  it("names both dates, and the cap when the sale already uses the lot", async () => {
+    const { reassignErrorMessage } = await import("@/lib/portfolio/lots/reassign-errors");
+    const fresh = reassignErrorMessage({
+      ok: false,
+      code: "lot_bought_after_sale",
+      lotId: 2394,
+      lotOpenDate: "2026-06-02",
+      closeDate: "2026-05-02",
+      alreadyTaken: 0,
+    });
+    expect(fresh).toContain("Lot #2394 was bought on 2026-06-02, after this sale on 2026-05-02");
+    expect(fresh).toContain("only use shares bought on or before its date");
+
+    const leftover = reassignErrorMessage({
+      ok: false,
+      code: "lot_bought_after_sale",
+      lotId: 3,
+      lotOpenDate: "2025-07-01",
+      closeDate: "2025-06-01",
+      alreadyTaken: 4,
+    });
+    expect(leftover).toContain("already takes 4 shares");
+    expect(leftover).toContain("cannot take more");
+  });
+});
+
+// ─── A sale that sold more than was held (2026-10-14) ───────────────────────
+//
+// The rest of that sale opened a short (a lot with openTxId = the sale). The
+// total to reach is the whole sale, the short part entered as lot 0; once a
+// later buy has closed any of the short, the sale is refused. The DB-backed
+// versions (real cascade) are in tests/portfolio-lots-shorts.test.ts.
+
+describe("reassignClosureLots — a sale that also sold short", () => {
+  // Sale tx 99 took 10 from lot 1 and sold 5 more short (lot 50).
+  const longLot = () => liveLotRow({ id: 1, openTxId: 1, openDate: "2024-01-15", costPerShare: 100, qtyRemaining: 0, status: "closed" });
+  const shortLot = (qtyRemaining: number) =>
+    liveLotRow({ id: 50, openTxId: 99, openDate: "2025-06-01", side: "short", qtyOriginal: 5, qtyRemaining, costPerShare: 150, status: qtyRemaining > 0 ? "open" : "closed" });
+
+  it("refuses when a later buy has closed part of the short, in preview and on save, writing nothing", async () => {
+    for (const dryRun of [true, false]) {
+      writeSpy.results = [[closeTxRow], [sellClosureRow()], [longLot(), shortLot(2)]];
+      const res = await reassignClosureLots(
+        "u",
+        { holdingId: 200, closeTxId: 99, perLotQty: [{ lotId: 1, qty: 10 }, { lotId: 0, qty: 5 }] },
+        { dryRun, dek: null },
+      );
+      expect(res).toEqual({ ok: false, code: "short_already_covered", closeTxId: 99, shortQty: 5, coveredQty: 3 });
+    }
+    expect(writeSpy.inserts + writeSpy.updates + writeSpy.deletes).toBe(0);
+  });
+
+  it("an open short counts toward the total: the long part alone is refused", async () => {
+    writeSpy.results = [[closeTxRow], [sellClosureRow()], [longLot(), shortLot(5)]];
+    const res = await reassignClosureLots(
+      "u",
+      { holdingId: 200, closeTxId: 99, perLotQty: [{ lotId: 1, qty: 10 }] },
+      { dryRun: true },
+    );
+    expect(res).toEqual({ ok: false, code: "qty_mismatch", expected: 15, got: 10, soldShort: 5 });
+  });
+
+  it("lot 0 is the sold-short part: accepted, and previewed as the short it reopens", async () => {
+    writeSpy.results = [[closeTxRow], [sellClosureRow()], [longLot(), shortLot(5)]];
+    const res = await reassignClosureLots(
+      "u",
+      { holdingId: 200, closeTxId: 99, perLotQty: [{ lotId: 1, qty: 10 }, { lotId: 0, qty: 5 }] },
+      { dryRun: true },
+    );
+    expect(res.ok).toBe(true);
+    if (res.ok) {
+      expect(res.preview.openedShortLots.map((s) => s.qty)).toEqual([5]);
+      expect(res.preview.realizedGainDeltaByYear).toEqual({});
+    }
+    expect(writeSpy.inserts + writeSpy.updates + writeSpy.deletes).toBe(0);
+  });
+});

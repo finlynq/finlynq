@@ -66,7 +66,7 @@ export async function POST(
       txProcessed: result.txProcessed,
       holdingIds,
       accountId,
-      // `errors` carries non-fatal warnings (sell shortfalls / cross-account
+      // `errors` carries non-fatal warnings (cross-account
       // transfer legs rebuilt within the account) — surfaced to the user.
       warnings: result.errors,
     });

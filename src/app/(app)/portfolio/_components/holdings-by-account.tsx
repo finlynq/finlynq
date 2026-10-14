@@ -8,12 +8,18 @@
  * this Holdings-by-Account panel stays as-is. The `accountGroups` array (with
  * its `(a ?? "").localeCompare(...)` null-guard) is computed on the page and
  * passed in; expand state stays on the page.
+ *
+ * Hide empty (2026-10-14): like All Holdings, rows with no current position
+ * (no units and no value) can be hidden, and an account left with none drops
+ * out. The account header still totals EVERY holding, so realized gains on
+ * closed positions keep counting; it says how many rows are hidden.
  */
 
 import Link from "next/link";
 import { motion, AnimatePresence } from "framer-motion";
 import { Wallet, ChevronDown, ChevronUp } from "lucide-react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Button } from "@/components/ui/button";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Badge } from "@/components/ui/badge";
 import { formatCurrency } from "@/lib/currency";
@@ -23,28 +29,67 @@ import { DayChange } from "./portfolio-ui";
 import { holdingDescription } from "./holding-description";
 import { ASSET_TYPE_CONFIG, type EnrichedHolding } from "../_types";
 
+/** No current position: no units and no value (the All Holdings rule). */
+export const isEmptyHoldingRow = (h: Pick<EnrichedHolding, "quantity" | "marketValueDisplay">) =>
+  (h.quantity ?? 0) === 0 && (h.marketValueDisplay ?? 0) === 0;
+
 export function HoldingsByAccount({
   accountGroups,
   expandedAccounts,
   toggleAccount,
   displayCurrency,
+  hideEmpty,
+  setHideEmpty,
 }: {
   accountGroups: [string, EnrichedHolding[]][];
   expandedAccounts: Set<string>;
   toggleAccount: (name: string) => void;
   displayCurrency: string;
+  hideEmpty: boolean;
+  setHideEmpty: (v: boolean) => void;
 }) {
+  const groups = accountGroups
+    .map(([accountName, all]) => {
+      const visible = hideEmpty ? all.filter((h) => !isEmptyHoldingRow(h)) : all;
+      return { accountName, all, items: visible, hidden: all.length - visible.length };
+    })
+    .filter((g) => g.items.length > 0);
+  const hiddenAccounts = accountGroups.length - groups.length;
   return (
     <Card>
       <CardHeader className="pb-2">
-        <div className="flex items-center gap-2">
-          <Wallet className="h-4 w-4 text-indigo-500" />
-          <CardTitle className="text-base">Holdings by Account</CardTitle>
+        <div className="flex items-center justify-between gap-2">
+          <div className="flex items-center gap-2">
+            <Wallet className="h-4 w-4 text-indigo-500" />
+            <CardTitle className="text-base">Holdings by Account</CardTitle>
+          </div>
+          <Button
+            variant={hideEmpty ? "default" : "outline"}
+            size="sm"
+            className="text-xs h-7"
+            onClick={() => setHideEmpty(!hideEmpty)}
+            title="Hide holdings with no current position (no units and no value, e.g. fully sold)"
+          >
+            {hideEmpty ? "Hiding empty" : "Showing all"}
+          </Button>
         </div>
-        <p className="text-xs text-muted-foreground">Click to expand account details</p>
+        <p className="text-xs text-muted-foreground">
+          Click to expand account details
+          {hideEmpty && hiddenAccounts > 0
+            ? ` · ${hiddenAccounts} account${hiddenAccounts === 1 ? "" : "s"} with nothing held hidden`
+            : ""}
+        </p>
       </CardHeader>
       <CardContent className="space-y-1">
-        {accountGroups.map(([accountName, items]) => {
+        {groups.length === 0 && (
+          <p className="py-6 text-center text-sm text-muted-foreground">
+            Nothing is held in any account right now.{" "}
+            <button type="button" className="text-primary hover:underline" onClick={() => setHideEmpty(false)}>
+              Show all
+            </button>
+          </p>
+        )}
+        {groups.map(({ accountName, all, items, hidden }) => {
           const isExpanded = expandedAccounts.has(accountName);
           const etfs = items.filter(h => h.assetType === "etf").length;
           const stocks = items.filter(h => h.assetType === "stock").length;
@@ -52,14 +97,16 @@ export function HoldingsByAccount({
           const cash = items.filter(h => h.assetType === "cash").length;
           const metals = items.filter(h => h.assetType === "metal").length;
           // Inline aggregate stats per account — sum the per-holding
-          // *Display fields the API already emits in displayCurrency.
-          const acctMktValue = items.reduce((s, h) => s + (h.marketValueDisplay ?? 0), 0);
-          const acctUnrealized = items.reduce((s, h) => s + (h.unrealizedGainDisplay ?? 0), 0);
+          // *Display fields the API already emits in displayCurrency. Over
+          // EVERY holding, hidden ones included (a closed position still
+          // carries realized gain).
+          const acctMktValue = all.reduce((s, h) => s + (h.marketValueDisplay ?? 0), 0);
+          const acctUnrealized = all.reduce((s, h) => s + (h.unrealizedGainDisplay ?? 0), 0);
           // Realized gain is emitted by the API in displayCurrency as
           // `realizedGainDisplay` (historical-per-closure FX when the lots
           // read-flip is on — matching the realized-gains report). Sum it
           // directly instead of re-folding native via an implied current-rate.
-          const acctRealized = items.reduce((s, h) => s + (h.realizedGainDisplay ?? 0), 0);
+          const acctRealized = all.reduce((s, h) => s + (h.realizedGainDisplay ?? 0), 0);
 
           return (
             <div key={accountName} className="border rounded-lg overflow-hidden">
@@ -72,6 +119,9 @@ export function HoldingsByAccount({
                   <Badge variant="outline" className="text-[10px] flex-shrink-0">
                     {items.length} holding{items.length !== 1 ? "s" : ""}
                   </Badge>
+                  {hidden > 0 && (
+                    <span className="text-[10px] text-muted-foreground flex-shrink-0">{hidden} empty hidden</span>
+                  )}
                   <div className="hidden sm:flex items-center gap-1.5">
                     {etfs > 0 && (
                       <Badge

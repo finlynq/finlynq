@@ -79,7 +79,9 @@ const INTERNAL_SWAP_KIND_SET: ReadonlySet<string> = new Set(INTERNAL_SWAP_KINDS)
  * Pure-JS predicate: is this transfer leg an INTERNAL swap (FX conversion or
  * in-kind transfer) that must be excluded from net-contribution / Dietz-flow
  * tallies? Single source of truth for the FINLYNQ-254 contribution-stamping
- * fix, consumed by the snapshot builder AND `computeNetContributions`.
+ * fix, consumed by the snapshot builder AND `isNewMoney`
+ * (performance/external-flows.ts), which decides what performance treats as
+ * money put in or taken out.
  */
 export function isInternalSwapKind(kind?: string | null): boolean {
   return kind != null && INTERNAL_SWAP_KIND_SET.has(kind);

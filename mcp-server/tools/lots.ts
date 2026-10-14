@@ -27,6 +27,7 @@ import {
 import { loadHoldingLotsAndClosures, resolvePositionScope } from "../../src/lib/portfolio/lots/inspect";
 import { reassignClosureLots } from "../../src/lib/portfolio/lots/write-hooks";
 import { reassignErrorMessage } from "../../src/lib/portfolio/lots/reassign-errors";
+import { shortOpenedBySale } from "../../src/lib/portfolio/lots/sale-lot-choices";
 import { rebuildLotsForPosition } from "../../src/lib/portfolio/lots/backfill";
 
 type ToolResult = { content: Array<{ type: "text"; text: string }> };
@@ -90,6 +91,13 @@ export function registerLotsTools(server: McpServer, ctx: PgToolContext) {
           currency: c.currency,
           ...(c.openAfterClose ? { warning: "This lot opened AFTER the sale, the sign of trades entered out of date order. op:'rebuild' fixes it." } : {}),
         })),
+        // Sales that sold more than was held: that part opened a short (no lot
+        // to take it from; op:'reassign' takes it as lot_id 0). Once a later
+        // purchase has closed any of it, op:'reassign' refuses that sale.
+        soldShort: [...new Set(lots.filter((l) => l.side === "short").map((l) => l.openTxId))].map((saleTxId) => {
+          const short = shortOpenedBySale(lots, saleTxId);
+          return { closeTxId: saleTxId, qtySoldShort: short.qty, qtyClosedByLaterPurchases: short.covered };
+        }),
         allLots: lots.length,
       },
     });
@@ -143,7 +151,8 @@ export function registerLotsTools(server: McpServer, ctx: PgToolContext) {
         lotsWritten: result.lotsWritten,
         closuresWritten: result.closuresWritten,
         tradesReplayed: result.txProcessed,
-        // Non-fatal: a sale larger than the shares held, a cross-account transfer.
+        // Non-fatal, e.g. a cross-account transfer. A sale larger than the shares
+        // held is not one: it opens a short, as when the trade was recorded.
         warnings: result.errors,
       },
     });
@@ -152,7 +161,7 @@ export function registerLotsTools(server: McpServer, ctx: PgToolContext) {
   registerManageTool(
     server,
     "manage_lots",
-    "Manage tax lots and the cost-basis method; `op`: status, set_mode, list, reassign, rebuild. status: which method the user is on (simple average of every purchase, or advanced lot allocation) and whether every position has lots. set_mode: switch method (`advanced` true/false); lots and hand-made matching are kept either way. list: a holding's open lots (the lot-based cost basis) and every sale with the lot it was matched to. reassign: change which lots ONE sale consumed; previews unless preview:false; quantities must total the sale; same account only. rebuild: replay a position's trades in date order, first in first out; resets hand-made matching for that position, so it needs confirm_reset:true. No op changes a transaction. Find holding ids with get_portfolio_analysis.",
+    "Manage tax lots and the cost-basis method; `op`: status, set_mode, list, reassign, rebuild. status: which method the user is on (simple average of every purchase, or advanced lot allocation) and whether every position has lots. set_mode: switch method (`advanced` true/false); lots and hand-made matching are kept either way. list: a holding's open lots (the lot-based cost basis) and every sale with the lot it was matched to. reassign: change which lots ONE sale consumed; previews unless preview:false; quantities must total the sale (the part sold beyond the shares held is lot_id 0); same account only; only lots bought on or before the sale date. rebuild: replay a position's trades in date order, first in first out; resets hand-made matching for that position, so it needs confirm_reset:true. No op changes a transaction. Find holding ids with get_portfolio_analysis.",
     z.discriminatedUnion("op", [
       z.object({
         op: z.literal("status").describe("Which cost-basis method the user is on, and lot coverage."),
@@ -173,12 +182,12 @@ export function registerLotsTools(server: McpServer, ctx: PgToolContext) {
         per_lot_qty: z
           .array(
             z.object({
-              lot_id: z.number().int().positive().describe("A lot of the same holding and account (`lotId` from op:'list')"),
+              lot_id: z.number().int().min(0).describe("A lot of the same holding and account, bought on or before the sale date (`lotId` from op:'list'). 0 = the part of the sale sold short, beyond the shares held (`soldShort` in op:'list'). A lot bought later is refused, except one the sale already uses, which may keep at most what it takes now"),
               qty: z.number().positive().describe("Shares of the sale to take from that lot"),
             }),
           )
           .min(1)
-          .describe("How the sale's shares are split across lots. The quantities must total the sale's quantity."),
+          .describe("How the sale's shares are split across lots. The quantities must total the sale's quantity, including any part sold short (lot_id 0). Refused when a later purchase already closed part of that short; op:'rebuild' handles it."),
         preview: z.boolean().optional().describe("Default true: show the result and change nothing. false: apply it."),
       }),
       z.object({

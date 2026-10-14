@@ -12,10 +12,17 @@
  *                     short), all-or-nothing. Returns { preview, committed:true }.
  *
  * STRICT validation (write NOTHING on failure):
- *   - Σ perLotQty.qty must equal the closure's total qty → 400 qty_mismatch.
+ *   - Σ perLotQty.qty must equal the whole sale → 400 qty_mismatch. A sale
+ *     that sold more than was held includes the short part, entered as
+ *     lotId 0, so saving opens the short again.
+ *   - a short the sale opened that a later buy already closed → 400
+ *     short_already_covered (re-matching would erase that closing).
  *   - every named lot must belong to the same (holding, account) as the
  *     close-tx (same-account-only) → 400 lot_not_in_scope.
  *   - the closure must be a plain SELL → 400 not_reassignable.
+ *   - a sale can only use shares bought on or before its date → 400
+ *     lot_bought_after_sale. A later lot the sale ALREADY uses (trades
+ *     entered out of date order) may keep up to what it takes today.
  *
  * Only the reassigned closure's realized gain restates; sibling closures stay
  * byte-identical. Position qty stays live SUM(quantity) — only lot/closure
@@ -40,7 +47,8 @@ const bodySchema = z.object({
   perLotQty: z
     .array(
       z.object({
-        lotId: z.number().int().positive(),
+        // 0 (SHORT_LOT_ID) = the part of the sale sold short (no lot).
+        lotId: z.number().int().min(0),
         qty: z.number().positive(),
       }),
     )
@@ -79,6 +87,7 @@ function mapReassignError(err: ReassignError): NextResponse {
           code: err.code,
           expected: err.expected,
           got: err.got,
+          soldShort: err.soldShort,
         },
         { status: 400 },
       );
@@ -88,6 +97,29 @@ function mapReassignError(err: ReassignError): NextResponse {
           error: reassignErrorMessage(err),
           code: err.code,
           lotId: err.lotId,
+        },
+        { status: 400 },
+      );
+    case "short_already_covered":
+      return NextResponse.json(
+        {
+          error: reassignErrorMessage(err),
+          code: err.code,
+          closeTxId: err.closeTxId,
+          shortQty: err.shortQty,
+          coveredQty: err.coveredQty,
+        },
+        { status: 400 },
+      );
+    case "lot_bought_after_sale":
+      return NextResponse.json(
+        {
+          error: reassignErrorMessage(err),
+          code: err.code,
+          lotId: err.lotId,
+          lotOpenDate: err.lotOpenDate,
+          closeDate: err.closeDate,
+          alreadyTaken: err.alreadyTaken,
         },
         { status: 400 },
       );

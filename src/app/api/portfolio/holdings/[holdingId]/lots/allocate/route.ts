@@ -17,6 +17,10 @@
  * Reverses + re-closes only `holding_lot_closures` / `holding_lots` — NEVER a
  * `transactions` row. Position qty stays live SUM(quantity).
  *
+ * Refused (400 short_already_covered, preview included) when an editable sell
+ * opened a short that a later buy has already closed: the commit would
+ * delete that closing and bring the short back open.
+ *
  * Auth: requireEncryption — the commit resolves the Dividends category (DEK),
  * mirroring /reassign.
  */
@@ -29,6 +33,7 @@ import {
   applyHoldingAllocation,
   type AllocApplyError,
 } from "@/lib/portfolio/lots/write-hooks";
+import { coveredShortMessage } from "@/lib/portfolio/lots/reassign-errors";
 
 const bodySchema = z.object({
   accountId: z.number().int().positive(),
@@ -78,6 +83,17 @@ function mapAllocError(err: AllocApplyError): NextResponse {
           code: err.code,
           errorCode: err.preview.errorCode,
           errors: err.preview.errors,
+        },
+        { status: 400 },
+      );
+    case "short_already_covered":
+      return NextResponse.json(
+        {
+          error: coveredShortMessage(err),
+          code: err.code,
+          closeTxId: err.closeTxId,
+          shortQty: err.shortQty,
+          coveredQty: err.coveredQty,
         },
         { status: 400 },
       );

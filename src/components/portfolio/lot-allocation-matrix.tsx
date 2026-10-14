@@ -33,6 +33,8 @@ import {
   type AllocSell,
   type AllocSpec,
 } from "@/lib/portfolio/lots/allocate";
+import { shortOpenedBySale } from "@/lib/portfolio/lots/sale-lot-choices";
+import { coveredShortMessage } from "@/lib/portfolio/lots/reassign-errors";
 
 interface LotRow {
   id: number;
@@ -40,6 +42,7 @@ interface LotRow {
   side: "long" | "short";
   status: string;
   qtyOriginal: number;
+  qtyRemaining: number;
   costPerShare: number;
   currency: string;
   openTxId: number;
@@ -104,6 +107,15 @@ export function LotAllocationMatrix({
       .map(([txId, m]) => ({ closeTxId: txId, closeDate: m.closeDate, proceedsPerShare: m.pps, currency: m.currency, qty: m.closed + (shortByTx.get(txId) ?? 0) }))
       .sort((a, b) => a.closeDate.localeCompare(b.closeDate) || a.closeTxId - b.closeTxId);
   }, [closures, lots]);
+
+  // An oversold sale whose short a later buy already closed: saving would
+  // delete that closing and bring the short back open (nothing replays the
+  // buy), so the server refuses and the grid can't be saved.
+  const coveredShort =
+    sells
+      .map((s) => ({ closeTxId: s.closeTxId, ...shortOpenedBySale(lots, s.closeTxId) }))
+      .filter((s) => s.covered > EPS)
+      .map((s) => ({ closeTxId: s.closeTxId, shortQty: s.qty, coveredQty: s.covered }))[0] ?? null;
 
   const currentAlloc = useMemo(() => {
     const a: Record<string, number> = {};
@@ -352,6 +364,12 @@ export function LotAllocationMatrix({
         </div>
       </div>
 
+      {coveredShort && (
+        <div className="shrink-0 rounded-md border border-amber-300 dark:border-amber-700 bg-amber-50/60 dark:bg-amber-950/30 px-3 py-1.5 text-xs text-amber-800 dark:text-amber-300">
+          {coveredShortMessage(coveredShort)}
+        </div>
+      )}
+
       <div className={`shrink-0 rounded-md px-3 py-1.5 text-xs ${plan.ok ? "bg-emerald-50/60 dark:bg-emerald-950/30 text-emerald-700 dark:text-emerald-300" : "bg-rose-50/60 dark:bg-rose-950/30 text-rose-700 dark:text-rose-300"}`}>
         {plan.ok
           ? `Balanced — ${qf(plan.totals.openShares)} sh still open. Net ${plan.totals.realizedGain >= 0 ? "gain " : "loss "}${formatCurrency(plan.totals.realizedGain, cur)} (LT ${formatCurrency(plan.totals.longTerm, cur)} · ST ${formatCurrency(plan.totals.shortTerm, cur)}).`
@@ -482,7 +500,7 @@ export function LotAllocationMatrix({
         <button type="button" onClick={() => fill("clear")} className="text-[11px] text-muted-foreground hover:underline">Clear all</button>
         <div className="flex items-center gap-2">
           <Button variant="outline" size="sm" onClick={onCancel} disabled={busy}>Cancel</Button>
-          <Button size="sm" onClick={commit} disabled={!plan.ok || busy}>{busy ? "Saving…" : "Save allocation"}</Button>
+          <Button size="sm" onClick={commit} disabled={!plan.ok || busy || coveredShort != null}>{busy ? "Saving…" : "Save allocation"}</Button>
         </div>
       </div>
     </div>
