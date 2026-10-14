@@ -158,3 +158,11 @@ npx eas build --platform ios --profile production --auto-submit --non-interactiv
   (`/api/portfolio/holdings/:id/lots` + `/lots/reassign`). **Currency decimals**: amounts use the
   currency's own decimals (no decimals for yen, three for Kuwaiti dinar), as on the web. Needs the web
   release of 2026-10-13 on the target backend.
+- **1.0.24 / vc33 (Android internal testing only)** (2026-10-14; no iOS build): **Sales and lots**
+  follows the server's re-matching rules. A sale that sold more than was held now counts that part
+  ("N of them sold short") and the editor carries it as a **Sold short** row (sent as lot 0), so the
+  total is the whole sale; a sale whose short a later purchase already closed offers no change and
+  says why (Rebuild lots on the web re-matches it); a purchase made after the sale can keep only what
+  the sale already takes from it. The server side is the web change `7db62e3` + `ddd983e` (on dev
+  2026-10-14). Against a server without it, normal sales work as before and an oversold sale's
+  re-match is refused (lot 0 fails validation) instead of silently dropping the short, as 1.0.23 did.

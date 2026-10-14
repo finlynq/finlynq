@@ -2,7 +2,7 @@
   "expo": {
     "name": "Finlynq",
     "slug": "finlynq-mobile",
-    "version": "1.0.23",
+    "version": "1.0.24",
     "platforms": [
       "ios",
       "android"
