@@ -392,3 +392,119 @@ describe("reassignClosureLots — tc-2 overflow opens a short (atomic)", () => {
     expect(writeSpy.inserts + writeSpy.updates + writeSpy.deletes).toBe(0);
   });
 });
+
+// ─── A sale cannot use shares bought after it (2026-10-14) ──────────────────
+//
+// `reassignClosureLots` is what both REST `/lots/reassign` and MCP
+// `manage_lots(op:"reassign")` call, so this refusal covers both surfaces.
+
+describe("reassignClosureLots — lots bought after the sale", () => {
+  // The sale (2025-06-01) used up lot 1. Lot 2 was bought earlier, lot 3 after.
+  const lotsForSale = () => [
+    liveLotRow({ id: 1, openTxId: 1, openDate: "2025-01-15", costPerShare: 100, qtyRemaining: 0, status: "closed" }),
+    liveLotRow({ id: 2, openDate: "2025-03-01", costPerShare: 120 }),
+    liveLotRow({ id: 3, openTxId: 3, openDate: "2025-07-01", costPerShare: 130 }),
+  ];
+
+  it("refuses a lot bought after the sale, in preview, and writes NOTHING", async () => {
+    writeSpy.results = [[closeTxRow], [sellClosureRow()], lotsForSale()];
+    const res = await reassignClosureLots(
+      "u",
+      { holdingId: 200, closeTxId: 99, perLotQty: [{ lotId: 3, qty: 10 }] },
+      { dryRun: true },
+    );
+    expect(res).toEqual({
+      ok: false,
+      code: "lot_bought_after_sale",
+      lotId: 3,
+      lotOpenDate: "2025-07-01",
+      closeDate: "2025-06-01",
+      alreadyTaken: 0,
+    });
+    expect(writeSpy.inserts + writeSpy.updates + writeSpy.deletes).toBe(0);
+  });
+
+  it("refuses it on commit too, before reversing anything", async () => {
+    writeSpy.results = [[closeTxRow], [sellClosureRow()], lotsForSale()];
+    const res = await reassignClosureLots(
+      "u",
+      { holdingId: 200, closeTxId: 99, perLotQty: [{ lotId: 2, qty: 5 }, { lotId: 3, qty: 5 }] },
+      { dryRun: false, dek: null },
+    );
+    expect(res.ok).toBe(false);
+    if (!res.ok) expect(res.code).toBe("lot_bought_after_sale");
+    expect(writeSpy.inserts + writeSpy.updates + writeSpy.deletes).toBe(0);
+  });
+
+  it("moving shares off a used-up lot onto an earlier one still previews", async () => {
+    writeSpy.results = [[closeTxRow], [sellClosureRow()], lotsForSale()];
+    const res = await reassignClosureLots(
+      "u",
+      { holdingId: 200, closeTxId: 99, perLotQty: [{ lotId: 2, qty: 10 }] },
+      { dryRun: true },
+    );
+    expect(res.ok).toBe(true);
+    if (res.ok) {
+      expect(res.preview.proposedClosures.map((c) => [c.lotId, c.qtyClosed])).toEqual([[2, 10]]);
+      expect(res.preview.openedShortLots).toHaveLength(0);
+      expect(res.preview.realizedGainDeltaByYear["2025"]).toBe(-200); // (150−120)×10 − 500
+    }
+  });
+
+  // Out-of-order leftovers stay fixable: a sale already matched to a later lot
+  // can keep (or lower) that share, but not raise it.
+  it("a later lot the sale already uses may keep its share but not grow it", async () => {
+    const outOfOrderClosures = [
+      sellClosureRow({ id: 1, lotId: 3, qtyClosed: 4, costPerShare: 130, realizedGain: 80 }),
+      sellClosureRow({ id: 2, lotId: 2, qtyClosed: 6, costPerShare: 120, realizedGain: 180 }),
+    ];
+    const lotsNow = () => [
+      liveLotRow({ id: 2, openDate: "2025-03-01", costPerShare: 120, qtyRemaining: 4 }),
+      liveLotRow({ id: 3, openTxId: 3, openDate: "2025-07-01", costPerShare: 130, qtyRemaining: 6 }),
+    ];
+
+    writeSpy.results = [[closeTxRow], outOfOrderClosures, lotsNow()];
+    const lower = await reassignClosureLots(
+      "u",
+      { holdingId: 200, closeTxId: 99, perLotQty: [{ lotId: 3, qty: 2 }, { lotId: 2, qty: 8 }] },
+      { dryRun: true },
+    );
+    expect(lower.ok).toBe(true);
+
+    writeSpy.results = [[closeTxRow], outOfOrderClosures, lotsNow()];
+    const raise = await reassignClosureLots(
+      "u",
+      { holdingId: 200, closeTxId: 99, perLotQty: [{ lotId: 3, qty: 5 }, { lotId: 2, qty: 5 }] },
+      { dryRun: true },
+    );
+    expect(raise).toMatchObject({ ok: false, code: "lot_bought_after_sale", lotId: 3, alreadyTaken: 4 });
+    expect(writeSpy.inserts + writeSpy.updates + writeSpy.deletes).toBe(0);
+  });
+});
+
+describe("reassignErrorMessage — lot_bought_after_sale (REST + MCP wording)", () => {
+  it("names both dates, and the cap when the sale already uses the lot", async () => {
+    const { reassignErrorMessage } = await import("@/lib/portfolio/lots/reassign-errors");
+    const fresh = reassignErrorMessage({
+      ok: false,
+      code: "lot_bought_after_sale",
+      lotId: 2394,
+      lotOpenDate: "2026-06-02",
+      closeDate: "2026-05-02",
+      alreadyTaken: 0,
+    });
+    expect(fresh).toContain("Lot #2394 was bought on 2026-06-02, after this sale on 2026-05-02");
+    expect(fresh).toContain("only use shares bought on or before its date");
+
+    const leftover = reassignErrorMessage({
+      ok: false,
+      code: "lot_bought_after_sale",
+      lotId: 3,
+      lotOpenDate: "2025-07-01",
+      closeDate: "2025-06-01",
+      alreadyTaken: 4,
+    });
+    expect(leftover).toContain("already takes 4 shares");
+    expect(leftover).toContain("cannot take more");
+  });
+});

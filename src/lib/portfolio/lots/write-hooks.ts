@@ -62,6 +62,7 @@ import {
   type AllocPlan,
   type AllocSpec,
 } from "./allocate";
+import { findLotBoughtAfterSale } from "./sale-lot-choices";
 import type {
   CashLegHint,
   HoldingLot,
@@ -1353,7 +1354,17 @@ export type ReassignError =
   | { ok: false; code: "no_closures" }
   | { ok: false; code: "not_reassignable"; closeKind: string }
   | { ok: false; code: "qty_mismatch"; expected: number; got: number }
-  | { ok: false; code: "lot_not_in_scope"; lotId: number };
+  | { ok: false; code: "lot_not_in_scope"; lotId: number }
+  | {
+      ok: false;
+      code: "lot_bought_after_sale";
+      lotId: number;
+      lotOpenDate: string;
+      closeDate: string;
+      /** What the sale already takes from the lot (an out-of-order
+       *  leftover): the most it may keep. 0 for a lot it never used. */
+      alreadyTaken: number;
+    };
 
 export type ReassignOutcome =
   | ({ ok: true } & ReassignResult)
@@ -1367,7 +1378,11 @@ const REASSIGN_EPS = 1e-6;
  * `perLotQty` is the user's chosen allocation; Σ qty MUST equal the
  * closure's total qty (STRICT — else `{ ok:false, code:"qty_mismatch" }`,
  * no write). Every named lot must belong to the same (holding, account) as
- * the close-tx (else `{ ok:false, code:"lot_not_in_scope" }`).
+ * the close-tx (else `{ ok:false, code:"lot_not_in_scope" }`), and a sale
+ * can only use shares bought on or before its date (else
+ * `{ ok:false, code:"lot_bought_after_sale" }`). A lot bought later that the
+ * sale ALREADY uses (trades entered out of date order) may keep up to what it
+ * takes today, so that closure stays fixable; rule in `sale-lot-choices.ts`.
  */
 export async function reassignClosureLots(
   userId: string,
@@ -1464,6 +1479,25 @@ export async function reassignClosureLots(
     if (!lotsInScope.has(sel.lotId)) {
       return { ok: false, code: "lot_not_in_scope", lotId: sel.lotId };
     }
+  }
+
+  // 4b. No shares bought after the sale. Only NEW choices are refused: a
+  //     later lot the sale already uses keeps up to what it takes today.
+  const laterLot = findLotBoughtAfterSale({
+    closeDate: originalClosures[0].closeDate,
+    lots: [...lotsInScope.values()],
+    closures: originalClosures,
+    perLotQty,
+  });
+  if (laterLot) {
+    return {
+      ok: false,
+      code: "lot_bought_after_sale",
+      lotId: laterLot.lotId,
+      lotOpenDate: laterLot.lotOpenDate,
+      closeDate: laterLot.closeDate,
+      alreadyTaken: laterLot.alreadyTaken,
+    };
   }
 
   // 5. Post-reversal inventory: restore the qty THIS close-tx's closures

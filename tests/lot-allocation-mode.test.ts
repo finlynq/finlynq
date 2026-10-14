@@ -261,6 +261,14 @@ describe("MCP manage_lots", () => {
     expect(mcp).toContain("const dryRun = args.preview !== false");
   });
 
+  it("refuses a reassignment with the web route's own wording (incl. a lot bought after the sale)", () => {
+    expect(mcp).toContain("err(reassignErrorMessage(result))");
+    expect(code("src/app/api/portfolio/holdings/[holdingId]/lots/reassign/route.ts")).toContain(
+      'case "lot_bought_after_sale":',
+    );
+    expect(code("src/lib/portfolio/lots/write-hooks.ts")).toContain("findLotBoughtAfterSale(");
+  });
+
   it("refuses a rebuild without an explicit confirmation, before touching anything", () => {
     const start = mcp.indexOf("async function opRebuild");
     const guard = mcp.indexOf("args.confirm_reset !== true", start);

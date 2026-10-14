@@ -16,6 +16,9 @@
  *   - every named lot must belong to the same (holding, account) as the
  *     close-tx (same-account-only) → 400 lot_not_in_scope.
  *   - the closure must be a plain SELL → 400 not_reassignable.
+ *   - a sale can only use shares bought on or before its date → 400
+ *     lot_bought_after_sale. A later lot the sale ALREADY uses (trades
+ *     entered out of date order) may keep up to what it takes today.
  *
  * Only the reassigned closure's realized gain restates; sibling closures stay
  * byte-identical. Position qty stays live SUM(quantity) — only lot/closure
@@ -88,6 +91,18 @@ function mapReassignError(err: ReassignError): NextResponse {
           error: reassignErrorMessage(err),
           code: err.code,
           lotId: err.lotId,
+        },
+        { status: 400 },
+      );
+    case "lot_bought_after_sale":
+      return NextResponse.json(
+        {
+          error: reassignErrorMessage(err),
+          code: err.code,
+          lotId: err.lotId,
+          lotOpenDate: err.lotOpenDate,
+          closeDate: err.closeDate,
+          alreadyTaken: err.alreadyTaken,
         },
         { status: 400 },
       );

@@ -152,7 +152,7 @@ export function registerLotsTools(server: McpServer, ctx: PgToolContext) {
   registerManageTool(
     server,
     "manage_lots",
-    "Manage tax lots and the cost-basis method; `op`: status, set_mode, list, reassign, rebuild. status: which method the user is on (simple average of every purchase, or advanced lot allocation) and whether every position has lots. set_mode: switch method (`advanced` true/false); lots and hand-made matching are kept either way. list: a holding's open lots (the lot-based cost basis) and every sale with the lot it was matched to. reassign: change which lots ONE sale consumed; previews unless preview:false; quantities must total the sale; same account only. rebuild: replay a position's trades in date order, first in first out; resets hand-made matching for that position, so it needs confirm_reset:true. No op changes a transaction. Find holding ids with get_portfolio_analysis.",
+    "Manage tax lots and the cost-basis method; `op`: status, set_mode, list, reassign, rebuild. status: which method the user is on (simple average of every purchase, or advanced lot allocation) and whether every position has lots. set_mode: switch method (`advanced` true/false); lots and hand-made matching are kept either way. list: a holding's open lots (the lot-based cost basis) and every sale with the lot it was matched to. reassign: change which lots ONE sale consumed; previews unless preview:false; quantities must total the sale; same account only; only lots bought on or before the sale date. rebuild: replay a position's trades in date order, first in first out; resets hand-made matching for that position, so it needs confirm_reset:true. No op changes a transaction. Find holding ids with get_portfolio_analysis.",
     z.discriminatedUnion("op", [
       z.object({
         op: z.literal("status").describe("Which cost-basis method the user is on, and lot coverage."),
@@ -173,7 +173,7 @@ export function registerLotsTools(server: McpServer, ctx: PgToolContext) {
         per_lot_qty: z
           .array(
             z.object({
-              lot_id: z.number().int().positive().describe("A lot of the same holding and account (`lotId` from op:'list')"),
+              lot_id: z.number().int().positive().describe("A lot of the same holding and account, bought on or before the sale date (`lotId` from op:'list'). A lot bought later is refused, except one the sale already uses, which may keep at most what it takes now"),
               qty: z.number().positive().describe("Shares of the sale to take from that lot"),
             }),
           )
