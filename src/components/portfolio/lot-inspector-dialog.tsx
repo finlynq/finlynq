@@ -20,6 +20,12 @@
  * the sale that still hold shares. It used to list only lots still open, so a
  * sale that used up its lot kept those shares in the total with no field to
  * lower them, and could never be re-matched.
+ *
+ * A sale that sold more than was held opened a short for the rest: it gets a
+ * "Sold short" row (sent as lot 0) and the total is the whole sale, so saving
+ * opens the short again. Once a later buy has closed some of that short the
+ * editor explains and offers nothing to save; the server refuses it too
+ * (`short_already_covered`), since re-matching would erase that closing.
  */
 
 "use client";
@@ -37,7 +43,9 @@ import { Input } from "@/components/ui/input";
 import { ConfirmDialog } from "@/components/ui/confirm-dialog";
 import { LotAllocationMatrix } from "@/components/portfolio/lot-allocation-matrix";
 import { formatCurrency } from "@/lib/currency";
-import { saleLotChoices } from "@/lib/portfolio/lots/sale-lot-choices";
+import { saleLotChoices, shortOpenedBySale } from "@/lib/portfolio/lots/sale-lot-choices";
+import { SHORT_LOT_ID } from "@/lib/portfolio/lots/allocate";
+import { coveredShortMessage } from "@/lib/portfolio/lots/reassign-errors";
 
 interface LotRow {
   id: number;
@@ -199,6 +207,13 @@ export function LotInspectorDialog({
     });
   }, [lots, closuresByTx, editTxId, editCloseDate]);
 
+  // The short this sale opened for the part no lot covered (sold short).
+  const editShort = useMemo(
+    () => (editTxId == null ? { qty: 0, covered: 0 } : shortOpenedBySale(lots, editTxId)),
+    [lots, editTxId],
+  );
+  const shortCovered = editShort.covered > EPS;
+
   // A lot bought after the sale may keep only what the sale already takes
   // from it; the server refuses more, so don't offer to send it.
   const laterLotOverLimit = editChoices.some(
@@ -212,6 +227,8 @@ export function LotInspectorDialog({
       const next = (seed[c.lotId] ? Number(seed[c.lotId]) : 0) + c.qtyClosed;
       seed[c.lotId] = String(Math.round(next * 1e6) / 1e6);
     }
+    const soldShort = shortOpenedBySale(lots, closeTxId).qty;
+    if (soldShort > EPS) seed[SHORT_LOT_ID] = String(soldShort);
     setEditTxId(closeTxId);
     setAlloc(seed);
     setPreview(null);
@@ -225,10 +242,12 @@ export function LotInspectorDialog({
     setReassignError(null);
   }
 
-  const closureTotalForEdit = useMemo(() => {
+  // The whole sale: shares taken from lots + any sold short.
+  const saleTotalForEdit = useMemo(() => {
     if (editTxId == null) return 0;
-    return (closuresByTx.get(editTxId) ?? []).reduce((s, c) => s + c.qtyClosed, 0);
-  }, [editTxId, closuresByTx]);
+    const fromLots = (closuresByTx.get(editTxId) ?? []).reduce((s, c) => s + c.qtyClosed, 0);
+    return Math.round((fromLots + editShort.qty) * 1e6) / 1e6;
+  }, [editTxId, closuresByTx, editShort]);
 
   const allocTotal = useMemo(
     () =>
@@ -239,7 +258,7 @@ export function LotInspectorDialog({
     [alloc],
   );
 
-  const sumMatches = Math.abs(allocTotal - closureTotalForEdit) <= EPS;
+  const sumMatches = Math.abs(allocTotal - saleTotalForEdit) <= EPS;
 
   function buildPerLotQty() {
     return Object.entries(alloc)
@@ -436,18 +455,25 @@ export function LotInspectorDialog({
               <span
                 className={`text-xs font-mono ${sumMatches ? "text-emerald-600 dark:text-emerald-400" : "text-rose-600 dark:text-rose-400"}`}
               >
-                {allocTotal.toLocaleString()} / {closureTotalForEdit.toLocaleString()} sh
+                {allocTotal.toLocaleString()} / {saleTotalForEdit.toLocaleString()} sh
               </span>
             </div>
             <p className="text-xs text-muted-foreground">
               Choose how many shares to close from each lot. The total must
-              equal {closureTotalForEdit.toLocaleString()} shares. Only lots
+              equal {saleTotalForEdit.toLocaleString()} shares. Only lots
               bought on or before the sale date are offered. Requesting more
               than a lot holds opens a short for the overflow.
             </p>
 
+            {shortCovered && (
+              <div className="rounded-md border border-amber-300 dark:border-amber-700 bg-amber-50/60 dark:bg-amber-950/30 px-3 py-2 text-xs text-amber-800 dark:text-amber-300">
+                {coveredShortMessage({ shortQty: editShort.qty, coveredQty: editShort.covered })}
+              </div>
+            )}
+
+            {!shortCovered && (
             <div className="space-y-1.5 max-h-[40vh] overflow-y-auto">
-              {editChoices.length === 0 && (
+              {editChoices.length === 0 && editShort.qty <= EPS && (
                 <p className="text-xs text-muted-foreground">
                   No lots bought on or before this sale hold shares, so the
                   closure will open a short.
@@ -492,7 +518,34 @@ export function LotInspectorDialog({
                   )}
                 </div>
               ))}
+              {editShort.qty > EPS && (
+                <div
+                  data-testid="reassign-lot-short"
+                  className="flex items-center justify-between gap-3 rounded-md border border-rose-300/70 dark:border-rose-800/70 px-3 py-1.5 text-xs"
+                >
+                  <span className="flex flex-wrap items-center gap-x-2 gap-y-0.5">
+                    <span className="font-medium text-rose-700 dark:text-rose-400">Sold short</span>
+                    <span className="text-muted-foreground">
+                      beyond the shares held · this sale sold {editShort.qty.toLocaleString()} sh short now
+                    </span>
+                  </span>
+                  <Input
+                    type="number"
+                    min={0}
+                    step="any"
+                    aria-label="Shares sold short"
+                    className="h-7 w-24 shrink-0 text-right"
+                    value={alloc[SHORT_LOT_ID] ?? ""}
+                    onChange={(e) => {
+                      const v = e.target.value;
+                      setPreview(null);
+                      setAlloc((a) => ({ ...a, [SHORT_LOT_ID]: v }));
+                    }}
+                  />
+                </div>
+              )}
             </div>
+            )}
 
             {reassignError && (
               <p className="text-xs text-rose-600 dark:text-rose-400">{reassignError}</p>
@@ -531,14 +584,14 @@ export function LotInspectorDialog({
                 variant="outline"
                 size="sm"
                 onClick={fetchPreview}
-                disabled={!sumMatches || laterLotOverLimit || previewBusy || reassignBusy}
+                disabled={!sumMatches || laterLotOverLimit || shortCovered || previewBusy || reassignBusy}
               >
                 {previewBusy ? "Previewing…" : "Preview"}
               </Button>
               <Button
                 size="sm"
                 onClick={commitReassign}
-                disabled={!sumMatches || laterLotOverLimit || reassignBusy}
+                disabled={!sumMatches || laterLotOverLimit || shortCovered || reassignBusy}
               >
                 {reassignBusy ? "Saving…" : "Reassign"}
               </Button>

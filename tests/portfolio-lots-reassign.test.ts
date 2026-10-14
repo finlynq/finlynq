@@ -508,3 +508,55 @@ describe("reassignErrorMessage — lot_bought_after_sale (REST + MCP wording)", 
     expect(leftover).toContain("cannot take more");
   });
 });
+
+// ─── A sale that sold more than was held (2026-10-14) ───────────────────────
+//
+// The rest of that sale opened a short (a lot with openTxId = the sale). The
+// total to reach is the whole sale, the short part entered as lot 0; once a
+// later buy has closed any of the short, the sale is refused. The DB-backed
+// versions (real cascade) are in tests/portfolio-lots-shorts.test.ts.
+
+describe("reassignClosureLots — a sale that also sold short", () => {
+  // Sale tx 99 took 10 from lot 1 and sold 5 more short (lot 50).
+  const longLot = () => liveLotRow({ id: 1, openTxId: 1, openDate: "2024-01-15", costPerShare: 100, qtyRemaining: 0, status: "closed" });
+  const shortLot = (qtyRemaining: number) =>
+    liveLotRow({ id: 50, openTxId: 99, openDate: "2025-06-01", side: "short", qtyOriginal: 5, qtyRemaining, costPerShare: 150, status: qtyRemaining > 0 ? "open" : "closed" });
+
+  it("refuses when a later buy has closed part of the short, in preview and on save, writing nothing", async () => {
+    for (const dryRun of [true, false]) {
+      writeSpy.results = [[closeTxRow], [sellClosureRow()], [longLot(), shortLot(2)]];
+      const res = await reassignClosureLots(
+        "u",
+        { holdingId: 200, closeTxId: 99, perLotQty: [{ lotId: 1, qty: 10 }, { lotId: 0, qty: 5 }] },
+        { dryRun, dek: null },
+      );
+      expect(res).toEqual({ ok: false, code: "short_already_covered", closeTxId: 99, shortQty: 5, coveredQty: 3 });
+    }
+    expect(writeSpy.inserts + writeSpy.updates + writeSpy.deletes).toBe(0);
+  });
+
+  it("an open short counts toward the total: the long part alone is refused", async () => {
+    writeSpy.results = [[closeTxRow], [sellClosureRow()], [longLot(), shortLot(5)]];
+    const res = await reassignClosureLots(
+      "u",
+      { holdingId: 200, closeTxId: 99, perLotQty: [{ lotId: 1, qty: 10 }] },
+      { dryRun: true },
+    );
+    expect(res).toEqual({ ok: false, code: "qty_mismatch", expected: 15, got: 10, soldShort: 5 });
+  });
+
+  it("lot 0 is the sold-short part: accepted, and previewed as the short it reopens", async () => {
+    writeSpy.results = [[closeTxRow], [sellClosureRow()], [longLot(), shortLot(5)]];
+    const res = await reassignClosureLots(
+      "u",
+      { holdingId: 200, closeTxId: 99, perLotQty: [{ lotId: 1, qty: 10 }, { lotId: 0, qty: 5 }] },
+      { dryRun: true },
+    );
+    expect(res.ok).toBe(true);
+    if (res.ok) {
+      expect(res.preview.openedShortLots.map((s) => s.qty)).toEqual([5]);
+      expect(res.preview.realizedGainDeltaByYear).toEqual({});
+    }
+    expect(writeSpy.inserts + writeSpy.updates + writeSpy.deletes).toBe(0);
+  });
+});

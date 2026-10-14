@@ -13,6 +13,7 @@ import {
   findLotBoughtAfterSale,
   saleLotChoices,
   sharesTakenByLot,
+  shortOpenedBySale,
   type ChoosableLot,
 } from "@/lib/portfolio/lots/sale-lot-choices";
 
@@ -142,5 +143,35 @@ describe("findLotBoughtAfterSale", () => {
 
   it("ignores zero quantities and lots it does not know", () => {
     expect(findLotBoughtAfterSale({ ...base, perLotQty: [{ lotId: 3, qty: 0 }, { lotId: 999, qty: 100 }] })).toBeNull();
+  });
+});
+
+describe("shortOpenedBySale", () => {
+  const short = (openTxId: number, qtyOriginal: number, qtyRemaining: number) => ({
+    openTxId,
+    side: "short",
+    qtyOriginal,
+    qtyRemaining,
+  });
+
+  it("reports what the sale sold short and how much a later buy has closed", () => {
+    const lots = [
+      { openTxId: 1, side: "long", qtyOriginal: 100, qtyRemaining: 0 },
+      short(500, 50, 20),
+      short(700, 10, 10),
+    ];
+    expect(shortOpenedBySale(lots, 500)).toEqual({ qty: 50, covered: 30 });
+    expect(shortOpenedBySale(lots, 700)).toEqual({ qty: 10, covered: 0 });
+  });
+
+  it("is zero for a sale that opened no short (long lots it opened don't count)", () => {
+    expect(shortOpenedBySale([{ openTxId: 500, side: "long", qtyOriginal: 5, qtyRemaining: 5 }], 500)).toEqual({
+      qty: 0,
+      covered: 0,
+    });
+  });
+
+  it("counts a fully closed short as fully covered", () => {
+    expect(shortOpenedBySale([short(500, 50, 0)], 500)).toEqual({ qty: 50, covered: 50 });
   });
 });

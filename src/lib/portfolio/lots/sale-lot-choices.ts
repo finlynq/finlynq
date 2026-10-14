@@ -21,6 +21,14 @@
  * but it can only keep up to what it already takes, never more. This is the
  * one place the web is stricter than the mobile mirror, which offers such a
  * lot its full `remaining + taken`; the server refuses the excess either way.
+ *
+ * A sale that sold more than was held opened a SHORT lot for the rest
+ * (`openTxId` = the sale). That part has no lot to take from: it is entered
+ * as allocate.ts `SHORT_LOT_ID` (0), the whole-ticker matrix's convention, and the total
+ * a re-match must reach is the WHOLE sale (from lots + sold short). Once a
+ * later buy has closed some of that short, the sale can't be re-matched:
+ * reversing it deletes the short lot and, by cascade, that buy's closing of
+ * it, which nothing replays. `shortOpenedBySale` reports both.
  */
 
 /** Share counts are compared to this tolerance (the reassign route's own). */
@@ -126,4 +134,26 @@ export function findLotBoughtAfterSale(args: {
     }
   }
   return null;
+}
+
+export interface ShortOpenedBySale {
+  /** Shares the sale sold beyond what was held (its short lots' original size). */
+  qty: number;
+  /** How many of those a later buy has already closed. */
+  covered: number;
+}
+
+/** The short a sale opened for the part no lot covered (zeros when none). */
+export function shortOpenedBySale(
+  lots: readonly { openTxId: number; side: string; qtyOriginal: number; qtyRemaining: number }[],
+  closeTxId: number,
+): ShortOpenedBySale {
+  let qty = 0;
+  let covered = 0;
+  for (const l of lots) {
+    if (l.side !== "short" || l.openTxId !== closeTxId) continue;
+    qty += l.qtyOriginal;
+    covered += Math.max(0, l.qtyOriginal - l.qtyRemaining);
+  }
+  return { qty: Math.round(qty * 1e6) / 1e6, covered: Math.round(covered * 1e6) / 1e6 };
 }

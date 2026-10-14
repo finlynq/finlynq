@@ -127,3 +127,70 @@ describe("LotInspectorDialog — re-matching a sale", () => {
     });
   });
 });
+
+// ─── A sale that sold more than was held (2026-10-14) ───────────────────────
+// SHORTTEST shape: lot 2395 (100 @ 10) used up by sale 89379, which sold 150;
+// the other 50 opened short lot 2397 (opened BY the sale). The total is the
+// whole sale, and the short part has its own "Sold short" row (sent as lot 0).
+
+function shortFixture(shortRemaining: number) {
+  return {
+    lots: [
+      lotRow({ id: 2395, openTxId: 89377, openDate: "2026-03-02", costPerShare: 10, status: "closed", qtyRemaining: 0 }),
+      lotRow({
+        id: 2397, openTxId: 89379, openDate: "2026-05-02", side: "short", costPerShare: 25,
+        qtyOriginal: 50, qtyRemaining: shortRemaining, status: shortRemaining > 0 ? "open" : "closed",
+      }),
+    ],
+    closures: [
+      { ...CLOSURES[0], id: 9, lotId: 2395, closeTxId: 89379, closeDate: "2026-05-02", realizedGain: 1500 },
+      ...(shortRemaining < 50
+        ? [{ ...CLOSURES[0], id: 10, lotId: 2397, closeTxId: 89381, closeDate: "2026-06-02", qtyClosed: 50 - shortRemaining, closeKind: "short_close", realizedGain: 500 }]
+        : []),
+    ],
+  };
+}
+
+async function openShortEditor(shortRemaining: number) {
+  const data = shortFixture(shortRemaining);
+  const fetchMock = vi.fn(async (_url: string, init?: RequestInit) =>
+    init?.method === "POST"
+      ? {
+          ok: true,
+          json: async () => ({
+            preview: { proposedClosures: [], openedShortLots: [{ qty: 50, currency: "USD" }], realizedGainDeltaByYear: {} },
+          }),
+        }
+      : { ok: true, json: async () => data },
+  );
+  vi.stubGlobal("fetch", fetchMock);
+  render(<LotInspectorDialog open onOpenChange={() => {}} holdingId={1072} accountId={1164} holdingName="SHORTTEST" />);
+  fireEvent.click((await screen.findAllByText("Edit allocation"))[0]);
+  return fetchMock;
+}
+
+describe("LotInspectorDialog — a sale that sold short", () => {
+  it("counts the short in the total and sends it as lot 0, so saving keeps it", async () => {
+    const fetchMock = await openShortEditor(50);
+    expect(screen.getByText("150 / 150 sh")).toBeTruthy();
+    expect(screen.getByLabelText("Shares sold short")).toHaveProperty("value", "50");
+    const preview = screen.getByText("Preview").closest("button")!;
+    expect(preview.disabled).toBe(false);
+
+    fireEvent.click(preview);
+    expect(await screen.findByText(/Opens 1 short lot/)).toBeTruthy();
+    const post = fetchMock.mock.calls.find(([, init]) => (init as RequestInit | undefined)?.method === "POST");
+    expect(JSON.parse(String((post![1] as RequestInit).body)).perLotQty).toEqual([
+      { lotId: 0, qty: 50 },
+      { lotId: 2395, qty: 100 },
+    ]);
+  });
+
+  it("says why, and offers nothing to save, once a later buy closed part of the short", async () => {
+    await openShortEditor(20);
+    expect(screen.getByText(/a later purchase has already closed 30 of them/)).toBeTruthy();
+    expect(screen.queryByLabelText("Shares sold short")).toBeNull();
+    expect(screen.getByText("Preview").closest("button")!.disabled).toBe(true);
+    expect(screen.getByText("Reassign").closest("button")!.disabled).toBe(true);
+  });
+});
