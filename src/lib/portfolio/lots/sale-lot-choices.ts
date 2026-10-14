@@ -18,9 +18,8 @@
  * One exception to the date rule: trades entered out of date order can leave a
  * sale already matched to a lot bought AFTER it (the inspector's
  * `openAfterClose` warning). That lot stays listed so the sale can be fixed,
- * but it can only keep up to what it already takes, never more. This is the
- * one place the web is stricter than the mobile mirror, which offers such a
- * lot its full `remaining + taken`; the server refuses the excess either way.
+ * but it can only keep up to what it already takes, never more (the mobile
+ * mirror applies the same cap since mobile 1.0.24).
  *
  * A sale that sold more than was held opened a SHORT lot for the rest
  * (`openTxId` = the sale). That part has no lot to take from: it is entered
