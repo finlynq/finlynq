@@ -19,6 +19,7 @@ import { verifyOwnership, OwnershipError } from "@/lib/verify-ownership";
 import { todayISO } from "@/lib/utils/date";
 import { getDisplayCurrency, getRateMap, convertWithRateMap } from "@/lib/fx-service";
 import { pickRecordCurrency } from "@/lib/fx/record-currency";
+import { loanAccountRefusal } from "@/lib/loans/linked-account";
 // Issue #213 — shared YYYY-MM-DD validator (regex + leap-year/Feb-30 round-trip).
 import { ymdDate, parseYmdSafe } from "../../../../mcp-server/lib/date-validators";
 
@@ -340,6 +341,10 @@ export async function POST(request: NextRequest) {
     if (d.accountId != null) {
       await verifyOwnership(userId, { accountIds: [d.accountId] });
     }
+    // Interest is booked on the linked account, and its balance becomes the
+    // loan's: an investment account can do neither.
+    const accountRefusal = await loanAccountRefusal(db, userId, d.accountId);
+    if (accountRefusal) return NextResponse.json({ error: accountRefusal }, { status: 400 });
     // FINLYNQ-136: reject non-amortizing inputs (payment below first period's
     // interest, residual >= principal) at create time with a clear 400.
     buildLoanSchedule({
@@ -428,6 +433,9 @@ export async function PUT(request: NextRequest) {
       .where(and(eq(schema.loans.id, id), eq(schema.loans.userId, userId)))
       .all();
     if (!existing.length) return NextResponse.json({ error: "Not found" }, { status: 404 });
+    // Only a NEW link is checked, so a loan already on such an account stays editable.
+    const accountRefusal = await loanAccountRefusal(db, userId, data.accountId, existing[0].accountId);
+    if (accountRefusal) return NextResponse.json({ error: accountRefusal }, { status: 400 });
     const merged = { ...existing[0], ...data };
     if (parseYmdSafe(merged.startDate) !== null) {
       buildLoanSchedule({

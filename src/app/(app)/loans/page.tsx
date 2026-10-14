@@ -89,7 +89,7 @@ function equivalentTermMonths(loan: Loan): number {
   return Math.max(1, Math.round((loan.periodsRemaining / perYear) * 12));
 }
 type WhatIf = { extraPayment: number; monthsSaved: number; interestSaved: number; newPayoffDate: string; totalInterest: number };
-type Account = { id: number; name: string; currency?: string | null };
+type Account = { id: number; name: string; currency?: string | null; isInvestment?: boolean };
 
 const LOAN_TYPE_COLORS: Record<string, string> = {
   mortgage: "border-l-indigo-500",
@@ -608,7 +608,12 @@ function LoansPageContent() {
                     setForm((f) => ({ ...f, accountId: v, currency: acct?.currency || f.currency }));
                   }}
                   items={sortAccount(
-                    accounts.map((a): ComboboxItemShape => ({ value: String(a.id), label: a.name })),
+                    accounts
+                      // Interest is booked on the linked account and its balance becomes the
+                      // loan's, which an investment account can't do (the server refuses it too).
+                      // A loan already on one keeps it listed so the form still shows it.
+                      .filter((a) => a.isInvestment !== true || a.id === editingLoan?.accountId)
+                      .map((a): ComboboxItemShape => ({ value: String(a.id), label: a.name })),
                     (a) => Number(a.value),
                     (a, z) => (a.label ?? "").localeCompare(z.label ?? ""),
                   )}

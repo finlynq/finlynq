@@ -46,6 +46,7 @@ import {
   convertWithRateMap,
 } from "../../src/lib/fx-service";
 import { pickRecordCurrency } from "../../src/lib/fx/record-currency";
+import { loanAccountRefusal } from "../../src/lib/loans/linked-account";
 import {
   ymdDate,
   parseYmdSafe,
@@ -256,6 +257,10 @@ export function registerLoansTools(server: McpServer, ctx: PgToolContext) {
         if ("report" in out) return out.report;
         accountId = out.id;
       }
+      // Interest is booked on the linked account, and its balance becomes the
+      // loan's: an investment account can do neither (same rule as REST).
+      const accountRefusal = await loanAccountRefusal(db, userId, accountId);
+      if (accountRefusal) return err(accountRefusal);
       const pmt = payment_amount ?? min_payment ?? null;
       // FINLYNQ-136: refuse non-amortizing inputs (no term AND no payment,
       // payment below period interest, residual >= principal) with a clear error.
@@ -326,7 +331,8 @@ export function registerLoansTools(server: McpServer, ctx: PgToolContext) {
       const { id, name, type, principal, annual_rate, term_months, start_date, payment_amount, payment_frequency, extra_payment, residual_value, account, account_id, currency, note, interest_method, interest_amount } = args;
       const existing = await q(db, sql`
         SELECT id, principal, annual_rate, term_months, start_date, payment_amount,
-               payment_frequency, extra_payment, residual_value, manual_schedule, interest_overrides, interest_method, interest_amount
+               payment_frequency, extra_payment, residual_value, manual_schedule, interest_overrides, interest_method, interest_amount,
+               account_id
         FROM loans WHERE id = ${id} AND user_id = ${userId}
       `);
       if (!existing.length) return err(`Loan #${id} not found`);
@@ -380,6 +386,15 @@ export function registerLoansTools(server: McpServer, ctx: PgToolContext) {
           accountIdUpdate = out.id;
         }
       }
+
+      // Only a NEW link is checked, so a loan already on such an account stays editable.
+      const accountRefusal = await loanAccountRefusal(
+        db,
+        userId,
+        accountIdUpdate,
+        cur.account_id == null ? null : Number(cur.account_id),
+      );
+      if (accountRefusal) return err(accountRefusal);
 
       // Stream D Phase 4 — plaintext name dropped.
       const updates: ReturnType<typeof sql>[] = [];
