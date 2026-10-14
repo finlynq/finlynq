@@ -19,6 +19,8 @@ import { isLotsEnabledForUser, loadMetricsForUser } from "@/lib/portfolio/lots/r
 import { lotCostInCurrency } from "@/lib/portfolio/cost-metrics";
 import { listRealizedGainClosures, augmentWithBaseCurrency } from "@/lib/portfolio/realized-gains";
 import { round2 } from "@/lib/utils/number";
+import { isDustQuantity } from "@/lib/portfolio/dust";
+import { holdingDescription } from "@/app/(app)/portfolio/_components/holding-description";
 import { withOp } from "@/lib/diagnostics/op-context";
 
 export function GET(request: NextRequest) {
@@ -776,13 +778,21 @@ async function handleGet(request: NextRequest) {
     // Get quantity and cost metrics from transactions. FK-keyed lookup â€”
     // independent of holding name, so renames don't orphan transactions.
     const txData = metricsByHoldingId.get(h.id) ?? null;
-    const quantity = txData?.qty ?? null;
+    // A rounding leftover (a few hundred-thousandths of a unit after selling
+    // everything, or an overshoot as small) is a CLOSED position: quantity 0,
+    // no cost basis, so it never shows as "-0" / Short with a nonsense average
+    // cost. The lot path can still carry the full original cost here when its
+    // lots were left behind by an old rebuild. Rule + measurements: dust.ts.
+    const rawQuantity = txData?.qty ?? null;
+    const isDust = rawQuantity != null && rawQuantity !== 0 &&
+      isDustQuantity(rawQuantity, { price, isCash: assetType === "cash" });
+    const quantity = isDust ? 0 : rawQuantity;
     // avgCostPerShare / totalCostBasis are `let` because a fiat cash sleeve
     // pegs them to $1 / the balance below (FINLYNQ-277): a same-currency cash
     // position has no in-currency unrealized gain, so its cost basis MUST equal
     // its market value regardless of any lot-engine drift.
-    let avgCostPerShare = txData?.avgCostPerShare ?? null;
-    let totalCostBasis = txData?.totalCostBasis ?? null;
+    let avgCostPerShare = isDust ? null : txData?.avgCostPerShare ?? null;
+    let totalCostBasis = isDust ? null : txData?.totalCostBasis ?? null;
     const lifetimeCostBasis = txData?.lifetimeCostBasis ?? null;
     const realizedGain = txData?.realizedGain ?? null;
     const dividendsReceived = txData?.dividendsReceived ?? null;
@@ -1423,12 +1433,22 @@ async function handleGet(request: NextRequest) {
       byHoldingMap.set(bucketKey, acc);
     }
     if (h.accountId != null) acc.accountIds.add(h.accountId);
-    // FINLYNQ-174: carry the first member with a real quote long name up to
-    // the canonical row (all members of an `eq:`/`crypto:` key share a
-    // ticker, so any member's quoteName describes the whole row). When the
-    // security name already seeded `description` (FINLYNQ-194), it stays — the
-    // user rename wins over Yahoo quoteName.
-    if (acc.description == null && h.quoteName) acc.description = h.quoteName;
+    // FINLYNQ-174: carry the first member with a real description up to the
+    // canonical row (all members of an `eq:`/`crypto:` key share a ticker, so
+    // any member's description fits the whole row). When the security name
+    // already seeded `description` (FINLYNQ-194), it stays — the user rename
+    // wins. Otherwise fall back exactly as Holdings by Account does: the
+    // security's name, then Yahoo's long name, then the stored position name
+    // when it is more than the ticker. Yahoo's name only arrives on a LIVE
+    // fetch, so on a warm price cache this row used to read "--" while By
+    // Account showed the fund's name (2026-10-14).
+    if (acc.description == null) {
+      acc.description = holdingDescription({
+        quoteName: h.securityName,
+        name: holdingDescription({ quoteName: h.quoteName, name: h.name, symbol: h.symbol }),
+        symbol: h.symbol,
+      });
+    }
     if (h.quantity != null) acc.totalQty += h.quantity;
     acc.marketValueDisplay += h.marketValueDisplay ?? 0;
     acc.unrealizedGainDisplay += h.unrealizedGainDisplay ?? 0;

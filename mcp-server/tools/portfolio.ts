@@ -24,7 +24,7 @@ import {
   type PgToolContext,
 } from "./_shared";
 import { aggregateHoldings } from "../../src/lib/portfolio/aggregate-holdings";
-import { combineLotCost, costMetrics, type CostBasisMethod } from "../../src/lib/portfolio/cost-metrics";
+import { closeDustPosition, combineLotCost, costMetrics, type CostBasisMethod } from "../../src/lib/portfolio/cost-metrics";
 import { loadLotCostByHolding } from "../../src/lib/portfolio/lots/cost-basis";
 import { resolveTickerInput } from "../../src/lib/securities/isin-resolve";
 import { rememberSecurityIsin } from "../../src/lib/securities/isin-store";
@@ -1483,10 +1483,14 @@ export function registerPortfolioTools(server: McpServer, ctx: PgToolContext) {
         // net_quantity == buyQty - sellQty (no-op). Mirrors
         // get_portfolio_performance_v2 + holdings-value.ts. avgCost/realizedGain
         // stay on the skip-aware buy/sell tallies.
-        const remainingQty = Number(m.net_quantity ?? (buyQty - sellQty));
-        const { avgCost, costBasis, realizedGain } = costMetrics(
-          { buyQty, buyAmt, sellQty, sellAmt, remainingQty },
-          m.holding_id != null ? lotCost?.get(Number(m.holding_id)) : undefined,
+        const netQty = Number(m.net_quantity ?? (buyQty - sellQty));
+        const { remainingQty, avgCost, costBasis, realizedGain } = closeDustPosition(
+          netQty,
+          costMetrics(
+            { buyQty, buyAmt, sellQty, sellAmt, remainingQty: netQty },
+            m.holding_id != null ? lotCost?.get(Number(m.holding_id)) : undefined,
+          ),
+          buyQty > 0 ? buyAmt / buyQty : null,
         );
         const totalReturn = realizedGain + divs; // unrealized excluded (no live prices in MCP)
         const fpDate = m.first_purchase ?? null;
@@ -1768,10 +1772,14 @@ export function registerPortfolioTools(server: McpServer, ctx: PgToolContext) {
         const sellQty = Number(p.sell_qty ?? 0);
         const sellAmt = Number(p.sell_amount ?? 0);
         const divs = Number(p.dividends ?? 0);
-        const remainingQty = Number(p.net_quantity ?? 0);
-        const { avgCost, costBasis, realizedGain } = costMetrics(
-          { buyQty, buyAmt, sellQty, sellAmt, remainingQty },
-          p.holding_id != null ? lotCost?.get(Number(p.holding_id)) : undefined,
+        const netQty = Number(p.net_quantity ?? 0);
+        const { remainingQty, avgCost, costBasis, realizedGain } = closeDustPosition(
+          netQty,
+          costMetrics(
+            { buyQty, buyAmt, sellQty, sellAmt, remainingQty: netQty },
+            p.holding_id != null ? lotCost?.get(Number(p.holding_id)) : undefined,
+          ),
+          buyQty > 0 ? buyAmt / buyQty : null,
         );
         const totalReturn = realizedGain + divs;
         const fpDate = p.first_purchase ?? null;
@@ -2192,8 +2200,8 @@ export function registerPortfolioTools(server: McpServer, ctx: PgToolContext) {
       }
 
       // Position qty = UNSKIPPED net Σ(quantity) — see netQty declaration above.
-      // The simple figures stay on the skip-aware buy/sell tallies.
-      const remainingQty = netQty;
+      // The simple figures stay on the skip-aware buy/sell tallies. A rounding
+      // leftover is closed, as on the Portfolio page (closeDustPosition below).
       // A name can match position rows in several accounts; lot figures are used
       // only when every one of those rows has them.
       const lotCost = await loadLotCostByHolding(userId, dek);
@@ -2206,9 +2214,10 @@ export function registerPortfolioTools(server: McpServer, ctx: PgToolContext) {
       ];
       const analyzedLot = combineLotCost(lotCost, analyzedHoldingIds);
       const costBasisMethod: CostBasisMethod = analyzedLot ? "advanced_lot_allocation" : "simple_average";
-      const { avgCost, costBasis, realizedGain } = costMetrics(
-        { buyQty, buyAmt, sellQty, sellAmt, remainingQty },
-        analyzedLot,
+      const { remainingQty, avgCost, costBasis, realizedGain } = closeDustPosition(
+        netQty,
+        costMetrics({ buyQty, buyAmt, sellQty, sellAmt, remainingQty: netQty }, analyzedLot),
+        buyQty > 0 ? buyAmt / buyQty : null,
       );
       const totalReturn = realizedGain + divAmt; // no live price = no unrealized
       const firstDate = txns[0].date;

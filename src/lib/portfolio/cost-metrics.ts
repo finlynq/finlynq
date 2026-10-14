@@ -9,6 +9,8 @@
  * lot allocation. They all call `costMetrics` now.
  */
 
+import { isDustQuantity } from "./dust";
+
 /** Buy/sell tallies of one holding, as the aggregators already produce them. */
 export type TradeTallies = {
   buyQty: number;
@@ -92,4 +94,21 @@ export function combineLotCost(
     out.realizedGain += lot.realizedGain;
   }
   return out;
+}
+
+/**
+ * A rounding leftover is a closed position (rule in `dust.ts`, the same one
+ * the Portfolio page applies): quantity 0, no cost basis, no average cost.
+ * Realized gain is a flow and stays as computed. The MCP tools have no live
+ * price, so the average purchase price stands in for the value test.
+ */
+export function closeDustPosition(
+  netQty: number,
+  metrics: CostMetrics,
+  avgPurchasePrice: number | null,
+): CostMetrics & { remainingQty: number } {
+  const dust = netQty !== 0 && isDustQuantity(netQty, { price: metrics.avgCost ?? avgPurchasePrice });
+  return dust
+    ? { ...metrics, avgCost: null, costBasis: null, remainingQty: 0 }
+    : { ...metrics, remainingQty: netQty };
 }

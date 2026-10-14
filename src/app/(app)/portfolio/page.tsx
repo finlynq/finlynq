@@ -65,6 +65,8 @@ export default function PortfolioPage() {
   // safe). Default on — empty rows are noise on a value-weighted view.
   // Toggle lives in the holdings table filter bar.
   const [hideEmpty, setHideEmpty] = useState(true);
+  // Same rule, its own switch, for the Holdings by Account card.
+  const [hideEmptyByAccount, setHideEmptyByAccount] = useState(true);
 
   // Issue #25 restructure: top-level All Holdings rows are canonical-
   // holding rollups (one row per ticker / cash sleeve / currency code),
@@ -537,6 +539,8 @@ export default function PortfolioPage() {
         expandedAccounts={expandedAccounts}
         toggleAccount={toggleAccount}
         displayCurrency={displayCurrency}
+        hideEmpty={hideEmptyByAccount}
+        setHideEmpty={setHideEmptyByAccount}
       />
 
       {/* Edit / create holding dialog — wraps the shared
