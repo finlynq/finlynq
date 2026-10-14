@@ -8,7 +8,9 @@ import type { Transaction } from "../../../shared/types";
 import type { TransferEditSeed } from "../lib/transfer-pair";
 
 export type TransactionsStackParamList = {
-  TransactionsList: undefined;
+  // Opened from the Home calendar: show the calendar on that day (`YYYY-MM-DD`)
+  // or month (`YYYY-MM`). Read once, then cleared.
+  TransactionsList: { calendarDay?: string; calendarMonth?: string } | undefined;
   TransactionDetail: { transaction: Transaction };
   // `editTransfer` → edit an existing transfer pair (opened from TransactionDetail).
   AddTransaction: { mode?: "expense" | "income" | "transfer"; editTransfer?: TransferEditSeed } | undefined;

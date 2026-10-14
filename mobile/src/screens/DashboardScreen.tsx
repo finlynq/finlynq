@@ -35,6 +35,7 @@ import type {
 } from "../../../shared/types";
 import type { MoreStackParamList } from "../navigation/MoreStack";
 import type { TransactionsStackParamList } from "../navigation/TransactionsStack";
+import { HomeCalendarCard } from "../components/HomeCalendarCard";
 
 /** Summary tiles use whole units; transaction rows keep cents. */
 function formatWhole(amount: number, currency: string): string {
@@ -186,10 +187,15 @@ export default function DashboardScreen() {
   const [error, setError] = useState<string | null>(null);
   // Drop responses from a superseded fetch (focus refetch racing a pull).
   const fetchSeq = useRef(0);
+  // Bumped by pull-to-refresh so the calendar card reloads with everything else.
+  const [refreshKey, setRefreshKey] = useState(0);
 
   const fetchAll = useCallback(async (isRefresh = false) => {
     const seq = ++fetchSeq.current;
-    if (isRefresh) setRefreshing(true);
+    if (isRefresh) {
+      setRefreshing(true);
+      setRefreshKey((k) => k + 1);
+    }
     try {
       const [dashRes, healthRes, budgetRes] = await Promise.all([
         settle(endpoints.getDashboard()),
@@ -251,6 +257,11 @@ export default function DashboardScreen() {
         params: { transaction },
         initial: false,
       }),
+    // `pop` returns to the list if the Transactions tab has a screen open on it.
+    calendarDay: (calendarDay: string) =>
+      navigation.navigate("Transactions", { screen: "TransactionsList", params: { calendarDay }, pop: true }),
+    calendarMonth: (calendarMonth: string) =>
+      navigation.navigate("Transactions", { screen: "TransactionsList", params: { calendarMonth }, pop: true }),
   };
 
   const errorBanner = error ? (
@@ -441,6 +452,14 @@ export default function DashboardScreen() {
                 )}
               </TouchableOpacity>
             )}
+
+            {/* This month day by day: spending shade, income dots, totals */}
+            <HomeCalendarCard
+              fallbackCurrency={currency}
+              refreshKey={refreshKey}
+              onOpenDay={goTo.calendarDay}
+              onOpenMonth={goTo.calendarMonth}
+            />
 
             {/* Recent Transactions */}
             <View style={[styles.card, { backgroundColor: colors.card, borderColor: colors.border }]}>

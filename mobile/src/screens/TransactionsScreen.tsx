@@ -22,7 +22,7 @@ import { useTheme } from "../theme";
 import { endpoints } from "../api/client";
 import { logger } from "../lib/logger";
 import { formatCurrency, safeName, formatShortDate } from "../lib/format";
-import { localDateISO } from "../lib/subscriptions";
+import { isValidIsoDate, localDateISO } from "../lib/subscriptions";
 import { DEFAULT_DISPLAY_CURRENCY } from "../lib/dashboard";
 import {
   datePartsOf,
@@ -78,7 +78,7 @@ const MODES: { key: CalendarMode; label: string }[] = [
   { key: "year", label: "Year" },
 ];
 
-export default function TransactionsScreen({ navigation }: Props) {
+export default function TransactionsScreen({ navigation, route }: Props) {
   const { colors } = useTheme();
   const isFocused = useIsFocused();
   const [view, setView] = useState<View_>("list");
@@ -138,6 +138,26 @@ export default function TransactionsScreen({ navigation }: Props) {
   const [calAnchor, setCalAnchor] = useState(() => localDateISO());
   const [calDay, setCalDay] = useState<string | null>(null);
   const { start: periodStart, end: periodEnd } = periodRange(calMode, calAnchor);
+
+  // Opened from the Home calendar: switch to the month calendar on that day (or
+  // month), then clear the request so a later visit starts where the user left.
+  const focusDay = route.params?.calendarDay;
+  const focusMonth = route.params?.calendarMonth;
+  useEffect(() => {
+    if (!focusDay && !focusMonth) return;
+    if (focusDay && isValidIsoDate(focusDay)) {
+      setView("calendar");
+      setCalMode("month");
+      setCalAnchor(focusDay);
+      setCalDay(focusDay);
+    } else if (focusMonth && /^\d{4}-(0[1-9]|1[0-2])$/.test(focusMonth)) {
+      setView("calendar");
+      setCalMode("month");
+      setCalAnchor(`${focusMonth}-01`);
+      setCalDay(null);
+    }
+    navigation.setParams({ calendarDay: undefined, calendarMonth: undefined });
+  }, [focusDay, focusMonth, navigation]);
   // The request for the visible period: month view keeps `month=` (what the
   // first calendar release sent); week and year ask for the range.
   const periodKey =

@@ -166,3 +166,12 @@ npx eas build --platform ios --profile production --auto-submit --non-interactiv
   the sale already takes from it. The server side is the web change `7db62e3` + `ddd983e` (on dev
   2026-10-14). Against a server without it, normal sales work as before and an oversold sale's
   re-match is refused (lot 0 fails validation) instead of silently dropping the short, as 1.0.23 did.
+- **1.0.25 / vc34 (Android internal testing only)** (2026-10-14; no iOS build): a **month calendar on
+  Home**, between the dashboard cards and Recent Transactions (`HomeCalendarCard`). Each day is
+  shaded by what was spent (four shades on a square-root scale of the month's biggest day, so one
+  large bill doesn't wash the rest out), a green dot marks days with income, and the month's
+  income / spending / net sit under the grid. Tapping a day swaps those for the day's figures and a
+  **See this day's transactions** button that opens the Transactions calendar on that day; **Open**
+  opens the month there (`TransactionsList` takes `calendarDay` / `calendarMonth`, read once then
+  cleared). Same data as the Transactions calendar (`GET /api/transactions/calendar?month=`); a
+  server without that route hides the card. Pull-to-refresh on Home reloads it too.

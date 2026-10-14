@@ -512,3 +512,46 @@ describe("TransactionsScreen calendar — week and year views", () => {
     await waitFor(() => expect(getByText(/Week and Year views need a newer Finlynq server/)).toBeTruthy());
   });
 });
+
+// ─── Opened from the Home calendar ──────────────────────────────────────────
+describe("TransactionsScreen opened on a calendar day or month", () => {
+  const setParams = jest.fn();
+  const nav = { ...mockNavigation, setParams };
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    mockTransactionsByQuery();
+    (endpoints.getTransactionsCalendar as jest.Mock).mockResolvedValue({ success: true, data: calendarPayload });
+  });
+
+  it("opens the calendar on the day, lists it, then clears the request", async () => {
+    const { getByText, findByText } = renderWithTheme(
+      <TransactionsScreen navigation={nav} route={{ params: { calendarDay: day4 } } as any} />,
+    );
+    expect(await findByText("Corner Bakery")).toBeTruthy();
+    expect(getByText(dayTitle(now.year, now.month, 4))).toBeTruthy();
+    expect(endpoints.getTransactionsCalendar).toHaveBeenCalledWith(monthKey);
+    expect(endpoints.getTransactions).toHaveBeenCalledWith(expect.stringContaining(`startDate=${day4}&endDate=${day4}`));
+    expect(setParams).toHaveBeenCalledWith({ calendarDay: undefined, calendarMonth: undefined });
+  });
+
+  it("opens the calendar on a month with no day picked", async () => {
+    const prev = shiftYearMonth(now.year, now.month, -1);
+    const prevKey = monthKeyOf(prev.year, prev.month);
+    const { findByText } = renderWithTheme(
+      <TransactionsScreen navigation={nav} route={{ params: { calendarMonth: prevKey } } as any} />,
+    );
+    expect(await findByText(monthTitle(prev.year, prev.month))).toBeTruthy();
+    expect(endpoints.getTransactionsCalendar).toHaveBeenCalledWith(prevKey);
+    expect(setParams).toHaveBeenCalledWith({ calendarDay: undefined, calendarMonth: undefined });
+  });
+
+  it("ignores a malformed request and stays on the list", async () => {
+    const { findByText, getByPlaceholderText } = renderWithTheme(
+      <TransactionsScreen navigation={nav} route={{ params: { calendarDay: "13/10/2026" } } as any} />,
+    );
+    expect(await findByText("Grocery Store")).toBeTruthy();
+    expect(getByPlaceholderText("Search transactions...")).toBeTruthy();
+    expect(endpoints.getTransactionsCalendar).not.toHaveBeenCalled();
+  });
+});

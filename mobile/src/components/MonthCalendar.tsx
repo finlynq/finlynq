@@ -7,7 +7,7 @@
 //
 // Renders bare (no card) so each screen keeps its own card and legend.
 import React, { type ReactNode } from "react";
-import { View, Text, TouchableOpacity, StyleSheet } from "react-native";
+import { View, Text, TouchableOpacity, StyleSheet, type StyleProp, type ViewStyle } from "react-native";
 import { useTheme } from "../theme";
 import { Icon } from "./icon";
 import { daysInMonth, firstWeekday, monthKeyOf, monthTitle } from "../lib/month-calendar";
@@ -66,6 +66,8 @@ export interface MonthCalendarProps {
   dayLabel?: (day: number) => string;
   /** Cell height in points (default 50); taller when a day shows more than dots. */
   cellHeight?: number;
+  /** Extra style for a day's cell, applied after the selected style (a shade, a ring). */
+  dayStyle?: (day: number, selected: boolean) => StyleProp<ViewStyle>;
 }
 
 export function MonthCalendar({
@@ -79,6 +81,7 @@ export function MonthCalendar({
   renderDay,
   dayLabel,
   cellHeight = 50,
+  dayStyle,
 }: MonthCalendarProps) {
   const { colors } = useTheme();
   const dayCount = daysInMonth(year, month);
@@ -114,7 +117,7 @@ export function MonthCalendar({
             <TouchableOpacity
               key={day}
               testID={`calendar-day-${day}`}
-              style={[cellStyle, isSelected && { backgroundColor: colors.accent, borderRadius: 10 }]}
+              style={[cellStyle, isSelected && { backgroundColor: colors.accent, borderRadius: 10 }, dayStyle?.(day, isSelected)]}
               onPress={() => onSelectDay(isSelected ? null : day)}
               accessibilityLabel={`${label} ${day}${extra ? `, ${extra}` : ""}`}
               accessibilityState={{ selected: isSelected }}

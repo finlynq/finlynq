@@ -28,6 +28,7 @@ jest.mock("../api/client", () => ({
     getDashboard: jest.fn(),
     getHealthScore: jest.fn(),
     getBudgets: jest.fn(),
+    getTransactionsCalendar: jest.fn(),
   },
 }));
 
@@ -118,6 +119,17 @@ function mockAllOk(overrides: { dash?: object; health?: object | null; budgets?:
     success: true,
     data: overrides.budgets ?? [groceries],
   });
+  (endpoints.getTransactionsCalendar as jest.Mock).mockImplementation((month: string) =>
+    Promise.resolve({
+      success: true,
+      data: {
+        month,
+        displayCurrency: "CAD",
+        days: [{ date: `${month}-04`, income: 0, spending: 80, count: 1 }],
+        totals: { income: 0, spending: 80, count: 1 },
+      },
+    }),
+  );
 }
 
 describe("DashboardScreen", () => {
@@ -312,6 +324,53 @@ describe("DashboardScreen", () => {
     expect(netWorth.props.numberOfLines).toBe(1);
     expect(netWorth.props.adjustsFontSizeToFit).toBe(true);
     expect(getByText("C$80,000").props.numberOfLines).toBe(1);
+  });
+
+  // Owner request: the calendar sits after the dashboard figures and before
+  // the recent transactions.
+  it("shows this month's calendar between the budgets and the recent transactions", async () => {
+    mockAllOk({ budgets: [groceries, dining] });
+    const { getByText, getAllByText } = renderWithTheme(<DashboardScreen />);
+    await waitFor(() => expect(getByText("Calendar")).toBeTruthy());
+    expect(endpoints.getTransactionsCalendar).toHaveBeenCalledWith(expect.stringMatching(/^\d{4}-\d{2}$/));
+    // Matches come back in screen order.
+    const order = getAllByText(/^(Budget Progress|Calendar|Recent Transactions)$/).map((n) => n.props.children);
+    expect(order).toEqual(["Budget Progress", "Calendar", "Recent Transactions"]);
+  });
+
+  it("opens a calendar day, or the month, on the Transactions tab", async () => {
+    mockAllOk();
+    const { getByText, getByTestId } = renderWithTheme(<DashboardScreen />);
+    await waitFor(() => expect(getByText("Calendar")).toBeTruthy());
+    await waitFor(() => expect(getByTestId("calendar-day-4")).toBeTruthy());
+
+    fireEvent.press(getByTestId("calendar-day-4"));
+    await waitFor(() => expect(getByText("See this day's transactions ›")).toBeTruthy());
+    fireEvent.press(getByText("See this day's transactions ›"));
+    expect(mockNavigate).toHaveBeenLastCalledWith("Transactions", {
+      screen: "TransactionsList",
+      params: { calendarDay: expect.stringMatching(/^\d{4}-\d{2}-04$/) },
+      pop: true,
+    });
+
+    fireEvent.press(getByText("Open ›"));
+    expect(mockNavigate).toHaveBeenLastCalledWith("Transactions", {
+      screen: "TransactionsList",
+      params: { calendarMonth: expect.stringMatching(/^\d{4}-\d{2}$/) },
+      pop: true,
+    });
+  });
+
+  it("reloads the calendar with everything else on pull-to-refresh", async () => {
+    mockAllOk();
+    const { getByText, UNSAFE_getByType } = renderWithTheme(<DashboardScreen />);
+    await waitFor(() => expect(getByText("Calendar")).toBeTruthy());
+    await waitFor(() => expect(endpoints.getTransactionsCalendar).toHaveBeenCalledTimes(1));
+    const { ScrollView } = require("react-native");
+    await act(async () => {
+      await UNSAFE_getByType(ScrollView).props.refreshControl.props.onRefresh();
+    });
+    await waitFor(() => expect(endpoints.getTransactionsCalendar).toHaveBeenCalledTimes(2));
   });
 
   it("shows 'No recent transactions' when list is empty", async () => {
