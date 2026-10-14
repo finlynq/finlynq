@@ -28,6 +28,9 @@ export type AccountHoldingsValue = {
   value: number;       // current market value in account currency
   costBasis: number;   // remaining cost basis in account currency
   currency: string;    // account currency
+  /** Remaining cost basis in `opts.reportingCurrency`, each purchase at the
+   *  rate on its own date. Only present when that option was passed. */
+  costBasisReporting?: number;
 };
 
 /**
@@ -46,6 +49,8 @@ export type HoldingValue = {
   value: number;        // market value in account currency
   costBasis: number;    // remaining cost basis in account currency
   currency: string;     // account currency
+  /** See AccountHoldingsValue.costBasisReporting. */
+  costBasisReporting?: number;
 };
 
 /**
@@ -82,6 +87,15 @@ export type HoldingsValueOpts = {
    * Defaults to today, preserving the original behavior.
    */
   asOfDate?: string;
+  /**
+   * Also return each position's cost basis in this currency, FIXED at the
+   * rate on each purchase's own date (`costBasisReporting`). `costBasis`
+   * itself stays in the account currency at `asOfDate`'s rate, as before.
+   * Used by the snapshot builder (2026-10-14): converting cost at each day's
+   * rate moved the Performance chart's cost line with every FX move, with no
+   * transaction behind it.
+   */
+  reportingCurrency?: string;
 };
 
 /**
@@ -102,12 +116,19 @@ async function valueHoldingsAtDate(
   // CURRENT valuation only: historical callers (net-worth snapshots) read
   // `.value`, and reloading every lot per date would cost a great deal for a
   // figure they never use. Holding id -> cost in the holding's currency.
+  const reportingCurrency = opts?.reportingCurrency?.toUpperCase() || null;
   const lotCostBasisByHolding = new Map<number, number>();
+  const lotCostReportingByHolding = new Map<number, number>();
   if (isToday) {
     // Null on the simple method; cash sleeves are already left out.
-    const lotCost = await loadLotCostByHolding(userId, dek ?? null);
+    const lotCost = await loadLotCostByHolding(userId, dek ?? null, {
+      reportingCurrency: reportingCurrency ?? undefined,
+    });
     for (const [holdingId, lot] of lotCost ?? []) {
-      if (lot.qty > 1e-9) lotCostBasisByHolding.set(holdingId, lot.costBasis);
+      if (lot.qty > 1e-9) {
+        lotCostBasisByHolding.set(holdingId, lot.costBasis);
+        if (lot.costBasisReporting != null) lotCostReportingByHolding.set(holdingId, lot.costBasisReporting);
+      }
     }
   }
   // Stream D Phase 4 — plaintext name/symbol dropped; ciphertext only.
@@ -197,6 +218,16 @@ async function valueHoldingsAtDate(
     tradeLinkId: schema.transactions.tradeLinkId,
     amount: schema.transactions.amount,
   });
+  // Purchases in the reporting currency at their own date's rate: the stored
+  // `reporting_amount` (the cash leg's for a paired buy, the same row the
+  // native tally reads), when it is in `reportingCurrency`. Rows without one
+  // are tallied in their entered currency and converted at `asOfDate`'s rate
+  // below, the old behaviour. With no reporting currency requested the bind
+  // is NULL, the match is false, and the columns go unused.
+  const buyReportingAmount = sql`CASE WHEN ${isPairedBuy} THEN ${cashLeg.reportingAmount} ELSE ${schema.transactions.reportingAmount} END`;
+  const buyReportingCurrency = sql`UPPER(CASE WHEN ${isPairedBuy} THEN ${cashLeg.reportingCurrency} ELSE ${schema.transactions.reportingCurrency} END)`;
+  const hasReporting = sql`COALESCE(${buyReportingAmount} IS NOT NULL AND ${buyReportingCurrency} = ${reportingCurrency}, false)`;
+  const isBuy = sql`COALESCE(${schema.transactions.quantity}, 0) > 0`;
   const fkAggRows = await db
     .select({
       portfolioHoldingId: schema.transactions.portfolioHoldingId,
@@ -211,6 +242,16 @@ async function valueHoldingsAtDate(
       totalBuyQty: sql<number>`COALESCE(SUM(CASE WHEN COALESCE(${schema.transactions.quantity}, 0) > 0 AND NOT ${skipCashLeg} THEN ${schema.transactions.quantity} ELSE 0 END), 0)::float8`,
       totalBuyAmountInEntered: sql<number>`COALESCE(SUM(CASE WHEN COALESCE(${schema.transactions.quantity}, 0) > 0 AND NOT ${skipCashLeg} THEN ${effectiveBuyAmount} ELSE 0 END), 0)::float8`,
       totalSellQty: sql<number>`COALESCE(SUM(CASE WHEN COALESCE(${schema.transactions.quantity}, 0) < 0 AND NOT ${skipCashLeg} THEN ABS(${schema.transactions.quantity}) ELSE 0 END), 0)::float8`,
+      // Reporting-currency purchase tallies. Two variants: with the cash-leg
+      // skip (positions: the same rows as the native tally) and without it
+      // (cash sleeves: sale proceeds buy that currency too, at the sale date's
+      // rate; the native tally can skip them because a sleeve's native
+      // average is 1 either way).
+      buyReporting: sql<number>`COALESCE(SUM(CASE WHEN ${isBuy} AND NOT ${skipCashLeg} AND ${hasReporting} THEN ABS(${buyReportingAmount}) ELSE 0 END), 0)::float8`,
+      buyUnreportedInEntered: sql<number>`COALESCE(SUM(CASE WHEN ${isBuy} AND NOT ${skipCashLeg} AND NOT ${hasReporting} THEN ${effectiveBuyAmount} ELSE 0 END), 0)::float8`,
+      buyQtyAll: sql<number>`COALESCE(SUM(CASE WHEN ${isBuy} THEN ${schema.transactions.quantity} ELSE 0 END), 0)::float8`,
+      buyReportingAll: sql<number>`COALESCE(SUM(CASE WHEN ${isBuy} AND ${hasReporting} THEN ABS(${buyReportingAmount}) ELSE 0 END), 0)::float8`,
+      buyUnreportedAllInEntered: sql<number>`COALESCE(SUM(CASE WHEN ${isBuy} AND NOT ${hasReporting} THEN ${effectiveBuyAmount} ELSE 0 END), 0)::float8`,
     })
     .from(schema.transactions)
     .innerJoin(
@@ -243,7 +284,17 @@ async function valueHoldingsAtDate(
   // Per-currency cost buckets per holding. Each entry is the SUM of buy/sell
   // amounts in its own `enteredCurrency`. Collapsed into holding-currency
   // cost basis via the FX cache below.
-  type CostBucket = { enteredCurrency: string; buyQty: number; buyAmountInEntered: number; sellQty: number };
+  type CostBucket = {
+    enteredCurrency: string;
+    buyQty: number;
+    buyAmountInEntered: number;
+    sellQty: number;
+    buyReporting: number;
+    buyUnreportedInEntered: number;
+    buyQtyAll: number;
+    buyReportingAll: number;
+    buyUnreportedAllInEntered: number;
+  };
   const costBucketsByHoldingId = new Map<number, CostBucket[]>();
   for (const r of fkAggRows) {
     if (r.portfolioHoldingId == null) continue;
@@ -258,6 +309,11 @@ async function valueHoldingsAtDate(
       buyQty: Number(r.totalBuyQty),
       buyAmountInEntered: Number(r.totalBuyAmountInEntered),
       sellQty: Number(r.totalSellQty),
+      buyReporting: Number(r.buyReporting),
+      buyUnreportedInEntered: Number(r.buyUnreportedInEntered),
+      buyQtyAll: Number(r.buyQtyAll),
+      buyReportingAll: Number(r.buyReportingAll),
+      buyUnreportedAllInEntered: Number(r.buyUnreportedAllInEntered),
     });
     costBucketsByHoldingId.set(r.portfolioHoldingId, arr);
   }
@@ -440,6 +496,34 @@ async function valueHoldingsAtDate(
       costBasisInAccountCcy = valueInAccountCcy;
     }
 
+    // Cost basis in the reporting currency, fixed at each purchase's own
+    // rate, so it moves only when a transaction does. Same quantity and the
+    // same method as `costBasisInAccountCcy` above.
+    let costBasisReporting: number | undefined;
+    if (reportingCurrency) {
+      const sleeve = h.isCash === true;
+      let repQty = 0;
+      let repAmount = 0;
+      for (const b of buckets) {
+        repQty += sleeve ? b.buyQtyAll : b.buyQty;
+        repAmount += sleeve ? b.buyReportingAll : b.buyReporting;
+        const unreported = sleeve ? b.buyUnreportedAllInEntered : b.buyUnreportedInEntered;
+        if (unreported !== 0) {
+          repAmount += unreported * (await getFx(b.enteredCurrency || h.currency, reportingCurrency));
+        }
+      }
+      const lotReporting = lotCostBasis != null ? lotCostReportingByHolding.get(h.id) : undefined;
+      if (lotReporting != null) {
+        costBasisReporting = lotReporting;
+      } else if (lotCostBasis == null && repQty > 0) {
+        costBasisReporting = qty * (repAmount / repQty);
+      } else {
+        // No purchase to take a rate from (cost is pegged to market value),
+        // or lot cost without its reporting figure: this date's rate.
+        costBasisReporting = costBasisInAccountCcy * (await getFx(accountCurrency, reportingCurrency));
+      }
+    }
+
     out.push({
       holdingId: h.id,
       accountId: h.accountId,
@@ -449,6 +533,7 @@ async function valueHoldingsAtDate(
       value: valueInAccountCcy,
       costBasis: costBasisInAccountCcy,
       currency: accountCurrency,
+      ...(costBasisReporting != null ? { costBasisReporting } : {}),
     });
   }
 
@@ -471,12 +556,16 @@ export async function getHoldingsValueByAccount(
     if (existing) {
       existing.value += h.value;
       existing.costBasis += h.costBasis;
+      if (h.costBasisReporting != null) {
+        existing.costBasisReporting = (existing.costBasisReporting ?? 0) + h.costBasisReporting;
+      }
     } else {
       out.set(h.accountId, {
         accountId: h.accountId,
         value: h.value,
         costBasis: h.costBasis,
         currency: h.currency,
+        ...(h.costBasisReporting != null ? { costBasisReporting: h.costBasisReporting } : {}),
       });
     }
   }

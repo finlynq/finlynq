@@ -14,13 +14,19 @@ import { todayISO } from "@/lib/utils/date";
 import type { LotCost } from "../cost-metrics";
 import { isLotsEnabledForUser, loadMetricsForUser } from "./read";
 
-/** Holding id -> lot figures, in the holding's own currency. Null = simple method. */
+/**
+ * Holding id -> lot figures, in the holding's own currency. Null = simple method.
+ * With `reportingCurrency`, each entry also carries `costBasisReporting`: the
+ * held lots' cost at the rate on each lot's own open date.
+ */
 export async function loadLotCostByHolding(
   userId: string,
   dek: Buffer | null,
+  opts?: { reportingCurrency?: string },
 ): Promise<Map<number, LotCost> | null> {
   if (!(await isLotsEnabledForUser(userId))) return null;
 
+  const reportingCurrency = opts?.reportingCurrency;
   const [lotMetrics, cashRows] = await Promise.all([
     loadMetricsForUser({
       userId,
@@ -29,6 +35,7 @@ export async function loadLotCostByHolding(
       // Cost basis and realized gain are price-independent; an empty price map
       // skips the quotes.
       prices: new Map(),
+      reportingCurrency,
     }),
     db
       .select({ id: schema.portfolioHoldings.id })
@@ -45,6 +52,7 @@ export async function loadLotCostByHolding(
       qty: lm.qty,
       costBasis: lm.costBasis,
       realizedGain: lm.realizedGainAllTime,
+      ...(reportingCurrency ? { costBasisReporting: lm.costBasisReporting } : {}),
     });
   }
   return out;

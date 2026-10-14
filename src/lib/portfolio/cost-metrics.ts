@@ -22,7 +22,14 @@ export type TradeTallies = {
 };
 
 /** What the lots say about one holding: shares still held, their cost, and gains realized so far. */
-export type LotCost = { qty: number; costBasis: number; realizedGain: number };
+export type LotCost = {
+  qty: number;
+  costBasis: number;
+  realizedGain: number;
+  /** Cost of the lots still held in the reporting currency, each lot at the
+   *  rate on its own open date. Present only when the loader was asked for it. */
+  costBasisReporting?: number;
+};
 
 export type CostMetrics = {
   avgCost: number | null;
@@ -72,7 +79,13 @@ export function costMetrics(t: TradeTallies, lot?: LotCost): CostMetrics {
  */
 export function lotCostInCurrency(lot: LotCost, rate: number): LotCost {
   if (rate === 1) return lot;
-  return { qty: lot.qty, costBasis: lot.costBasis * rate, realizedGain: lot.realizedGain * rate };
+  // The reporting-currency cost does not depend on the holding's currency.
+  return {
+    qty: lot.qty,
+    costBasis: lot.costBasis * rate,
+    realizedGain: lot.realizedGain * rate,
+    costBasisReporting: lot.costBasisReporting,
+  };
 }
 
 /**
