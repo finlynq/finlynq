@@ -9,7 +9,8 @@
  * bought for 1,000 USD and 1,000 USD of cash left from a 2,000 USD deposit,
  * all on a day USD→CAD was 1.25 (the stored reporting amounts). On the next
  * two days the rate is 1.3333 and then 1.4286 with no transaction: market
- * value follows the rate, cost stays at 2,500 CAD.
+ * value follows the rate, cost stays at 2,500 CAD, whether or not the rows
+ * carry a stored reporting amount yet.
  *
  * DB-gated (real Postgres): runs in CI's `finlynq_test` lane.
  */
@@ -67,7 +68,7 @@ describeDb("investment snapshots: cost at the purchase-date rate", () => {
       await db.update(schema.transactions).set({ reportingCurrency: "CAD", reportingAmount: cad }).where(eq(schema.transactions.id, id));
     }
 
-    for (const [date, cadToUsd] of [[DAY1, 0.75], [DAY2, 0.7]] as const) {
+    for (const [date, cadToUsd] of [[BOUGHT, 0.8], [DAY1, 0.75], [DAY2, 0.7]] as const) {
       await seedFxRate({ currency: "USD", date, rateToUsd: 1 });
       await seedFxRate({ currency: "CAD", date, rateToUsd: cadToUsd });
       await seedPriceCache({ symbol: "SMPL", date, price: 110, currency: "USD" });
@@ -104,10 +105,14 @@ describeDb("investment snapshots: cost at the purchase-date rate", () => {
     }
   });
 
-  it("falls back to the day's rate for a purchase stored without a reporting amount", async () => {
-    await db.update(schema.transactions).set({ reportingCurrency: null, reportingAmount: null }).where(eq(schema.transactions.kind, "buy"));
+  it("converts a purchase saved without a reporting amount at its own date's rate", async () => {
+    // Portfolio operations save no reporting amount; the dashboard fills it
+    // in later. Until then the cost must still be fixed at the purchase date
+    // (USD→CAD 1.25 on BOUGHT), not follow each day's rate.
+    await db.update(schema.transactions).set({ reportingCurrency: null, reportingAmount: null }).where(eq(schema.transactions.userId, userId));
     await buildDailySnapshot({ userId, date: DAY1, dek: TEST_DEK });
-    const d1 = await snapshot(DAY1, null);
-    expect(d1.cb).toBeCloseTo(1000 / 0.75 + 1250, 6);
+    await buildDailySnapshot({ userId, date: DAY2, dek: TEST_DEK });
+    expect((await snapshot(DAY1, null)).cb).toBeCloseTo(2500, 6);
+    expect((await snapshot(DAY2, null)).cb).toBeCloseTo(2500, 6);
   });
 });

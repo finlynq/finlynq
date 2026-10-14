@@ -221,9 +221,9 @@ async function valueHoldingsAtDate(
   // Purchases in the reporting currency at their own date's rate: the stored
   // `reporting_amount` (the cash leg's for a paired buy, the same row the
   // native tally reads), when it is in `reportingCurrency`. Rows without one
-  // are tallied in their entered currency and converted at `asOfDate`'s rate
-  // below, the old behaviour. With no reporting currency requested the bind
-  // is NULL, the match is false, and the columns go unused.
+  // are converted at their own date's rate by the query below. With no
+  // reporting currency requested the bind is NULL, the match is false, and
+  // the columns go unused.
   const buyReportingAmount = sql`CASE WHEN ${isPairedBuy} THEN ${cashLeg.reportingAmount} ELSE ${schema.transactions.reportingAmount} END`;
   const buyReportingCurrency = sql`UPPER(CASE WHEN ${isPairedBuy} THEN ${cashLeg.reportingCurrency} ELSE ${schema.transactions.reportingCurrency} END)`;
   const hasReporting = sql`COALESCE(${buyReportingAmount} IS NOT NULL AND ${buyReportingCurrency} = ${reportingCurrency}, false)`;
@@ -248,10 +248,8 @@ async function valueHoldingsAtDate(
       // rate; the native tally can skip them because a sleeve's native
       // average is 1 either way).
       buyReporting: sql<number>`COALESCE(SUM(CASE WHEN ${isBuy} AND NOT ${skipCashLeg} AND ${hasReporting} THEN ABS(${buyReportingAmount}) ELSE 0 END), 0)::float8`,
-      buyUnreportedInEntered: sql<number>`COALESCE(SUM(CASE WHEN ${isBuy} AND NOT ${skipCashLeg} AND NOT ${hasReporting} THEN ${effectiveBuyAmount} ELSE 0 END), 0)::float8`,
       buyQtyAll: sql<number>`COALESCE(SUM(CASE WHEN ${isBuy} THEN ${schema.transactions.quantity} ELSE 0 END), 0)::float8`,
       buyReportingAll: sql<number>`COALESCE(SUM(CASE WHEN ${isBuy} AND ${hasReporting} THEN ABS(${buyReportingAmount}) ELSE 0 END), 0)::float8`,
-      buyUnreportedAllInEntered: sql<number>`COALESCE(SUM(CASE WHEN ${isBuy} AND NOT ${hasReporting} THEN ${effectiveBuyAmount} ELSE 0 END), 0)::float8`,
     })
     .from(schema.transactions)
     .innerJoin(
@@ -290,10 +288,8 @@ async function valueHoldingsAtDate(
     buyAmountInEntered: number;
     sellQty: number;
     buyReporting: number;
-    buyUnreportedInEntered: number;
     buyQtyAll: number;
     buyReportingAll: number;
-    buyUnreportedAllInEntered: number;
   };
   const costBucketsByHoldingId = new Map<number, CostBucket[]>();
   for (const r of fkAggRows) {
@@ -310,12 +306,81 @@ async function valueHoldingsAtDate(
       buyAmountInEntered: Number(r.totalBuyAmountInEntered),
       sellQty: Number(r.totalSellQty),
       buyReporting: Number(r.buyReporting),
-      buyUnreportedInEntered: Number(r.buyUnreportedInEntered),
       buyQtyAll: Number(r.buyQtyAll),
       buyReportingAll: Number(r.buyReportingAll),
-      buyUnreportedAllInEntered: Number(r.buyUnreportedAllInEntered),
     });
     costBucketsByHoldingId.set(r.portfolioHoldingId, arr);
+  }
+
+  // Purchases with no stored reporting amount, converted at the rate on their
+  // OWN date. Portfolio operations save none (the dashboard's self-heal fills
+  // it in later), so converting them at `asOfDate`'s rate would bring back the
+  // daily FX drift for every trade not yet healed. Grouped by date so each
+  // (currency, date) rate is looked up once. `positions` mirrors the native
+  // tally's cash-leg skip exactly (a NULL skip counts as skipped there too);
+  // `sleeve` has no skip, like the `*All` columns.
+  const unreportedByHolding = new Map<number, { positions: number; sleeve: number }>();
+  if (reportingCurrency) {
+    const unreportedRows = await db
+      .select({
+        portfolioHoldingId: schema.transactions.portfolioHoldingId,
+        enteredCurrency: effectiveEnteredCurrency,
+        date: schema.transactions.date,
+        countsForPositions: sql<boolean | null>`NOT ${skipCashLeg}`,
+        amount: sql<number>`COALESCE(SUM(${effectiveBuyAmount}), 0)::float8`,
+      })
+      .from(schema.transactions)
+      .innerJoin(
+        schema.holdingAccounts,
+        and(
+          eq(schema.holdingAccounts.holdingId, schema.transactions.portfolioHoldingId),
+          eq(schema.holdingAccounts.accountId, schema.transactions.accountId),
+          eq(schema.holdingAccounts.userId, userId),
+        ),
+      )
+      .leftJoin(
+        cashLeg,
+        and(
+          eq(cashLeg.userId, userId),
+          isNotNull(cashLeg.tradeLinkId),
+          isNotNull(schema.transactions.tradeLinkId),
+          eq(cashLeg.tradeLinkId, schema.transactions.tradeLinkId),
+          ne(cashLeg.id, schema.transactions.id),
+          eq(sql`COALESCE(${cashLeg.quantity}, 0)`, 0),
+        ),
+      )
+      .where(and(
+        eq(schema.transactions.userId, userId),
+        isNotNull(schema.transactions.portfolioHoldingId),
+        lte(schema.transactions.date, asOfDate),
+        sql`${isBuy} AND NOT ${hasReporting}`,
+      ))
+      .groupBy(
+        schema.transactions.portfolioHoldingId,
+        effectiveEnteredCurrency,
+        schema.transactions.date,
+        sql`NOT ${skipCashLeg}`,
+      );
+    const rateByCurrencyDate = new Map<string, number>();
+    for (const r of unreportedRows) {
+      if (r.portfolioHoldingId == null) continue;
+      const from = String(r.enteredCurrency || "").toUpperCase() || reportingCurrency;
+      const key = `${from}|${r.date}`;
+      let rate = rateByCurrencyDate.get(key);
+      if (rate == null) {
+        try {
+          rate = from === reportingCurrency ? 1 : (await getRate(from, reportingCurrency, r.date, userId)) || 1;
+        } catch {
+          rate = 1;
+        }
+        rateByCurrencyDate.set(key, rate);
+      }
+      const value = Number(r.amount) * rate;
+      const acc = unreportedByHolding.get(r.portfolioHoldingId) ?? { positions: 0, sleeve: 0 };
+      acc.sleeve += value;
+      if (r.countsForPositions === true) acc.positions += value;
+      unreportedByHolding.set(r.portfolioHoldingId, acc);
+    }
   }
 
   // Manually-priced securities (price_source='manual') are EXCLUDED from the
@@ -507,11 +572,9 @@ async function valueHoldingsAtDate(
       for (const b of buckets) {
         repQty += sleeve ? b.buyQtyAll : b.buyQty;
         repAmount += sleeve ? b.buyReportingAll : b.buyReporting;
-        const unreported = sleeve ? b.buyUnreportedAllInEntered : b.buyUnreportedInEntered;
-        if (unreported !== 0) {
-          repAmount += unreported * (await getFx(b.enteredCurrency || h.currency, reportingCurrency));
-        }
       }
+      const unreported = unreportedByHolding.get(h.id);
+      if (unreported) repAmount += sleeve ? unreported.sleeve : unreported.positions;
       const lotReporting = lotCostBasis != null ? lotCostReportingByHolding.get(h.id) : undefined;
       if (lotReporting != null) {
         costBasisReporting = lotReporting;
