@@ -23,7 +23,7 @@ import { getRate } from "@/lib/fx-service";
 import { findInvestmentIncomeCategoryIds } from "@/lib/investment-income-category";
 import { computeTwrr, annualizeReturn } from "./twrr";
 import { computeMwrr, type CashFlow } from "./mwrr";
-import { isNewMoney } from "./external-flows";
+import { newMoneyAmount } from "./external-flows";
 
 export type ReturnsPeriod = "1m" | "3m" | "6m" | "ytd" | "1y" | "all";
 
@@ -101,9 +101,12 @@ export async function loadNewMoneyByDate(input: {
       reportingAmount: schema.transactions.reportingAmount,
       categoryId: schema.transactions.categoryId,
       categoryType: schema.categories.type,
+      holdingId: schema.transactions.portfolioHoldingId,
+      holdingIsCash: schema.portfolioHoldings.isCash,
     })
     .from(schema.transactions)
     .leftJoin(schema.categories, eq(schema.categories.id, schema.transactions.categoryId))
+    .leftJoin(schema.portfolioHoldings, eq(schema.portfolioHoldings.id, schema.transactions.portfolioHoldingId))
     .where(
       and(
         eq(schema.transactions.userId, userId),
@@ -125,11 +128,15 @@ export async function loadNewMoneyByDate(input: {
       quantity: r.quantity == null ? null : Number(r.quantity),
       categoryId: r.categoryId ?? null,
       categoryType: r.categoryType ?? null,
+      onSecurity: r.holdingId != null && !r.holdingIsCash,
     };
-    if (!isNewMoney(flow, incomeIds)) continue;
+    const inOwnCurrency = newMoneyAmount(flow, incomeIds);
+    if (inOwnCurrency == null) continue;
     let value: number;
     if ((r.reportingCurrency ?? "").toUpperCase() === target && r.reportingAmount != null) {
-      value = Number(r.reportingAmount);
+      // Same magnitude as `amount`, at the transaction date's rate; take the
+      // direction from the rule (a single-row buy's amount is negative).
+      value = Math.sign(inOwnCurrency) * Math.abs(Number(r.reportingAmount));
     } else {
       const from = (r.currency ?? target).toUpperCase();
       const key = `${from}|${r.date}`;
@@ -138,7 +145,7 @@ export async function loadNewMoneyByDate(input: {
         rate = from === target ? 1 : (await getRate(from, target, r.date, userId)) || 1;
         rateCache.set(key, rate);
       }
-      value = amount * rate;
+      value = inOwnCurrency * rate;
     }
     byDate.set(r.date, (byDate.get(r.date) ?? 0) + value);
   }

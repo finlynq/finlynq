@@ -32,6 +32,7 @@ import {
   recordTransaction,
 } from "./helpers/portfolio-fixtures";
 import { computePortfolioReturns } from "@/lib/portfolio/performance/returns";
+import { eq } from "drizzle-orm";
 import { db, schema } from "@/db";
 
 const DB_URL = process.env.DATABASE_URL || process.env.PF_DATABASE_URL || "";
@@ -88,6 +89,20 @@ describeDb("computePortfolioReturns — new money is not return", () => {
     expect(r.twrr.period).toBeCloseTo(0.21, 10);
     expect(r.incomeCategoriesResolved).toBe(true);
     expect(r.mwrr.converged).toBe(true);
+  });
+
+  it("counts a single-row buy (no cash leg) as new money, not a gain", async () => {
+    const [{ id: accountId }] = await db.select({ id: schema.accounts.id }).from(schema.accounts);
+    const holdingId = await createHolding({ userId, accountId, name: "Sample stock", symbol: "SMPL", currency: "CAD" });
+    // d4: 2 shares bought for 1,000 with nothing paying for them; value rises by the same 1,000.
+    await recordTransaction({ userId, accountId, date: DAYS[4], currency: "CAD", amount: -1000, quantity: 2, portfolioHoldingId: holdingId, kind: "buy" });
+    await db.update(schema.portfolioSnapshots).set({ marketValue: VALUES[4] + 1000 }).where(eq(schema.portfolioSnapshots.snapDate, DAYS[4]));
+    const r = await computePortfolioReturns({ userId, dek: TEST_DEK, period: "all", accountId: null, asOfDate: DAYS[4] });
+    expect(r.series.map((p) => p.contribution)).toEqual([0, 100, 0, -100, 1000]);
+    // d4's 111 price gain is measured against the value plus the 1,000 that
+    // arrived that day (new money lands at the start of the day): 111 / 2,110.
+    const d4 = (VALUES[4] + 1000 - VALUES[3] - 1000) / (VALUES[3] + 1000);
+    expect(r.twrr.period).toBeCloseTo(1.1 * (1 + d4) - 1, 10);
   });
 
   it("gives the same answer scoped to the account", async () => {
