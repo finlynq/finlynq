@@ -124,3 +124,26 @@ export async function resolveOrCreateInvestmentIncomeCategory(
   // 3. Re-resolve the create-name (covers the unique-violation race above).
   return findByName(db, userId, dek, createName);
 }
+
+/**
+ * The user's investment-INCOME category ids: every existing category named
+ * like a dividend or interest category (the same candidate names the
+ * resolver above uses). Performance treats reinvested income in any OTHER
+ * category as new money (performance/external-flows.ts). Needs the DEK
+ * because category names are only matchable through their HMAC lookup;
+ * returns null without one so the caller can fall back rather than guess.
+ */
+export async function findInvestmentIncomeCategoryIds(
+  db: DbLike,
+  userId: string,
+  dek: Buffer | null,
+): Promise<Set<number> | null> {
+  if (!dek) return null;
+  const names = [...INCOME_CATEGORY_CANDIDATES.dividend, ...INCOME_CATEGORY_CANDIDATES.interest];
+  const lookups = names.map((n) => nameLookup(dek, n));
+  const result = await db.execute(sql`
+    SELECT id FROM categories
+    WHERE user_id = ${userId} AND name_lookup IN (${sql.join(lookups.map((l) => sql`${l}`), sql`, `)})
+  `);
+  return new Set(normalizeDbRows(result).map((r) => Number((r as { id: unknown }).id)));
+}

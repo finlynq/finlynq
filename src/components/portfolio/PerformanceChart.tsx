@@ -10,6 +10,12 @@
  *
  * Empty-state messages distinguish "no snapshots yet" (cron hasn't
  * run / backfill not done) from "no data in this range".
+ *
+ * 2026-10-14: TWRR / XIRR now strip out new money (deposits, withdrawals,
+ * transfers, plan contributions booked as reinvested income…), computed by
+ * the shared lib/portfolio/performance/returns.ts; the header shows how much
+ * was excluded. A Value & cost / Value / Cost switch picks the lines drawn,
+ * and the Y axis fits only those, so "Value" shows how the balance moved.
  */
 
 import { useEffect, useMemo, useState } from "react";
@@ -38,6 +44,13 @@ import { StackedChartLegend } from "@/components/chart-stack-legend";
 import { StackedAreaTooltip } from "@/components/chart-stack-tooltip";
 
 type Period = "1m" | "3m" | "6m" | "ytd" | "1y" | "all";
+/** Which value lines the (unstacked) chart draws. */
+type Lines = "both" | "value" | "cost";
+const LINE_OPTIONS: { key: Lines; label: string; title: string }[] = [
+  { key: "both", label: "Value & cost", title: "Market value and cost basis" },
+  { key: "value", label: "Value", title: "Market value only: how the balance moved" },
+  { key: "cost", label: "Cost", title: "Cost basis only: what was put in, at cost" },
+];
 /** FINLYNQ-172 — stacked grouping mode (was a boolean in FINLYNQ-129). */
 type GroupMode = "off" | "holding" | "account";
 
@@ -72,6 +85,8 @@ interface ApiResponse {
     series: SeriesPoint[];
     twrr: { period: number; annualized: number; hadContributions: boolean };
     mwrr: { irr: number; converged: boolean };
+    /** New money over the period (+ in, − out), excluded from both returns. */
+    netNewMoney?: number;
     gapsFilledDays: number;
   };
 }
@@ -85,6 +100,7 @@ export interface PerformanceChartProps {
 
 export function PerformanceChart({ accountId }: PerformanceChartProps) {
   const [period, setPeriod] = useState<Period>("1y");
+  const [lines, setLines] = useState<Lines>("both");
   const [data, setData] = useState<ApiResponse["data"] | null>(null);
   const [loading, setLoading] = useState(true);
   // FINLYNQ-129/172 — component-only stacked grouping toggle (resets on reload).
@@ -146,11 +162,13 @@ export function PerformanceChart({ accountId }: PerformanceChartProps) {
     () =>
       prepareTimeSeries(rawChartData, {
         dateKey: "date",
-        // contribution is not plotted — exclude from domain computation
-        valueKeys: ["marketValue", "costBasis"],
+        // contribution is not plotted — exclude from domain computation; the
+        // axis fits only the lines shown.
+        valueKeys:
+          lines === "value" ? ["marketValue"] : lines === "cost" ? ["costBasis"] : ["marketValue", "costBasis"],
         maxPoints: 200,
       }),
-    [rawChartData],
+    [rawChartData, lines],
   );
 
   const stackCurrency = holdings?.currency ?? data?.currency ?? "USD";
@@ -227,6 +245,16 @@ export function PerformanceChart({ accountId }: PerformanceChartProps) {
                   MWRR (XIRR): {fmtPct(data.mwrr.irr)}
                 </Badge>
               )}
+              {data.netNewMoney != null && Math.abs(data.netNewMoney) >= 0.5 && (
+                <Badge
+                  variant="outline"
+                  className="px-3 py-1"
+                  title="Money put in or taken out in this period (deposits, withdrawals, transfers, plan contributions). It is not counted as return."
+                >
+                  Net new money: {data.netNewMoney > 0 ? "+" : ""}
+                  {formatCurrency(data.netNewMoney, data.currency)}
+                </Badge>
+              )}
               {data.gapsFilledDays > 0 && (
                 <Badge variant="destructive" className="px-3 py-1">
                   Incomplete history: {data.gapsFilledDays} day{data.gapsFilledDays === 1 ? "" : "s"} filled
@@ -235,11 +263,30 @@ export function PerformanceChart({ accountId }: PerformanceChartProps) {
             </div>
             {/* Axis-unit label — flips from the TWRR/value line to a per-holding
                 dollar stack in stacked mode (tc-2: "y-axis switches to $"). */}
-            <p className="text-[11px] text-muted-foreground mb-1">
-              {showStacked
-                ? `Market value by ${axisGroupLabel} (${stackCurrency})`
-                : `Market value (${data.currency})`}
-            </p>
+            <div className="mb-1 flex flex-wrap items-center justify-between gap-2">
+              <p className="text-[11px] text-muted-foreground">
+                {showStacked
+                  ? `Market value by ${axisGroupLabel} (${stackCurrency})`
+                  : `${lines === "cost" ? "Cost basis" : lines === "value" ? "Market value" : "Market value and cost basis"} (${data.currency})`}
+              </p>
+              {!showStacked && (
+                <div className="flex items-center gap-1" role="group" aria-label="Lines shown">
+                  {LINE_OPTIONS.map((o) => (
+                    <Button
+                      key={o.key}
+                      size="sm"
+                      variant={lines === o.key ? "default" : "outline"}
+                      className="h-6 px-2 text-[11px]"
+                      title={o.title}
+                      aria-pressed={lines === o.key}
+                      onClick={() => setLines(o.key)}
+                    >
+                      {o.label}
+                    </Button>
+                  ))}
+                </div>
+              )}
+            </div>
             <div className="h-72 w-full">
               <ResponsiveContainer width="100%" height="100%">
                 {showStacked ? (
@@ -284,23 +331,27 @@ export function PerformanceChart({ accountId }: PerformanceChartProps) {
                       formatter={(v) => formatCurrency(Number(v), data.currency)}
                     />
                     {spansZero && <ReferenceLine y={0} stroke="#888" />}
-                    <Line
-                      type="monotone"
-                      dataKey="marketValue"
-                      stroke="#06b6d4"
-                      strokeWidth={2}
-                      dot={false}
-                      name="Market value"
-                    />
-                    <Line
-                      type="monotone"
-                      dataKey="costBasis"
-                      stroke="#94a3b8"
-                      strokeWidth={1}
-                      strokeDasharray="3 3"
-                      dot={false}
-                      name="Cost basis"
-                    />
+                    {lines !== "cost" && (
+                      <Line
+                        type="monotone"
+                        dataKey="marketValue"
+                        stroke="#06b6d4"
+                        strokeWidth={2}
+                        dot={false}
+                        name="Market value"
+                      />
+                    )}
+                    {lines !== "value" && (
+                      <Line
+                        type="monotone"
+                        dataKey="costBasis"
+                        stroke="#94a3b8"
+                        strokeWidth={lines === "cost" ? 2 : 1}
+                        strokeDasharray={lines === "cost" ? undefined : "3 3"}
+                        dot={false}
+                        name="Cost basis"
+                      />
+                    )}
                   </LineChart>
                 )}
               </ResponsiveContainer>

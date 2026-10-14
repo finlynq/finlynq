@@ -62,14 +62,14 @@ export async function buildDailySnapshot(
   });
 
   // Per-account net contribution for the day, bucketed from the same-day legs
-  // below (the receiving leg of each transfer pair). NOTE: a prior version also
-  // ran `computeNetContributions()` here purely "for parity / future MWRR" and
-  // then DISCARDED the result — that was one wasted DB round-trip per day, which
-  // added up across a multi-year rebuild walk, so it has been removed.
+  // below (the receiving leg of each transfer pair). NOTE (2026-10-14):
+  // performance no longer reads this stored figure. TWRR / XIRR compute new
+  // money from the transactions at read time with a wider rule
+  // (performance/returns.ts + external-flows.ts), so this transfer-legs-only
+  // value is kept for the row's completeness but is not what any return uses.
   const perAccountContribution = new Map<number, number>();
-  // Map cash flows back to account_id via the source transactions.
-  // computeNetContributions doesn't return accountId today (sign-only),
-  // so re-query for the same window to attribute. Cheap, single-day.
+  // Map cash flows back to account_id via the same day's transactions.
+  // Cheap, single-day.
   const sameDayLegs = await db
     .select({
       accountId: schema.transactions.accountId,

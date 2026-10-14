@@ -1045,95 +1045,28 @@ export function registerPortfolioTools(server: McpServer, ctx: PgToolContext) {
     accountId: z.number().int().optional().describe("Scope to one accounts.id; omit for whole-portfolio aggregate"),
   };
   const portfolioReturnsHandler = async ({ period, accountId }: { period?: "1m" | "3m" | "6m" | "ytd" | "1y" | "all"; accountId?: number }) => {
-      const PERIOD_DAYS: Record<string, number | null> = {
-        "1m": 30, "3m": 90, "6m": 180, ytd: -1, "1y": 365, all: null,
-      };
-      const asOfDate = new Date().toISOString().slice(0, 10);
-      const p = period ?? "1y";
-      let from: string;
-      if (p === "ytd") from = `${asOfDate.slice(0, 4)}-01-01`;
-      else {
-        const days = PERIOD_DAYS[p];
-        if (days == null) from = "1900-01-01";
-        else {
-          const d = new Date(`${asOfDate}T00:00:00Z`);
-          d.setUTCDate(d.getUTCDate() - days);
-          from = d.toISOString().slice(0, 10);
-        }
-      }
-
-      const rowsRaw = await q(db, sql`
-        SELECT
-          snap_date AS date,
-          market_value,
-          cost_basis,
-          net_contribution AS contribution,
-          currency,
-          gaps_filled
-        FROM portfolio_snapshots
-        WHERE user_id = ${userId}
-          AND snap_date >= ${from}
-          AND snap_date <= ${asOfDate}
-          AND ${accountId != null ? sql`account_id = ${accountId}` : sql`account_id IS NULL`}
-        ORDER BY snap_date
-      `);
-      const series = (rowsRaw as Array<{
-        date: string;
-        market_value: number;
-        cost_basis: number;
-        contribution: number;
-        currency: string;
-        gaps_filled: boolean;
-      }>).map((r) => ({
-        date: r.date,
-        marketValue: Number(r.market_value),
-        costBasis: Number(r.cost_basis),
-        contribution: Number(r.contribution),
-        gapsFilled: r.gaps_filled,
-      }));
-
-      const { computeTwrr, annualizeReturn } = await import(
-        "../../src/lib/portfolio/performance/twrr"
+      // Same function as the web Performance chart (REST
+      // /api/portfolio/performance), so an assistant and the page agree. New
+      // money is stripped out of both returns there (external-flows.ts).
+      const { computePortfolioReturns } = await import(
+        "../../src/lib/portfolio/performance/returns"
       );
-      const { computeMwrr } = await import(
-        "../../src/lib/portfolio/performance/mwrr"
-      );
-      const { computeNetContributions } = await import(
-        "../../src/lib/portfolio/performance/contributions"
-      );
-
-      const twrr = computeTwrr(
-        series.map((p) => ({
-          date: p.date,
-          marketValue: p.marketValue,
-          contribution: p.contribution,
-        })),
-      );
-      let mwrr: { irr: number; converged: boolean } = { irr: 0, converged: false };
-      if (series.length > 0) {
-        const flows = await computeNetContributions({
-          userId,
-          accountId: accountId ?? null,
-          fromDate: from,
-          toDate: asOfDate,
-        });
-        const startMv = series[0]?.marketValue ?? 0;
-        if (startMv > 0) flows.unshift({ date: from, amount: -startMv });
-        const finalMv = series[series.length - 1]?.marketValue ?? 0;
-        const result = computeMwrr(flows, finalMv, asOfDate);
-        mwrr = { irr: result.irr, converged: result.converged };
-      }
-
-      const periodDays = series.length >= 2
-        ? Math.max(1, Math.round((Date.parse(series[series.length - 1].date) - Date.parse(series[0].date)) / 86400000))
-        : 0;
-      const twrrAnnualized = annualizeReturn(twrr.periodReturn, periodDays);
+      const returns = await computePortfolioReturns({
+        userId,
+        dek,
+        period: period ?? "1y",
+        accountId: accountId ?? null,
+      });
+      const p = returns.period;
+      const { from, series, mwrr } = returns;
+      const asOfDate = returns.to;
+      const twrrAnnualized = returns.twrr.annualized;
+      const twrr = { periodReturn: returns.twrr.period, hadContributions: returns.twrr.hadContributions };
 
       // FINLYNQ-254: divergence sanity flag. TWRR (time-weighted) and MWRR
       // (money-weighted) legitimately differ with flow timing, but a large
-      // spread signals that transfer/FX flows may be mis-stamped in the daily
-      // net_contribution (entering Dietz as performance rather than a pure
-      // flow). Compare the two on the SAME (annualized) basis — mwrr.irr is
+      // spread signals that money moving in or out may be classified as
+      // return (external-flows.ts) or the value series has a hole. Compare the two on the SAME (annualized) basis — mwrr.irr is
       // already annualized — and surface a flag + note when the gap exceeds
       // the threshold, the way gapsFilledDays is surfaced. Only meaningful when
       // the MWRR actually converged.
@@ -1150,7 +1083,7 @@ export function registerPortfolioTools(server: McpServer, ctx: PgToolContext) {
           accountId: accountId ?? null,
           from,
           to: asOfDate,
-          currency: (rowsRaw as Array<{ currency?: string }>)[0]?.currency ?? "USD",
+          currency: returns.currency,
           // FINLYNQ-268: the TWRR/MWRR series is market-based (reads
           // portfolio_snapshots.market_value). `asOf` = the latest snapshot
           // date actually read (may lag today if the cron hasn't run).
@@ -1163,19 +1096,22 @@ export function registerPortfolioTools(server: McpServer, ctx: PgToolContext) {
             hadContributions: twrr.hadContributions,
           },
           mwrr,
-          gapsFilledDays: series.filter((p) => p.gapsFilled).length,
+          // New money over the period (+ in, − out), stripped out of both returns.
+          netNewMoney: returns.netNewMoney,
+          incomeCategoriesResolved: returns.incomeCategoriesResolved,
+          gapsFilledDays: returns.gapsFilledDays,
           divergenceFlag,
           divergenceThreshold: DIVERGENCE_THRESHOLD,
           divergenceAbs,
           divergenceNote: divergenceFlag
-            ? `Annualized TWRR (${(twrrAnnualized * 100).toFixed(1)}%) and MWRR (${(mwrr.irr * 100).toFixed(1)}%) differ by ${((divergenceAbs ?? 0) * 100).toFixed(1)}pp, exceeding the ${(DIVERGENCE_THRESHOLD * 100).toFixed(0)}pp sanity threshold. A large spread can be legitimate (heavy/early flows) but may also indicate transfer or FX-conversion flows mis-stamped in the daily net_contribution series — verify the flagged range.`
+            ? `Annualized TWRR (${(twrrAnnualized * 100).toFixed(1)}%) and MWRR (${(mwrr.irr * 100).toFixed(1)}%) differ by ${((divergenceAbs ?? 0) * 100).toFixed(1)}pp, exceeding the ${(DIVERGENCE_THRESHOLD * 100).toFixed(0)}pp sanity threshold. A large spread can be legitimate (heavy/early flows) but may also mean money moved in or out in a way that is scored as return, or a hole in the value series — verify the flagged range.`
             : null,
         },
       });
   };
   server.tool(
     "get_portfolio_returns",
-    "Compute a portfolio time-series return series. Returns daily market_value + cost_basis, period TWRR (Modified Dietz chained daily), annualized TWRR, and MWRR / XIRR. Distinct capability from get_portfolio_performance (which is per-holding average-cost realized P&L), NOT a newer version of it. Reads `portfolio_snapshots` populated by the nightly cron + admin backfill script. `gapsFilledDays` count flags any range where price_cache or fx_rates fell back to last-known values.",
+    "Compute a portfolio time-series return series. Returns daily market_value + cost_basis, period TWRR (Modified Dietz chained daily), annualized TWRR, and MWRR / XIRR, with new money (transfers, deposits, withdrawals, opening balances, adjustments, Transfer-categorized entries, reinvested income outside Dividends/Interest) stripped out; `netNewMoney` totals it. Distinct capability from get_portfolio_performance (which is per-holding average-cost realized P&L), NOT a newer version of it. Same figures as the Portfolio page chart. `gapsFilledDays` flags days where price or FX data fell back to last-known values.",
     portfolioReturnsSchema,
     portfolioReturnsHandler,
   );
