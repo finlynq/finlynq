@@ -5,8 +5,12 @@ import {
   buildPerLotQty,
   groupSales,
   isReassignableSale,
+  laterLotOverLimit,
   saleLotChoices,
   seedAllocation,
+  shortAlreadyCovered,
+  shortOpenedBySale,
+  SHORT_LOT_ID,
 } from "../lib/portfolio/lots";
 import type { HoldingLot, LotClosure } from "../../../shared/types";
 
@@ -76,7 +80,7 @@ describe("saleLotChoices", () => {
   it("lists the lot the sale used up, with what the sale takes from it", () => {
     const choices = saleLotChoices(lots, sale);
     const used = choices.find((c) => c.lot.id === 1);
-    expect(used).toEqual({ lot: lots[0], current: 100, available: 100 });
+    expect(used).toEqual({ lot: lots[0], current: 100, available: 100, boughtAfterSale: false });
   });
 
   it("offers other purchases made on or before the sale, oldest first", () => {
@@ -131,5 +135,79 @@ describe("the allocation form", () => {
 
   it("sends only the lots with a positive figure", () => {
     expect(buildPerLotQty({ 1: "0", 2: "100", 3: "" })).toEqual([{ lotId: 2, qty: 100 }]);
+  });
+});
+
+// Server rules from 2026-10-14 (web: pf-app/src/lib/portfolio/lots/sale-lot-choices.ts,
+// same cases in pf-app/tests/portfolio-lots-sale-lot-choices.test.ts).
+
+describe("a purchase made after the sale", () => {
+  // Trades entered out of date order can leave a sale matched to a lot bought
+  // after it. That lot stays listed so the sale can be fixed, but it may only
+  // keep what it takes today, even though it still holds more.
+  const outOfOrder = [
+    lot({ id: 1, openDate: "2026-01-10", costPerShare: 10 }),
+    lot({ id: 3, openDate: "2026-07-10", costPerShare: 30, qtyRemaining: 60 }),
+  ];
+  const [s] = groupSales([closure({ lotId: 3, qtyClosed: 40, costPerShare: 30 })], outOfOrder);
+
+  it("keeps a later lot the sale already uses, capped at what the sale takes", () => {
+    const choices = saleLotChoices(outOfOrder, s);
+    expect(choices.map((c) => c.lot.id)).toEqual([1, 3]);
+    expect(choices[1]).toMatchObject({ current: 40, available: 40, boughtAfterSale: true });
+    expect(choices[0]).toMatchObject({ current: 0, available: 100, boughtAfterSale: false });
+  });
+
+  it("stops the form asking more of it than it keeps", () => {
+    const choices = saleLotChoices(outOfOrder, s);
+    expect(laterLotOverLimit({ 1: "60", 3: "40" }, choices)).toBe(false);
+    expect(laterLotOverLimit({ 1: "90", 3: "10" }, choices)).toBe(false);
+    expect(laterLotOverLimit({ 1: "50", 3: "50" }, choices)).toBe(true);
+  });
+});
+
+describe("a sale that sold more than was held", () => {
+  // Bought 100, sold 150: the sale used up lot 1 and opened short lot 9 for 50.
+  const shortLot = (qtyRemaining: number) =>
+    lot({ id: 9, openTxId: 500, openDate: "2026-06-01", side: "short", costPerShare: 25, qtyOriginal: 50, qtyRemaining });
+  const longLot = lot({ id: 1, openDate: "2026-01-10", qtyRemaining: 0, status: "closed" });
+
+  it("counts the part sold short in what the sale sold", () => {
+    const [sale] = groupSales([closure({})], [longLot, shortLot(50)]);
+    expect(sale).toMatchObject({ qty: 150, fromLots: 100, soldShort: 50, shortCovered: 0 });
+    expect(shortAlreadyCovered(sale)).toBe(false);
+  });
+
+  it("starts the form with the short as lot 0, and sends it", () => {
+    const [sale] = groupSales([closure({})], [longLot, shortLot(50)]);
+    const seed = seedAllocation(sale);
+    expect(seed).toEqual({ [SHORT_LOT_ID]: "50", 1: "100" });
+    expect(allocationMatches(seed, sale)).toBe(true);
+    expect(allocationUnchanged(seed, sale)).toBe(true);
+    expect(buildPerLotQty(seed)).toEqual([
+      { lotId: 0, qty: 50 },
+      { lotId: 1, qty: 100 },
+    ]);
+    // The long part alone no longer adds up: the server would refuse it.
+    expect(allocationMatches({ 1: "100" }, sale)).toBe(false);
+  });
+
+  it("knows when a later purchase has closed some of that short", () => {
+    const [sale] = groupSales([closure({})], [longLot, shortLot(20)]);
+    expect(sale.shortCovered).toBe(30);
+    expect(shortAlreadyCovered(sale)).toBe(true);
+  });
+
+  it("measures a sale's short from the lots it opened, nothing else", () => {
+    const lotsNow = [longLot, shortLot(20), lot({ id: 10, openTxId: 700, side: "short", qtyOriginal: 5, qtyRemaining: 5 })];
+    expect(shortOpenedBySale(lotsNow, 500)).toEqual({ qty: 50, covered: 30 });
+    expect(shortOpenedBySale(lotsNow, 700)).toEqual({ qty: 5, covered: 0 });
+    expect(shortOpenedBySale(lotsNow, 100)).toEqual({ qty: 0, covered: 0 });
+  });
+
+  it("is unchanged for a sale with no short", () => {
+    const [sale] = groupSales(closures, lots);
+    expect(sale).toMatchObject({ qty: 100, fromLots: 100, soldShort: 0, shortCovered: 0 });
+    expect(seedAllocation(sale)).toEqual({ 1: "100" });
   });
 });

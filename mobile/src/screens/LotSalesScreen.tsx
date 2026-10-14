@@ -7,6 +7,10 @@
 // and so its realized gain and the cost of what is still held.
 //
 // The server checks everything again and saves all of a change or none of it.
+// Two of its rules are applied here first (see lib/portfolio/lots.ts): a
+// purchase made after the sale can't be newly chosen, and a sale that sold
+// more than was held carries that part as "Sold short" (sent as lot 0). A sale
+// whose short a later purchase already closed can't be changed here at all.
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   View,
@@ -32,8 +36,11 @@ import {
   buildPerLotQty,
   groupSales,
   isReassignableSale,
+  laterLotOverLimit,
   saleLotChoices,
   seedAllocation,
+  shortAlreadyCovered,
+  SHORT_LOT_ID,
   type LotSale,
 } from "../lib/portfolio/lots";
 import { Icon } from "../components/icon";
@@ -108,12 +115,14 @@ export default function LotSalesScreen({ navigation, route }: Props) {
     };
   }, [load]);
 
-  const sales = useMemo(() => groupSales(closures), [closures]);
+  const sales = useMemo(() => groupSales(closures, lots), [closures, lots]);
   const lotById = useMemo(() => new Map(lots.map((l) => [l.id, l])), [lots]);
   const choices = useMemo(() => (editing ? saleLotChoices(lots, editing) : []), [lots, editing]);
   const total = allocationTotal(alloc);
   const matches = editing ? allocationMatches(alloc, editing) : false;
   const unchanged = editing ? allocationUnchanged(alloc, editing) : true;
+  const overLimit = editing ? laterLotOverLimit(alloc, choices) : false;
+  const cannotPreview = busy || !matches || unchanged || overLimit;
 
   const startEdit = (sale: LotSale) => {
     setEditing(sale);
@@ -180,7 +189,7 @@ export default function LotSalesScreen({ navigation, route }: Props) {
             Choose how many units this sale takes from each purchase. The total must equal {formatQty(sale.qty)}.
           </Text>
 
-          {choices.length === 0 ? (
+          {choices.length === 0 && sale.soldShort <= 0 ? (
             <Text style={[styles.body, { color: colors.mutedForeground }]}>
               There is no purchase on or before this sale to match it to.
             </Text>
@@ -192,6 +201,11 @@ export default function LotSalesScreen({ navigation, route }: Props) {
                 <Text style={[styles.choiceSub, { color: colors.mutedForeground }]} numberOfLines={1}>
                   @ {formatPerShare(ch.lot.costPerShare, ch.lot.currency)} · up to {formatQty(ch.available)}
                 </Text>
+                {ch.boughtAfterSale ? (
+                  <Text style={[styles.choiceSub, { color: colors.destructive }]}>
+                    Bought after this sale: it can keep up to {formatQty(ch.available)} units, not more.
+                  </Text>
+                ) : null}
               </View>
               <TextInput
                 accessibilityLabel={`Units from the purchase on ${ch.lot.openDate}`}
@@ -208,6 +222,29 @@ export default function LotSalesScreen({ navigation, route }: Props) {
               />
             </View>
           ))}
+
+          {sale.soldShort > 0 ? (
+            <View style={[styles.choiceRow, { borderTopColor: colors.border }]}>
+              <View style={styles.choiceMain}>
+                <Text style={[styles.choiceTitle, { color: colors.destructive }]}>Sold short</Text>
+                <Text style={[styles.choiceSub, { color: colors.mutedForeground }]}>
+                  Beyond the units held · {formatQty(sale.soldShort)} sold short now
+                </Text>
+              </View>
+              <TextInput
+                accessibilityLabel="Units sold short"
+                style={[styles.qtyInput, { color: colors.foreground, borderColor: colors.input }]}
+                value={alloc[SHORT_LOT_ID] ?? ""}
+                onChangeText={(t) => {
+                  setPreview(null);
+                  setAlloc((a) => ({ ...a, [SHORT_LOT_ID]: t }));
+                }}
+                keyboardType="decimal-pad"
+                placeholder="0"
+                placeholderTextColor={colors.mutedForeground}
+              />
+            </View>
+          ) : null}
 
           <Text style={[styles.total, { color: matches ? colors.pos : colors.destructive }]}>
             {formatQty(total)} of {formatQty(sale.qty)} units chosen
@@ -265,12 +302,10 @@ export default function LotSalesScreen({ navigation, route }: Props) {
             <TouchableOpacity
               accessibilityRole="button"
               accessibilityLabel="Preview the change"
-              // Nothing to preview until the units add up and something differs.
-              onPress={busy || !matches || unchanged ? undefined : () => void send(false)}
-              style={[
-                styles.primaryBtn,
-                { backgroundColor: colors.primary, opacity: busy || !matches || unchanged ? 0.5 : 1 },
-              ]}
+              // Nothing to preview until the units add up, something differs and
+              // no purchase made after the sale is asked for more than it keeps.
+              onPress={cannotPreview ? undefined : () => void send(false)}
+              style={[styles.primaryBtn, { backgroundColor: colors.primary, opacity: cannotPreview ? 0.5 : 1 }]}
             >
               {busy ? (
                 <ActivityIndicator size="small" color={colors.primaryForeground} />
@@ -357,6 +392,7 @@ export default function LotSalesScreen({ navigation, route }: Props) {
                 <Text style={[styles.body, { color: colors.mutedForeground }]}>
                   {isReassignableSale(sale) ? "Sold" : sale.closeKind.replace(/_/g, " ")} {formatQty(sale.qty)} units @{" "}
                   {formatCurrency(sale.proceedsPerShare, sale.currency)}
+                  {sale.soldShort > 0 ? ` · ${formatQty(sale.soldShort)} of them sold short` : ""}
                 </Text>
                 {sale.closures.map((c) => (
                   <Text key={c.id} style={[styles.lotLine, { color: colors.foreground }]}>
@@ -369,7 +405,14 @@ export default function LotSalesScreen({ navigation, route }: Props) {
                     {isReassignableSale(sale) ? " Change its lots to match it to an earlier one." : ""}
                   </Text>
                 ) : null}
-                {isReassignableSale(sale) ? (
+                {isReassignableSale(sale) && shortAlreadyCovered(sale) ? (
+                  <Text style={[styles.body, { color: colors.mutedForeground, marginTop: 6, marginBottom: 0 }]}>
+                    A later purchase already closed {formatQty(sale.shortCovered)} of the units this sale sold short,
+                    so its lots can't be changed here: that would undo the purchase. Rebuild lots on the web app
+                    re-matches every trade in date order.
+                  </Text>
+                ) : null}
+                {isReassignableSale(sale) && !shortAlreadyCovered(sale) ? (
                   <TouchableOpacity
                     accessibilityRole="button"
                     accessibilityLabel={`Change the lots of the sale on ${sale.closeDate}`}

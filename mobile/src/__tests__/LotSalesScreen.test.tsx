@@ -255,3 +255,82 @@ describe("LotSalesScreen: changing which lots a sale used", () => {
     expect(reassign).not.toHaveBeenCalled();
   });
 });
+
+// Server rules from 2026-10-14: a sale that sold more than was held carries
+// that part as "Sold short" (sent as lot 0, counted in the total), a sale whose
+// short a later purchase closed can't be changed, and a purchase made after
+// the sale can keep only what the sale already takes from it.
+describe("LotSalesScreen: shorts and purchases made after a sale", () => {
+  // Bought 100 in January (used up by the sale) and 100 in February (entered
+  // later, still held); sold 150 on 2026-06-01, the last 50 short (lot 9).
+  const shortLot = (qtyRemaining: number) =>
+    lot({ id: 9, openTxId: 500, openDate: "2026-06-01", side: "short", costPerShare: 25, qtyOriginal: 50, qtyRemaining });
+  const withShort = (qtyRemaining: number) => ({
+    success: true,
+    data: {
+      lots: [lots[0], lots[1], shortLot(qtyRemaining)],
+      closures: [closure({}), ...(qtyRemaining < 50 ? [closure({ id: 2, lotId: 9, closeTxId: 600, closeDate: "2026-07-01", qtyClosed: 50 - qtyRemaining, closeKind: "short_close", realizedGain: 300 })] : [])],
+    },
+  });
+
+  it("counts the short in the sale and in the form, and sends it as lot 0", async () => {
+    getLots.mockResolvedValue(withShort(50));
+    const { findByText, getByLabelText, getByText } = render(screen());
+    expect(await findByText(/Sold 150 units @ \$25\.00 · 50 of them sold short/)).toBeTruthy();
+
+    fireEvent.press(getByLabelText("Change the lots of the sale on 2026-06-01"));
+    expect(getByLabelText("Units sold short").props.value).toBe("50");
+    expect(getByText("150 of 150 units chosen")).toBeTruthy();
+
+    // Match the short part to the February purchase instead.
+    fireEvent.changeText(getByLabelText("Units sold short"), "0");
+    fireEvent.changeText(getByLabelText(FROM_FEB), "50");
+    fireEvent.press(getByLabelText("Preview the change"));
+    await waitFor(() =>
+      expect(reassign).toHaveBeenCalledWith(7, {
+        closeTxId: 500,
+        perLotQty: [
+          { lotId: 1, qty: 100 },
+          { lotId: 2, qty: 50 },
+        ],
+        preview: true,
+      }),
+    );
+  });
+
+  it("explains, and offers no change, once a later purchase closed part of the short", async () => {
+    getLots.mockResolvedValue(withShort(20));
+    const { findByText, queryByLabelText } = render(screen());
+    expect(await findByText(/A later purchase already closed 30 of the units this sale sold short/)).toBeTruthy();
+    expect(queryByLabelText("Change the lots of the sale on 2026-06-01")).toBeNull();
+  });
+
+  it("won't ask a purchase made after the sale for more than the sale already takes from it", async () => {
+    // Entered out of order: the sale took 40 from the July purchase.
+    getLots.mockResolvedValue({
+      success: true,
+      data: {
+        lots: [lots[0], lots[1], lot({ id: 3, openDate: "2026-07-10", costPerShare: 30, qtyRemaining: 60 })],
+        closures: [closure({ qtyClosed: 60 }), closure({ id: 2, lotId: 3, qtyClosed: 40, costPerShare: 30, openAfterClose: true })],
+      },
+    });
+    const { findByLabelText, getByLabelText, getByText } = render(screen());
+    fireEvent.press(await findByLabelText("Change the lots of the sale on 2026-06-01"));
+    const FROM_JUL = "Units from the purchase on 2026-07-10";
+    expect(getByLabelText(FROM_JUL).props.value).toBe("40");
+    expect(getByText(/Bought after this sale: it can keep up to 40 units, not more\./)).toBeTruthy();
+
+    // 50 + 50 adds up, but asks the July purchase for more than it keeps.
+    fireEvent.changeText(getByLabelText(FROM_JAN), "50");
+    fireEvent.changeText(getByLabelText(FROM_JUL), "50");
+    expect(getByText("100 of 100 units chosen")).toBeTruthy();
+    fireEvent.press(getByLabelText("Preview the change"));
+    expect(reassign).not.toHaveBeenCalled();
+
+    // Moving shares OFF it is fine.
+    fireEvent.changeText(getByLabelText(FROM_JUL), "0");
+    fireEvent.changeText(getByLabelText(FROM_FEB), "50");
+    fireEvent.press(getByLabelText("Preview the change"));
+    await waitFor(() => expect(reassign).toHaveBeenCalled());
+  });
+});
