@@ -22,6 +22,9 @@ import TrendsScreen from "../screens/TrendsScreen";
 import CashFlowSankeyScreen from "../screens/CashFlowSankeyScreen";
 import YearOverYearScreen from "../screens/YearOverYearScreen";
 import InboxScreen from "../screens/InboxScreen";
+import EmailImportsScreen from "../screens/EmailImportsScreen";
+import EmailRecordScreen from "../screens/EmailRecordScreen";
+import StagedImportScreen from "../screens/StagedImportScreen";
 import ReconcileThresholdsScreen from "../screens/ReconcileThresholdsScreen";
 import SubscriptionsScreen from "../screens/SubscriptionsScreen";
 import AddSubscriptionScreen from "../screens/AddSubscriptionScreen";
@@ -30,6 +33,7 @@ import CategoryDetailScreen from "../screens/CategoryDetailScreen";
 import CostBasisScreen from "../screens/CostBasisScreen";
 import type {
   Category,
+  EmailInboxItem,
   GoalWithProgress,
   LoanSummary,
   Subscription,
@@ -60,6 +64,11 @@ export type MoreStackParamList = {
   Categories: undefined;
   Import: undefined;
   Inbox: { accountId?: number } | undefined;
+  // Email imports (2026-10-15): emailed transactions to record + statement
+  // files waiting for review.
+  EmailImports: undefined;
+  EmailRecord: { item: EmailInboxItem };
+  StagedImport: { id: string; title: string };
   Settings: undefined;
   ReconcileThresholds: undefined;
   // Simple average or advanced lot allocation (also on the Portfolio tab).
@@ -108,6 +117,13 @@ export default function MoreStack() {
       <Stack.Screen name="Categories" component={CategoriesScreen} />
       <Stack.Screen name="Import" component={ImportScreen} />
       <Stack.Screen name="Inbox" component={InboxScreen} />
+      <Stack.Screen name="EmailImports" component={EmailImportsScreen} />
+      <Stack.Screen
+        name="EmailRecord"
+        component={EmailRecordScreen}
+        options={{ presentation: "modal" }}
+      />
+      <Stack.Screen name="StagedImport" component={StagedImportScreen} />
       <Stack.Screen name="Settings" component={SettingsScreen} />
       <Stack.Screen name="ReconcileThresholds" component={ReconcileThresholdsScreen} />
       <Stack.Screen name="CostBasis" component={CostBasisScreen} />

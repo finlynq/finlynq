@@ -50,6 +50,8 @@ import {
   Inbox,
   Link2,
   AlertTriangle,
+  CalendarDays,
+  Mail,
   type LucideIcon,
 } from "lucide-react-native";
 
@@ -103,6 +105,8 @@ export const Icons = {
   eye: Eye,
   link: Link2,
   alert: AlertTriangle,
+  calendar: CalendarDays,
+  mail: Mail,
 } satisfies Record<string, LucideIcon>;
 
 export type IconName = keyof typeof Icons;

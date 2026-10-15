@@ -383,6 +383,12 @@ import type {
   ReconcileSuggestions,
   AutoRuleRecent,
   BankRowCommitBody,
+  EmailInboxItem,
+  EmailRecordBody,
+  EmailRecordResult,
+  StagedImportSummary,
+  StagedImportDetail,
+  StagedApproveResult,
   Goal,
   GoalEditData,
   CategoryEditData,
@@ -917,18 +923,20 @@ export const endpoints = {
     }),
 
   // Commit one bank row → ledger with a chosen category (Approve-each lens).
-  // Bare structured error `{ error, code? }` on 4xx (sign-vs-category /
-  // investment-account guards) — use the structured-error-aware helper so the
-  // message survives instead of being collapsed to a string by request().
+  // Bare structured error `{ error, code? }` on 4xx (investment-account and
+  // ownership guards) — use the structured-error-aware helper so the message
+  // survives instead of being collapsed to a string by request(). A sign that
+  // is unusual for the category is booked and comes back as `data.warning`
+  // (the server refused it until 2026-10-15).
   approveBankRow: (bankId: string, body: BankRowCommitBody) =>
-    postPortfolioOperationRaw<{ success: boolean; data: { transactionId: number } }>(
+    postPortfolioOperationRaw<{ success: boolean; data: { transactionId: number; warning?: string } }>(
       `/api/bank-transactions/${encodeURIComponent(bankId)}/approve`,
       body,
     ),
 
   // Auto-pilot companion — commit an unmatched bank row with a chosen category.
   categorizeBankRow: (bankId: string, body: BankRowCommitBody) =>
-    postPortfolioOperationRaw<{ success: boolean; data: { transactionId: number } }>(
+    postPortfolioOperationRaw<{ success: boolean; data: { transactionId: number; warning?: string } }>(
       `/api/bank-transactions/${encodeURIComponent(bankId)}/categorize`,
       body,
     ),
@@ -955,6 +963,60 @@ export const endpoints = {
     api.delete<{ success?: boolean }>(
       `/api/bank-transactions/${encodeURIComponent(bankId)}`,
     ),
+
+  // ─── Email imports (2026-10-15) ─────────────────────────────────────────
+  // Same routes as the web's Email tab and /import/pending. All bare JSON
+  // (request() wraps them → res.data), all need the DEK (423 → recovery).
+
+  // The email inbox, newest first. Opening it also auto-records emails that
+  // match an email rule, exactly as the web tab does.
+  getEmailInbox: () => api.get<EmailInboxItem[]>("/api/import/email-inbox"),
+
+  // Record one emailed transaction. A possible duplicate comes back as a 200
+  // `{ ok: false, action: "possible_duplicate" }`: resend with `force` to book
+  // it anyway. A refusal (investment account, unknown account) is a 400.
+  recordEmail: (id: string, body: EmailRecordBody) =>
+    api.patch<EmailRecordResult>(`/api/import/email-inbox/${encodeURIComponent(id)}`, body),
+
+  discardEmail: (id: string) =>
+    api.patch<{ ok: boolean }>(`/api/import/email-inbox/${encodeURIComponent(id)}`, {
+      action: "discard",
+    }),
+
+  // Statement files waiting for review (emailed attachments, uploads, feeds).
+  getStagedImports: () => api.get<StagedImportSummary[]>("/api/import/staged"),
+
+  getStagedImport: (id: string) =>
+    api.get<StagedImportDetail>(`/api/import/staged/${encodeURIComponent(id)}`),
+
+  // Say which account an unbound file belongs to; its rows move onto it.
+  bindStagedImport: (id: string, accountId: number) =>
+    api.patch<{ ok: boolean; accountId: number; accountName: string | null; rowsRebound: number }>(
+      `/api/import/staged/${encodeURIComponent(id)}/bind`,
+      { accountId },
+    ),
+
+  // Send the file's rows to the account's bank ledger (duplicates skipped);
+  // they are then categorised or matched in Reconcile. The route answers a
+  // top-level `{ success: true, approved, ... }`, which request() passes
+  // through untouched, so it is lifted into `data` here.
+  approveStagedImport: async (id: string): Promise<ApiResponse<StagedApproveResult>> => {
+    const res = await api.post<unknown>(`/api/import/staged/${encodeURIComponent(id)}/approve`, {});
+    if (!res.success) return res;
+    const top = res as unknown as Partial<StagedApproveResult>;
+    return {
+      success: true,
+      data: {
+        approved: top.approved ?? 0,
+        skippedDuplicates: top.skippedDuplicates ?? 0,
+        rowErrors: Array.isArray(top.rowErrors) ? top.rowErrors : [],
+      },
+    };
+  },
+
+  // Throw the file away (its rows go with it).
+  rejectStagedImport: (id: string) =>
+    api.delete<{ ok: boolean }>(`/api/import/staged/${encodeURIComponent(id)}`),
 
   // ─── Settings (P4 expansion) ───────────────────────────────────────────
   // Display currency — bare `{ displayCurrency }` (request() wraps → res.data).

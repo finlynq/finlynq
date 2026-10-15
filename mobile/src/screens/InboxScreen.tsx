@@ -76,6 +76,9 @@ export default function InboxScreen() {
   const [refreshing, setRefreshing] = useState(false);
 
   const [actionError, setActionError] = useState<string | null>(null);
+  // Booked, but the amount's sign is unusual for the category: the server
+  // only warns since 2026-10-15 (it used to refuse), so say so.
+  const [actionNotice, setActionNotice] = useState<string | null>(null);
   const [busyBankId, setBusyBankId] = useState<string | null>(null);
   const [bulkBusy, setBulkBusy] = useState(false);
   const [savingPolicy, setSavingPolicy] = useState(false);
@@ -280,12 +283,15 @@ export default function InboxScreen() {
         activeLens === "approve" ? endpoints.approveBankRow : endpoints.categorizeBankRow;
       setBusyBankId(bankId);
       setActionError(null);
+      setActionNotice(null);
       try {
         const res = await fn(bankId, { categoryId });
         if (res.ok) {
+          const warning = res.data?.data?.warning;
+          if (warning) setActionNotice(`Booked. ${warning}`);
           await fetchSnapshot({ silent: true });
         } else {
-          // Server-authoritative sign-vs-category + investment refusals.
+          // Server-authoritative refusals (investment account, ownership).
           setActionError(res.error?.error ?? "Failed to commit row");
         }
       } catch (e) {
@@ -421,7 +427,9 @@ export default function InboxScreen() {
     if (suggestedUnlinked.length === 0) return;
     setBulkBusy(true);
     setActionError(null);
+    setActionNotice(null);
     const errors: string[] = [];
+    let unusualSign = 0;
     for (const b of suggestedUnlinked) {
       const sug = suggestionByBank.get(b.id);
       // Transfer-only-rule row → write the pair via /approve and skip the
@@ -445,6 +453,7 @@ export default function InboxScreen() {
       try {
         const res = await endpoints.approveBankRow(b.id, { categoryId });
         if (!res.ok) errors.push(`${safeName(b.payee, b.id)}: ${res.error?.error ?? "failed"}`);
+        else if (res.data?.data?.warning) unusualSign += 1;
       } catch (e) {
         errors.push(`${safeName(b.payee, b.id)}: ${e instanceof Error ? e.message : String(e)}`);
       }
@@ -454,6 +463,11 @@ export default function InboxScreen() {
     if (errors.length > 0) {
       setActionError(
         `Approved ${suggestedUnlinked.length - errors.length}/${suggestedUnlinked.length}. Skipped:\n${errors.join("\n")}`,
+      );
+    }
+    if (unusualSign > 0) {
+      setActionNotice(
+        `${unusualSign} approved ${unusualSign === 1 ? "row has" : "rows have"} an amount whose sign is unusual for its category (a refund, say). Booked as they are.`,
       );
     }
   }, [suggestedUnlinked, suggestionByBank, categoryIdByName, fetchSnapshot]);
@@ -631,6 +645,9 @@ export default function InboxScreen() {
 
         {actionError && (
           <Text style={[styles.actionError, { color: colors.neg }]}>{actionError}</Text>
+        )}
+        {actionNotice && (
+          <Text style={[styles.actionError, { color: colors.mutedForeground }]}>{actionNotice}</Text>
         )}
 
         {/* Tab body */}

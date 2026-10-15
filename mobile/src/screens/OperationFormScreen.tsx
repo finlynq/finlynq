@@ -49,6 +49,7 @@ import type {
   LotRow,
 } from "../../../shared/types";
 import type { PortfolioStackParamList } from "../navigation/PortfolioStack";
+import { DateField } from "../components/DateField";
 
 type Props = NativeStackScreenProps<PortfolioStackParamList, "OperationForm">;
 
@@ -530,14 +531,7 @@ function FieldRenderer({
     case "date":
       return (
         <FieldCard label={f.label} colors={colors}>
-          <TextInput
-            style={inputStyle(colors)}
-            value={form.date}
-            onChangeText={(t) => set({ date: t })}
-            placeholder="YYYY-MM-DD"
-            placeholderTextColor={colors.mutedForeground}
-            autoCorrect={false}
-          />
+          <DateField title={f.label} value={form.date} onChange={(d) => set({ date: d })} style={inputStyle(colors)} />
         </FieldCard>
       );
 

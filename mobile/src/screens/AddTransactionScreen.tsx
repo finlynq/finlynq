@@ -26,6 +26,7 @@ import {
 } from "../lib/sort-helpers";
 import { Icon } from "../components/icon";
 import { PickerSheet, type PickerOption } from "../components/picker-sheet";
+import { DateField } from "../components/DateField";
 import type { Account, Category } from "../../../shared/types";
 import type { TransferEditSeed } from "../lib/transfer-pair";
 
@@ -668,12 +669,11 @@ export default function AddTransactionScreen() {
             {/* Date — shared */}
             <View style={fieldStyles.container}>
               <Text style={[fieldStyles.label, { color: colors.mutedForeground }]}>DATE</Text>
-              <TextInput
-                style={[fieldStyles.input, { color: colors.foreground, backgroundColor: colors.secondary, borderColor: colors.border }]}
+              <DateField
+                title="Date"
                 value={date}
-                onChangeText={setDate}
-                placeholder="YYYY-MM-DD"
-                placeholderTextColor={colors.mutedForeground}
+                onChange={setDate}
+                style={[fieldStyles.input, { backgroundColor: colors.secondary, borderColor: colors.border }]}
               />
             </View>
 

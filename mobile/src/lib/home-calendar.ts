@@ -3,6 +3,8 @@
 // Transactions calendar and Reports), already in the display currency.
 
 import type { TransactionsCalendarDay } from "../../../shared/types";
+import { addDays, buildScheduleEvents, type RecurringRow, type ScheduleEvent, type SubscriptionRow } from "./subscriptions";
+import { daysInMonth, isoDay } from "./month-calendar";
 
 /** How many shades of spending a day can show (0 = no spending). */
 export const HEAT_LEVELS = 4;
@@ -47,4 +49,49 @@ export function transactionCountLabel(n: number): string {
 export function shiftMonthKey(monthKey: string, delta: number): string {
   const total = Number(monthKey.slice(0, 4)) * 12 + Number(monthKey.slice(5, 7)) - 1 + delta;
   return `${Math.floor(total / 12)}-${String((total % 12) + 1).padStart(2, "0")}`;
+}
+
+// ─── Expected payments (owner request 2026-10-15) ───────────────────────────
+// The calendar also shows what is still to come: subscriptions and the
+// recurring series detected in past transactions, the same schedule the
+// Subscriptions calendar draws (buildScheduleEvents). Only days AFTER today
+// get them: today and earlier already show the real transactions, and a
+// projection on top of those would count a payment twice.
+
+/** Expected payments in the month `monthKey` (`YYYY-MM`), after `today`, by date. */
+export function expectedForMonth(
+  subs: SubscriptionRow[],
+  recurring: RecurringRow[],
+  monthKey: string,
+  today: string,
+): Map<string, ScheduleEvent[]> {
+  const year = Number(monthKey.slice(0, 4));
+  const month = Number(monthKey.slice(5, 7)) - 1;
+  const monthStart = isoDay(year, month, 1);
+  const monthEnd = isoDay(year, month, daysInMonth(year, month));
+  const tomorrow = addDays(today, 1);
+  const start = tomorrow > monthStart ? tomorrow : monthStart;
+  const byDate = new Map<string, ScheduleEvent[]>();
+  if (start > monthEnd) return byDate;
+  for (const e of buildScheduleEvents(subs, recurring, start, monthEnd)) {
+    const list = byDate.get(e.date);
+    if (list) list.push(e);
+    else byDate.set(e.date, [e]);
+  }
+  return byDate;
+}
+
+/** Bills and income still expected, summed in the display currency. */
+export function expectedTotals(byDate: Map<string, ScheduleEvent[]>): { bills: number; income: number; count: number } {
+  let bills = 0;
+  let income = 0;
+  let count = 0;
+  for (const list of byDate.values()) {
+    for (const e of list) {
+      count += 1;
+      if (e.type === "income") income += e.displayAmount;
+      else bills += e.displayAmount;
+    }
+  }
+  return { bills, income, count };
 }

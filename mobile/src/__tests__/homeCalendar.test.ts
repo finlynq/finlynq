@@ -1,5 +1,7 @@
 import {
   HEAT_LEVELS,
+  expectedForMonth,
+  expectedTotals,
   heatColor,
   maxDailySpending,
   shiftMonthKey,
@@ -57,3 +59,46 @@ describe("small helpers", () => {
     expect(shiftMonthKey("2026-03", -14)).toBe("2025-01");
   });
 });
+
+describe("expected payments on the Home calendar", () => {
+  const sub = {
+    id: 1,
+    name: "Rent",
+    amount: 1200,
+    currency: "USD",
+    frequency: "monthly",
+    nextDate: "2026-10-01",
+    status: "active",
+    displayAmount: 1200,
+  };
+
+  it("keeps only the days after today", () => {
+    const m = expectedForMonth([{ ...sub, nextDate: "2026-10-15" }, { ...sub, id: 2, name: "Phone", nextDate: "2026-10-16" }], [], "2026-10", "2026-10-15");
+    expect([...m.keys()]).toEqual(["2026-10-16"]);
+  });
+
+  it("is empty for a month already over, and whole for one to come", () => {
+    expect(expectedForMonth([sub], [], "2026-09", "2026-10-15").size).toBe(0);
+    expect([...expectedForMonth([sub], [], "2026-11", "2026-10-15").keys()]).toEqual(["2026-11-01"]);
+  });
+
+  it("sums bills and income apart, in the display currency", () => {
+    const recurring = [
+      {
+        payee: "Employer",
+        avgAmount: 3000,
+        currency: "EUR",
+        avgAmountDisplay: 3300,
+        frequency: "monthly",
+        count: 4,
+        lastDate: "2026-10-01",
+        nextDate: "2026-11-01",
+        accountId: 1,
+        categoryId: null,
+      },
+    ];
+    const totals = expectedTotals(expectedForMonth([sub], recurring, "2026-11", "2026-10-15"));
+    expect(totals).toEqual({ bills: 1200, income: 3300, count: 2 });
+  });
+});
+

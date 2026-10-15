@@ -10,7 +10,12 @@ import { localDateISO } from "../lib/subscriptions";
 import { datePartsOf, dayTitle, isoDay, monthKeyOf, monthTitle, shiftYearMonth } from "../lib/month-calendar";
 
 jest.mock("../api/client", () => ({
-  endpoints: { getTransactionsCalendar: jest.fn() },
+  endpoints: { getTransactionsCalendar: jest.fn(), getSubscriptions: jest.fn(), getRecurring: jest.fn() },
+}));
+// A fixed "today" so expected payments (days AFTER today) are predictable.
+jest.mock("../lib/subscriptions", () => ({
+  ...jest.requireActual("../lib/subscriptions"),
+  localDateISO: () => "2026-10-15",
 }));
 
 const theme: Theme = {
@@ -38,6 +43,8 @@ const payload = {
 };
 
 const getCalendar = endpoints.getTransactionsCalendar as jest.Mock;
+const getSubscriptions = endpoints.getSubscriptions as jest.Mock;
+const getRecurring = endpoints.getRecurring as jest.Mock;
 const onOpenDay = jest.fn();
 const onOpenMonth = jest.fn();
 
@@ -60,6 +67,8 @@ const whole = (n: number) => formatCurrency(n, "USD", { decimals: 0 });
 beforeEach(() => {
   jest.clearAllMocks();
   getCalendar.mockResolvedValue({ success: true, data: payload });
+  getSubscriptions.mockResolvedValue({ success: true, data: [] });
+  getRecurring.mockResolvedValue({ success: true, data: { recurring: [], displayCurrency: "USD" } });
 });
 
 describe("HomeCalendarCard", () => {
@@ -173,3 +182,79 @@ describe("HomeCalendarCard", () => {
     await waitFor(() => expect(getCalendar).toHaveBeenCalledTimes(2));
   });
 });
+
+// Owner request 2026-10-15: the Home calendar shows what is still to come.
+describe("HomeCalendarCard expected payments", () => {
+  const netflix = {
+    id: 1,
+    name: "Netflix",
+    amount: 15.99,
+    currency: "USD",
+    frequency: "monthly",
+    // Due on the 5th: this month's falls before today, so only next month's shows.
+    nextDate: "2026-10-05",
+    status: "active",
+    displayAmount: 15.99,
+  };
+  const gym = { ...netflix, id: 2, name: "Gym", amount: 40, displayAmount: 40, nextDate: "2026-10-20" };
+  const salary = {
+    payee: "Employer",
+    avgAmount: 2500,
+    currency: "USD",
+    avgAmountDisplay: 2500,
+    frequency: "monthly",
+    count: 6,
+    lastDate: "2026-09-28",
+    nextDate: "2026-10-28",
+    accountId: 1,
+    categoryId: null,
+  };
+
+  beforeEach(() => {
+    getSubscriptions.mockResolvedValue({ success: true, data: [netflix, gym] });
+    getRecurring.mockResolvedValue({ success: true, data: { recurring: [salary], displayCurrency: "USD" } });
+  });
+
+  it("marks the days still to come, never today or earlier", async () => {
+    const { findByTestId, queryByTestId } = render(card());
+    expect(await findByTestId("home-expected-dot-20")).toBeTruthy();
+    expect(queryByTestId("home-expected-dot-28")).toBeTruthy();
+    expect(queryByTestId("home-expected-dot-5")).toBeNull();
+    expect(queryByTestId("home-expected-dot-15")).toBeNull();
+  });
+
+  it("sums what is still expected under the month's totals", async () => {
+    const { findByText } = render(card());
+    expect(await findByText("Still expected this month: $40 out, $2,500 in")).toBeTruthy();
+  });
+
+  it("lists a future day's expected payments when it is tapped", async () => {
+    const { findByTestId, getByTestId, getByText, queryByText } = render(card());
+    await findByTestId("home-expected-dot-20");
+    fireEvent.press(getByTestId("calendar-day-20"));
+    expect(getByText("EXPECTED")).toBeTruthy();
+    expect(getByText(/Gym/)).toBeTruthy();
+    expect(getByText("−$40.00")).toBeTruthy();
+    expect(queryByText("No transactions on this day.")).toBeNull();
+
+    fireEvent.press(getByTestId("calendar-day-28"));
+    expect(getByText(/Employer/)).toBeTruthy();
+    expect(getByText(/usual payment/)).toBeTruthy();
+    expect(getByText("+$2,500.00")).toBeTruthy();
+  });
+
+  it("shows a whole future month", async () => {
+    const { findByTestId, getByLabelText } = render(card());
+    await findByTestId("home-expected-dot-20");
+    fireEvent.press(getByLabelText("Next month"));
+    expect(await findByTestId("home-expected-dot-5")).toBeTruthy();
+  });
+
+  it("shows no expected payments when the schedule can't be loaded", async () => {
+    getSubscriptions.mockRejectedValue(new Error("offline"));
+    const { findByText, queryByTestId } = render(card());
+    await findByText(whole(3000));
+    expect(queryByTestId("home-expected-dot-20")).toBeNull();
+  });
+});
+

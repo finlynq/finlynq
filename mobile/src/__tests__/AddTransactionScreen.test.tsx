@@ -241,7 +241,7 @@ describe("AddTransactionScreen — editing a transfer pair", () => {
     expect(utils.getByText("Edit Transfer")).toBeTruthy();
     expect(utils.queryByText("Expense")).toBeNull(); // no mode switch on an edit
     expect(utils.getByLabelText("Amount").props.value).toBe("250");
-    expect(utils.getByDisplayValue("2026-09-14")).toBeTruthy();
+    expect(utils.getByText("Mon, Sep 14, 2026")).toBeTruthy(); // the calendar date field
     expect(utils.getByText("A Chequing")).toBeTruthy();
     expect(utils.getByText("B USD Savings")).toBeTruthy();
     expect(utils.getByLabelText("Note").props.value).toBe("Rent float");

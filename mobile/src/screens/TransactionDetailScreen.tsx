@@ -20,6 +20,7 @@ import { Icon } from "../components/icon";
 import { resolveTransferPair, type TransferEditSeed } from "../lib/transfer-pair";
 import { isMobileEditableOp, isPortfolioRow as isPortfolioOpRow } from "../lib/portfolio/edit-routing";
 import type { Transaction, Account, Category } from "../../../shared/types";
+import { DateField } from "../components/DateField";
 import type { NativeStackScreenProps } from "@react-navigation/native-stack";
 import type { TransactionsStackParamList } from "../navigation/TransactionsStack";
 
@@ -439,7 +440,19 @@ export default function TransactionDetailScreen({ route, navigation }: Props) {
               { backgroundColor: colors.card, borderColor: colors.border },
             ]}
           >
-            {renderField("Date", date, setDate)}
+            {editing ? (
+              <View style={fieldStyles.container}>
+                <Text style={[fieldStyles.label, { color: colors.mutedForeground }]}>Date</Text>
+                <DateField
+                  title="Date"
+                  value={date}
+                  onChange={setDate}
+                  style={[fieldStyles.input, { backgroundColor: colors.secondary, borderColor: colors.border }]}
+                />
+              </View>
+            ) : (
+              renderField("Date", date, setDate)
+            )}
             {renderField("Payee", payee, setPayee)}
             {renderPickerField("Account", accountName, accounts, selectedAccountId, setSelectedAccountId)}
             {renderPickerField(

@@ -1580,3 +1580,113 @@ export interface TransactionsCalendarResponse {
   days: TransactionsCalendarDay[];
   totals: { income: number; spending: number; count: number };
 }
+
+// ─── Email imports (2026-10-15) ─────────────────────────────────────────────
+// Transactions sent to the import email address. A bank-alert email body lands
+// in the email inbox as ONE candidate to record (GET/PATCH
+// /api/import/email-inbox[/id], bare JSON); an emailed statement file lands as
+// a staged import (GET/DELETE /api/import/staged[/id], PATCH .../bind, POST
+// .../approve). Same routes as the web's Email tab and /import/pending.
+
+export type EmailInboxAction =
+  | "pending"
+  | "needs_review"
+  | "auto_recorded"
+  | "manually_recorded"
+  | "duplicate_skipped"
+  | "unparseable"
+  | "discarded";
+
+/** What the email body was read as. `amount` is signed: money out is negative. */
+export interface EmailCandidate {
+  date: string;
+  amount: number;
+  currency: string;
+  payee: string;
+}
+
+export interface EmailInboxItem {
+  id: string;
+  fromAddress: string | null;
+  subject: string | null;
+  receivedAt: string;
+  nextPurgeAt?: string;
+  action: EmailInboxAction;
+  sourceKind: "attachment" | "body";
+  parseConfidence: "high" | "low" | null;
+  matchedRuleId: number | null;
+  recordedTransactionId: number | null;
+  stagedImportId: string | null;
+  candidate: EmailCandidate | null;
+}
+
+/** PATCH /api/import/email-inbox/[id] — exactly one of categoryId / transferDestAccountId.
+ *  amount / date / payee are sent only when the user changed them. */
+export interface EmailRecordBody {
+  action: "record";
+  accountId: number;
+  categoryId?: number;
+  transferDestAccountId?: number;
+  amount?: number;
+  date?: string;
+  payee?: string;
+  /** Record even though it looks like a transaction already in the account. */
+  force?: boolean;
+}
+
+export interface EmailRecordResult {
+  ok: boolean;
+  action: "manually_recorded" | "duplicate_skipped" | "possible_duplicate";
+  transactionId?: number;
+  duplicateOfTransactionId?: number;
+  /** Booked, but the sign is unusual for the category (2026-10-15). */
+  warning?: string;
+}
+
+export interface StagedImportSummary {
+  id: string;
+  source: "email" | "upload" | "connector" | string;
+  fromAddress: string | null;
+  subject: string | null;
+  receivedAt: string;
+  totalRowCount: number;
+  duplicateCount: number;
+  expiresAt: string;
+  originalFilename: string | null;
+  fileFormat: string | null;
+  boundAccountId: number | null;
+}
+
+export interface StagedImportRow {
+  id: string;
+  date: string;
+  amount: number;
+  currency: string | null;
+  payee: string | null;
+  category?: string | null;
+  accountName?: string | null;
+  isDuplicate: boolean;
+  dedupStatus?: string | null;
+  rowStatus?: string | null;
+  reconcileState?: string | null;
+}
+
+export interface StagedImportDetail {
+  staged: {
+    id: string;
+    status: string;
+    source?: string;
+    boundAccountId: number | null;
+    fromAddress?: string | null;
+    subject?: string | null;
+    originalFilename?: string | null;
+  };
+  rows: StagedImportRow[];
+}
+
+/** POST /api/import/staged/[id]/approve — rows sent to the bank ledger. */
+export interface StagedApproveResult {
+  approved: number;
+  skippedDuplicates: number;
+  rowErrors: { rowIndex: number; message: string }[];
+}

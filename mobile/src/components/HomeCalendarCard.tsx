@@ -6,6 +6,12 @@
 // Same data as the Transactions calendar: GET /api/transactions/calendar, which
 // follows the Reports money rules and answers in the display currency. A server
 // without that route hides the card rather than putting an error on Home.
+//
+// Days after today also show what is EXPECTED (owner request 2026-10-15): a
+// hollow dot for each day a subscription or a detected recurring payment falls
+// due, the list when such a day is tapped, and what is still to come under the
+// month's totals. Same schedule as the Subscriptions calendar; if it can't be
+// loaded the calendar simply shows no expected payments.
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { View, Text, TouchableOpacity, StyleSheet, ActivityIndicator } from "react-native";
 import { useIsFocused } from "@react-navigation/native";
@@ -17,12 +23,15 @@ import { localDateISO } from "../lib/subscriptions";
 import { dayTitle, isoDay } from "../lib/month-calendar";
 import {
   HEAT_LEVELS,
+  expectedForMonth,
+  expectedTotals,
   heatColor,
   maxDailySpending,
   shiftMonthKey,
   spendingLevel,
   transactionCountLabel,
 } from "../lib/home-calendar";
+import type { RecurringRow, ScheduleEvent, SubscriptionRow } from "../lib/subscriptions";
 import { MonthCalendar } from "./MonthCalendar";
 import type { TransactionsCalendarDay, TransactionsCalendarResponse } from "../../../shared/types";
 
@@ -54,6 +63,21 @@ export function HomeCalendarCard({
   const [error, setError] = useState<string | null>(null);
   const [unsupported, setUnsupported] = useState(false);
   const req = useRef(0);
+  // Subscriptions + detected recurring payments, for the days still to come.
+  const [schedule, setSchedule] = useState<{ subs: SubscriptionRow[]; recurring: RecurringRow[] } | null>(null);
+
+  const loadSchedule = useCallback(async () => {
+    try {
+      const [subsRes, recRes] = await Promise.all([endpoints.getSubscriptions(), endpoints.getRecurring()]);
+      setSchedule({
+        subs: subsRes.success && Array.isArray(subsRes.data) ? subsRes.data : [],
+        recurring: recRes.success && Array.isArray(recRes.data?.recurring) ? recRes.data.recurring : [],
+      });
+    } catch (e) {
+      // Nice to have: without it the calendar shows no expected payments.
+      logger.warn("home-calendar", "schedule fetch threw", { detail: String(e) });
+    }
+  }, []);
 
   const load = useCallback(async (month: string) => {
     const mine = ++req.current;
@@ -89,6 +113,11 @@ export function HomeCalendarCard({
     if (isFocused) load(monthKey);
   }, [isFocused, monthKey, refreshKey, load]);
 
+  // The schedule doesn't depend on the month, so it reloads only on focus / refresh.
+  useEffect(() => {
+    if (isFocused) loadSchedule();
+  }, [isFocused, refreshKey, loadSchedule]);
+
   const view = loaded && loaded.month === monthKey ? loaded.data : null;
   const currency = view?.displayCurrency || loaded?.data.displayCurrency || fallbackCurrency;
   const byDate = useMemo(() => {
@@ -97,6 +126,11 @@ export function HomeCalendarCard({
     return map;
   }, [view]);
   const maxSpending = useMemo(() => maxDailySpending(view?.days ?? []), [view]);
+  const expected = useMemo(
+    () => (schedule ? expectedForMonth(schedule.subs, schedule.recurring, monthKey, today) : new Map<string, ScheduleEvent[]>()),
+    [schedule, monthKey, today],
+  );
+  const stillExpected = useMemo(() => expectedTotals(expected), [expected]);
 
   if (unsupported) return null;
 
@@ -116,17 +150,23 @@ export function HomeCalendarCard({
   };
 
   const dayLabel = (day: number) => {
-    const d = byDate.get(isoDay(year, month, day));
-    if (!d) return "";
-    const parts = [transactionCountLabel(d.count)];
-    if (d.spending > 0) parts.push(`spent ${money(d.spending)}`);
-    if (d.income > 0) parts.push(`received ${money(d.income)}`);
+    const iso = isoDay(year, month, day);
+    const d = byDate.get(iso);
+    const parts: string[] = [];
+    if (d) {
+      parts.push(transactionCountLabel(d.count));
+      if (d.spending > 0) parts.push(`spent ${money(d.spending)}`);
+      if (d.income > 0) parts.push(`received ${money(d.income)}`);
+    }
+    const due = expected.get(iso);
+    if (due) parts.push(`${due.length} expected`);
     return parts.join(", ");
   };
 
   const totals = view?.totals;
   const net = totals ? totals.income - totals.spending : 0;
   const selectedTotals = selected ? byDate.get(selected) : undefined;
+  const selectedExpected = selected ? expected.get(selected) ?? [] : [];
 
   return (
     <View style={[styles.card, { backgroundColor: colors.card, borderColor: colors.border }]}>
@@ -165,12 +205,19 @@ export function HomeCalendarCard({
           ];
         }}
         renderDay={(day) => {
-          const d = byDate.get(isoDay(year, month, day));
+          const iso = isoDay(year, month, day);
+          const d = byDate.get(iso);
+          const due = expected.has(iso);
           return (
-            <View
-              testID={d && d.income > 0 ? `home-income-dot-${day}` : undefined}
-              style={[styles.incomeDot, { backgroundColor: d && d.income > 0 ? colors.pos : "transparent" }]}
-            />
+            <View style={styles.dots}>
+              <View
+                testID={d && d.income > 0 ? `home-income-dot-${day}` : undefined}
+                style={[styles.incomeDot, { backgroundColor: d && d.income > 0 ? colors.pos : "transparent" }]}
+              />
+              {due ? (
+                <View testID={`home-expected-dot-${day}`} style={[styles.incomeDot, styles.expectedDot, { borderColor: colors.primary }]} />
+              ) : null}
+            </View>
           );
         }}
       />
@@ -186,6 +233,12 @@ export function HomeCalendarCard({
         <Text style={[styles.legendText, { color: colors.mutedForeground }]}>More spending</Text>
         <View style={[styles.incomeDot, styles.legendDot, { backgroundColor: colors.pos }]} />
         <Text style={[styles.legendText, { color: colors.mutedForeground }]}>Income</Text>
+        {expected.size > 0 ? (
+          <>
+            <View style={[styles.incomeDot, styles.expectedDot, styles.legendDot, { borderColor: colors.primary }]} />
+            <Text style={[styles.legendText, { color: colors.mutedForeground }]}>Expected</Text>
+          </>
+        ) : null}
       </View>
 
       <View style={[styles.divider, { backgroundColor: colors.border }]} />
@@ -225,20 +278,47 @@ export function HomeCalendarCard({
                 <Text style={[styles.openText, { color: colors.primary }]}>See this day&apos;s transactions ›</Text>
               </TouchableOpacity>
             </>
-          ) : (
+          ) : selectedExpected.length === 0 ? (
             <Text style={[styles.emptyDay, { color: colors.mutedForeground }]}>No transactions on this day.</Text>
-          )}
+          ) : null}
+          {selectedExpected.length > 0 ? (
+            <View style={styles.expectedList}>
+              <Text style={[styles.expectedHead, { color: colors.mutedForeground }]}>EXPECTED</Text>
+              {selectedExpected.map((e, i) => (
+                <View key={`${e.name}-${i}`} style={styles.expectedRow}>
+                  <Text style={[styles.expectedName, { color: colors.foreground }]} numberOfLines={1}>
+                    {e.name}
+                    <Text style={{ color: colors.mutedForeground }}>
+                      {e.source === "detected" ? " · usual payment" : " · subscription"}
+                    </Text>
+                  </Text>
+                  <Text style={[styles.expectedAmount, { color: e.type === "income" ? colors.pos : colors.foreground }]}>
+                    {e.type === "income" ? "+" : "−"}
+                    {formatCurrency(e.amount, e.currency)}
+                  </Text>
+                </View>
+              ))}
+            </View>
+          ) : null}
         </View>
       ) : (
-        <View style={styles.stats}>
-          <Stat label="Income" value={totals ? whole(totals.income) : "—"} color={colors.pos} />
-          <Stat label="Spending" value={totals ? whole(totals.spending) : "—"} color={colors.neg} />
-          <Stat
-            label="Net"
-            value={totals ? `${net > 0 ? "+" : ""}${whole(net)}` : "—"}
-            color={!totals ? colors.foreground : net >= 0 ? colors.pos : colors.neg}
-          />
-        </View>
+        <>
+          <View style={styles.stats}>
+            <Stat label="Income" value={totals ? whole(totals.income) : "—"} color={colors.pos} />
+            <Stat label="Spending" value={totals ? whole(totals.spending) : "—"} color={colors.neg} />
+            <Stat
+              label="Net"
+              value={totals ? `${net > 0 ? "+" : ""}${whole(net)}` : "—"}
+              color={!totals ? colors.foreground : net >= 0 ? colors.pos : colors.neg}
+            />
+          </View>
+          {stillExpected.count > 0 ? (
+            <Text style={[styles.stillExpected, { color: colors.mutedForeground }]}>
+              Still expected this month: {whole(stillExpected.bills)} out
+              {stillExpected.income > 0 ? `, ${whole(stillExpected.income)} in` : ""}
+            </Text>
+          ) : null}
+        </>
       )}
     </View>
   );
@@ -267,6 +347,15 @@ const styles = StyleSheet.create({
   // the selected one), so neighbouring shades read as separate tiles.
   dayCell: { borderRadius: 12, borderWidth: 2 },
   incomeDot: { width: 5, height: 5, borderRadius: 2.5, marginTop: 3 },
+  dots: { flexDirection: "row", gap: 2 },
+  // Hollow: something still to come, not money that moved.
+  expectedDot: { backgroundColor: "transparent", borderWidth: 1 },
+  expectedList: { marginTop: 10 },
+  expectedHead: { fontSize: 11, fontWeight: "700", letterSpacing: 0.5, marginBottom: 4 },
+  expectedRow: { flexDirection: "row", justifyContent: "space-between", alignItems: "center", paddingVertical: 3 },
+  expectedName: { flex: 1, fontSize: 13, marginRight: 8 },
+  expectedAmount: { fontSize: 13, fontWeight: "700", fontVariant: ["tabular-nums"] },
+  stillExpected: { fontSize: 12, marginTop: 8 },
   legend: { flexDirection: "row", alignItems: "center", justifyContent: "center", flexWrap: "wrap", marginTop: 8 },
   legendText: { fontSize: 11, marginHorizontal: 4 },
   swatch: { width: 12, height: 12, borderRadius: 3, marginHorizontal: 1.5 },

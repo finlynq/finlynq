@@ -120,6 +120,7 @@ export default function MoreScreen() {
         { icon: "subscriptions", label: "Subscriptions", onPress: () => navigation.navigate("Subscriptions") },
         { icon: "reports", label: "Reports", onPress: () => navigation.navigate("Reports") },
         { icon: "inbox", label: "Reconcile", onPress: () => navigation.navigate("Inbox") },
+        { icon: "mail", label: "Email imports", onPress: () => navigation.navigate("EmailImports") },
         { icon: "categories", label: "Categories", onPress: () => navigation.navigate("Categories") },
         { icon: "import", label: "Import", onPress: () => navigation.navigate("Import") },
       ],
