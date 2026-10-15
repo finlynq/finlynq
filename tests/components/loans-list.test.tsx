@@ -85,6 +85,11 @@ describe("LoansList", () => {
     expect(names()).toEqual(["Dollar loan", "Rouble loan"]);
   });
 
+  it("shows no converted balance for a paid-off foreign loan", () => {
+    renderList([loan({ id: 1, name: "Old CAD loan", currency: "CAD", remainingBalance: 0, remainingBalanceDisplay: 0 })]);
+    expect(screen.queryAllByText(/≈/)).toHaveLength(0);
+  });
+
   it("sorts total interest by its converted figure, shown in the loan's currency", () => {
     renderList([
       loan({ id: 1, name: "Rouble loan", currency: "RUB", totalInterest: 300_000, totalInterestDisplay: 3_300 }),

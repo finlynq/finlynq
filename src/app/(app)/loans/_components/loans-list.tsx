@@ -145,7 +145,8 @@ export function LoansList<T extends LoanListRow>({
               )}
               <span className="font-mono font-semibold text-rose-600">{formatCurrency(l.remainingBalance, l.currency)}</span>
             </span>
-            {l.currency !== displayCurrency && l.remainingBalanceDisplay != null && (
+            {/* Nothing to convert once a loan is paid off. */}
+            {l.currency !== displayCurrency && l.remainingBalanceDisplay != null && l.remainingBalance !== 0 && (
               <div className="font-mono text-xs text-muted-foreground">
                 ≈ {formatCurrency(l.remainingBalanceDisplay, displayCurrency)}
               </div>
