@@ -2485,7 +2485,7 @@
           "description": "bank_transactions.id to materialize."
         },
         "categoryId": {
-          "description": "Category mode: stamp this category on the new tx (sign-vs-category enforced).",
+          "description": "Category mode: stamp this category on the new tx. An amount whose sign is unusual for the category is still booked; the response carries a warning.",
           "type": "integer",
           "exclusiveMinimum": 0,
           "maximum": 9007199254740991

@@ -453,7 +453,7 @@ export function registerReconcileTools(server: McpServer, ctx: PgToolContext) {
           .int()
           .positive()
           .optional()
-          .describe("Category mode: stamp this category on the new tx (sign-vs-category enforced)."),
+          .describe("Category mode: stamp this category on the new tx. An amount whose sign is unusual for the category is still booked; the response carries a warning."),
         accountId: z
           .number()
           .int()
