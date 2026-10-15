@@ -187,3 +187,13 @@ npx eas build --platform ios --profile production --auto-submit --non-interactiv
   tapped day, and "Still expected this month" under the totals. **Reconcile** shows the server's note
   when an amount's sign is unusual for the category. The server stopped refusing those (web PR #379,
   prod 2026-10-15); against an older server such a row is still refused with its message.
+- **1.0.27 / vc36 (Android internal testing only)** (2026-10-15; no iOS build): **Email imports**
+  reworked after the owner tried 1.0.26 on a device. One list of emails with a **To record /
+  Recorded** switch instead of "emails" beside "statement files": a bank-alert email, a
+  statement-file email (opens the file review) and an email with no amount in it are all "to
+  record"; recorded, rule-recorded, already-recorded and handled statement-file emails are
+  "recorded" (discarded emails are left out). Opening an email shows **the email itself** first
+  (subject, sender, date, its text; HTML reduced to readable lines, never rendered), then **What we
+  read** with the web's "why this needs a look" reasons, then the record form. Recorded emails open
+  read-only. Uses `GET /api/import/email-inbox/[id]` (on prod already). Upload and bank-feed files
+  waiting for review are no longer listed here (they never were before 1.0.26).
