@@ -187,7 +187,7 @@ npx eas build --platform ios --profile production --auto-submit --non-interactiv
   tapped day, and "Still expected this month" under the totals. **Reconcile** shows the server's note
   when an amount's sign is unusual for the category. The server stopped refusing those (web PR #379,
   prod 2026-10-15); against an older server such a row is still refused with its message.
-- **1.0.27 / vc36 (Android + iOS build 13)** (2026-10-15; the owner checked it on a device, then Android was promoted internal → production and sent for review the same day, and iOS build 13 was built on EAS with auto-submit to TestFlight, uploaded 13:10 local): **Email imports**
+- **1.0.27 / vc36 (Android + iOS build 13)** (2026-10-15; the owner checked it on a device, then Android was promoted internal → production and sent for review the same day, and iOS build 13 was built on EAS with auto-submit to TestFlight, uploaded 13:10 local, then version 1.0.27 created in App Store Connect with build 13 and submitted for App Review at 13:50 local, "Waiting for Review"): **Email imports**
   reworked after the owner tried 1.0.26 on a device. One list of emails with a **To record /
   Recorded** switch instead of "emails" beside "statement files": a bank-alert email, a
   statement-file email (opens the file review) and an email with no amount in it are all "to
