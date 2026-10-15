@@ -4,13 +4,160 @@
 import type {
   EmailCandidate,
   EmailInboxItem,
+  EmailParseSignals,
   EmailRecordBody,
   StagedImportSummary,
 } from "../../../shared/types";
 
-/** Emails waiting for a click: a parsed bank-alert body still under review. */
-export function emailsToRecord(items: EmailInboxItem[]): EmailInboxItem[] {
-  return items.filter((i) => i.action === "needs_review" && i.sourceKind === "body" && i.candidate != null);
+/**
+ * Where an email stands, for the list and its To record / Recorded switch
+ * (owner feedback 2026-10-15: one list of emails, not "emails" beside
+ * "statement files").
+ *   to_record      a bank-alert email read as one transaction, waiting for a click
+ *   unreadable     no amount could be read from it: open it to read, or discard
+ *   file_to_review it carried a statement file whose rows are still waiting
+ *   recorded / auto_recorded / duplicate / file_done  nothing left to do
+ * Discarded emails are left out.
+ */
+export type EmailStatus =
+  | "to_record"
+  | "unreadable"
+  | "file_to_review"
+  | "recorded"
+  | "auto_recorded"
+  | "duplicate"
+  | "file_done";
+
+export function emailStatus(item: EmailInboxItem, pendingStagedIds: ReadonlySet<string>): EmailStatus | null {
+  if (item.action === "discarded") return null;
+  if (item.action === "auto_recorded") return "auto_recorded";
+  if (item.action === "manually_recorded") return "recorded";
+  if (item.action === "duplicate_skipped") return "duplicate";
+  if (item.sourceKind === "attachment") {
+    // An attachment email keeps its action; its file decides whether work is left.
+    return item.stagedImportId && pendingStagedIds.has(item.stagedImportId) ? "file_to_review" : "file_done";
+  }
+  return item.candidate ? "to_record" : "unreadable";
+}
+
+export function isStillToRecord(status: EmailStatus): boolean {
+  return status === "to_record" || status === "unreadable" || status === "file_to_review";
+}
+
+export interface EmailListEntry {
+  item: EmailInboxItem;
+  status: EmailStatus;
+}
+
+/** The two halves of the switch, newest first (the server's order). */
+export function splitEmails(
+  items: EmailInboxItem[],
+  pendingStagedIds: ReadonlySet<string>,
+): { toRecord: EmailListEntry[]; recorded: EmailListEntry[] } {
+  const toRecord: EmailListEntry[] = [];
+  const recorded: EmailListEntry[] = [];
+  for (const item of items) {
+    const status = emailStatus(item, pendingStagedIds);
+    if (!status) continue;
+    (isStillToRecord(status) ? toRecord : recorded).push({ item, status });
+  }
+  return { toRecord, recorded };
+}
+
+/** A short note for an email's row. */
+export function emailStatusLabel(status: EmailStatus): string {
+  switch (status) {
+    case "to_record":
+      return "To record";
+    case "unreadable":
+      return "No amount found";
+    case "file_to_review":
+      return "Statement file";
+    case "recorded":
+      return "Recorded";
+    case "auto_recorded":
+      return "Recorded by an email rule";
+    case "duplicate":
+      return "Already recorded";
+    default:
+      return "Statement file, done";
+  }
+}
+
+// Named entities common in bank emails; anything else is left as written.
+const NAMED_ENTITIES: Record<string, string> = {
+  eacute: "é",
+  egrave: "è",
+  agrave: "à",
+  ccedil: "ç",
+  rsquo: "’",
+  lsquo: "‘",
+  rdquo: "”",
+  ldquo: "“",
+  ndash: "–",
+  mdash: "—",
+  hellip: "…",
+  euro: "€",
+  pound: "£",
+  yen: "¥",
+  copy: "©",
+  reg: "®",
+  trade: "™",
+  bull: "•",
+  middot: "·",
+};
+
+/**
+ * The email's text to read on a phone. Plain text when the email has it;
+ * otherwise its HTML reduced to text that keeps the line breaks, so a table
+ * of "Merchant / Amount / Date" stays readable (the web shows the HTML itself;
+ * the app has no web view). Never rendered as HTML.
+ */
+export function emailBodyText(bodyText: string | null | undefined, bodyHtml: string | null | undefined): string {
+  if (bodyText && bodyText.trim()) return bodyText.replace(/\r\n/g, "\n").trim();
+  if (!bodyHtml) return "";
+  const text = bodyHtml
+    .replace(/<(style|script|head)[\s\S]*?<\/\1>/gi, " ")
+    .replace(/<br\s*\/?>/gi, "\n")
+    .replace(/<\/(p|div|tr|li|h[1-6]|table|section)>/gi, "\n")
+    .replace(/<\/(td|th)>/gi, "  ")
+    .replace(/<[^>]+>/g, "")
+    .replace(/&nbsp;/gi, " ")
+    .replace(/&amp;/gi, "&")
+    .replace(/&lt;/gi, "<")
+    .replace(/&gt;/gi, ">")
+    .replace(/&quot;/gi, '"')
+    .replace(/&#39;|&apos;/gi, "'")
+    .replace(/&([a-z]+);/gi, (m, name: string) => NAMED_ENTITIES[name.toLowerCase()] ?? m)
+    .replace(/&#x([0-9a-f]+);/gi, (_, h) => String.fromCharCode(parseInt(h, 16)))
+    .replace(/&#(\d+);/g, (_, n) => String.fromCharCode(Number(n)));
+  return text
+    .split("\n")
+    .map((line) => line.replace(/[ \t]+/g, " ").trim())
+    .join("\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
+
+/**
+ * Why a parsed email needs a closer look, in the web tab's words
+ * (pf-app inbox-email-tab.tsx "Why this needs review").
+ */
+export function reviewReasons(
+  candidate: Pick<EmailCandidate, "payee"> | null,
+  signals: EmailParseSignals | null | undefined,
+  money: (value: number, currency: string) => string,
+): string[] {
+  if (!signals) return [];
+  const reasons: string[] = [];
+  if (signals.multipleAmounts) {
+    reasons.push(`More than one amount in the email (${signals.detectedAmounts.map((a) => money(a.value, a.currency)).join(", ")})`);
+  }
+  if (signals.usedFallbackDate) reasons.push("No date in the email, so the date it arrived is used");
+  if (signals.dateAmbiguous) reasons.push("The date could be day/month or month/day");
+  if (!signals.signExplicit) reasons.push("It doesn't say whether money went out or came in, so it is taken as money out");
+  if (candidate?.payee === "Unknown") reasons.push("No payee could be found");
+  return reasons;
 }
 
 export interface EmailRecordForm {

@@ -13,9 +13,12 @@ import { lightColors } from "../theme/colors";
 import {
   buildEmailRecordBody,
   describeApproveResult,
+  emailBodyText,
   emailFormInit,
-  emailsToRecord,
+  emailStatus,
   flipAmountSign,
+  reviewReasons,
+  splitEmails,
   parseAmountInput,
   stagedSourceLabel,
   stagedTitle,
@@ -36,6 +39,7 @@ jest.mock("@react-navigation/native", () => ({
 jest.mock("../api/client", () => ({
   endpoints: {
     getEmailInbox: jest.fn(),
+    getEmailInboxItem: jest.fn(),
     getStagedImports: jest.fn(),
     getInboxAccounts: jest.fn(),
     getCategories: jest.fn(),
@@ -118,17 +122,79 @@ beforeEach(() => {
   mockRouteParams = undefined;
   ep.getInboxAccounts.mockResolvedValue(ok(accounts));
   ep.getCategories.mockResolvedValue(ok(categories));
+  ep.getEmailInboxItem.mockResolvedValue(
+    ok({
+      id: "e1",
+      fromAddress: "alerts@bank.example",
+      subject: "Card purchase",
+      bodyText: "You spent $42.50 at Coffee Shop\non your card ending 1234.",
+      bodyHtml: null,
+      receivedAt: "2026-10-14T10:00:00Z",
+      action: "needs_review",
+      sourceKind: "body",
+      parseConfidence: "high",
+      candidate: { date: "2026-10-14", amount: -42.5, currency: "USD", payee: "Coffee Shop", last4: "1234" },
+      signals: { detectedAmounts: [{ value: 42.5, currency: "USD" }], multipleAmounts: false, dateAmbiguous: false, usedFallbackDate: true, signExplicit: true, last4: "1234" },
+    }),
+  );
 });
 
 describe("email-imports helpers", () => {
-  it("lists only body emails still waiting, with something to record", () => {
+  // Owner feedback 2026-10-15: one list of emails with a To record / Recorded switch.
+  it("splits emails into still to record and recorded", () => {
+    const pending = new Set(["file-pending"]);
     const items = [
       email({ id: "a" }),
       email({ id: "b", action: "manually_recorded" }),
-      email({ id: "c", sourceKind: "attachment", candidate: null }),
-      email({ id: "d", candidate: null }),
+      email({ id: "c", action: "auto_recorded" }),
+      email({ id: "d", action: "duplicate_skipped" }),
+      email({ id: "e", sourceKind: "attachment", candidate: null, stagedImportId: "file-pending" }),
+      email({ id: "f", sourceKind: "attachment", candidate: null, stagedImportId: "file-done" }),
+      email({ id: "g", action: "unparseable", candidate: null }),
+      email({ id: "h", action: "discarded" }),
     ];
-    expect(emailsToRecord(items).map((i) => i.id)).toEqual(["a"]);
+    const { toRecord, recorded } = splitEmails(items, pending);
+    expect(toRecord.map((x) => [x.item.id, x.status])).toEqual([
+      ["a", "to_record"],
+      ["e", "file_to_review"],
+      ["g", "unreadable"],
+    ]);
+    expect(recorded.map((x) => [x.item.id, x.status])).toEqual([
+      ["b", "recorded"],
+      ["c", "auto_recorded"],
+      ["d", "duplicate"],
+      ["f", "file_done"],
+    ]);
+    expect(emailStatus(email({ action: "discarded" }), pending)).toBeNull();
+  });
+
+  it("turns an email into text to read, keeping its lines", () => {
+    expect(emailBodyText("Plain text\r\nsecond line", "<p>ignored</p>")).toBe("Plain text\nsecond line");
+    expect(
+      emailBodyText(
+        null,
+        "<html><head><style>p{color:red}</style></head><body><p>You spent&nbsp;<b>$42.50</b></p><table><tr><td>Merchant</td><td>Caf&eacute; &amp; Co</td></tr></table>Card ending&#32;1234<br>Thanks</body></html>",
+      ),
+    ).toBe("You spent $42.50\nMerchant Café & Co\n\nCard ending 1234\nThanks");
+    expect(emailBodyText("  ", null)).toBe("");
+  });
+
+  it("says why a parse needs a closer look, in the web's terms", () => {
+    const money = (v: number, c: string) => `${c} ${v}`;
+    expect(
+      reviewReasons(
+        { payee: "Unknown" },
+        { detectedAmounts: [{ value: 1, currency: "USD" }, { value: 2, currency: "USD" }], multipleAmounts: true, dateAmbiguous: true, usedFallbackDate: true, signExplicit: false, last4: null },
+        money,
+      ),
+    ).toEqual([
+      "More than one amount in the email (USD 1, USD 2)",
+      "No date in the email, so the date it arrived is used",
+      "The date could be day/month or month/day",
+      "It doesn't say whether money went out or came in, so it is taken as money out",
+      "No payee could be found",
+    ]);
+    expect(reviewReasons({ payee: "Shop" }, null, money)).toEqual([]);
   });
 
   it("sends only what the user changed, like the web tab", () => {
@@ -173,13 +239,23 @@ describe("email-imports helpers", () => {
 });
 
 describe("EmailImportsScreen", () => {
-  it("lists emails to record and statement files, and opens each", async () => {
-    ep.getEmailInbox.mockResolvedValue(ok([email(), email({ id: "x", action: "auto_recorded" })]));
+  const statementEmail = email({
+    id: "att",
+    sourceKind: "attachment",
+    subject: "Your October statement",
+    candidate: null,
+    stagedImportId: "f1",
+  });
+
+  it("lists the emails still to record, a statement-file email among them, and opens each", async () => {
+    ep.getEmailInbox.mockResolvedValue(ok([email(), statementEmail, email({ id: "x", action: "auto_recorded", candidate: { date: "2026-10-10", amount: -9, currency: "USD", payee: "Gym" } })]));
     ep.getStagedImports.mockResolvedValue(ok([file()]));
-    const { getByText } = render(wrap(<EmailImportsScreen />));
+    const { getByText, queryByText } = render(wrap(<EmailImportsScreen />));
     await waitFor(() => expect(getByText("Coffee Shop")).toBeTruthy());
-    expect(getByText("Your October statement")).toBeTruthy();
-    expect(getByText(/Emailed file · 3 rows · 1 already recorded/)).toBeTruthy();
+    expect(getByText("To record (2)")).toBeTruthy();
+    expect(getByText("Recorded (1)")).toBeTruthy();
+    expect(getByText("Statement file · 3 rows, 1 already recorded")).toBeTruthy();
+    expect(queryByText("Gym")).toBeNull();
 
     fireEvent.press(getByText("Coffee Shop"));
     expect(mockNavigate).toHaveBeenCalledWith("EmailRecord", { item: email() });
@@ -187,12 +263,24 @@ describe("EmailImportsScreen", () => {
     expect(mockNavigate).toHaveBeenCalledWith("StagedImport", { id: "f1", title: "Your October statement" });
   });
 
+  it("switches to the recorded emails, which open read-only", async () => {
+    const gym = email({ id: "x", action: "auto_recorded", recordedTransactionId: 55, candidate: { date: "2026-10-10", amount: -9, currency: "USD", payee: "Gym" } });
+    ep.getEmailInbox.mockResolvedValue(ok([email(), gym]));
+    ep.getStagedImports.mockResolvedValue(ok([]));
+    const { getByText, queryByText } = render(wrap(<EmailImportsScreen />));
+    await waitFor(() => expect(getByText("Coffee Shop")).toBeTruthy());
+    fireEvent.press(getByText("Recorded (1)"));
+    expect(queryByText("Coffee Shop")).toBeNull();
+    expect(getByText("Recorded by an email rule")).toBeTruthy();
+    fireEvent.press(getByText("Gym"));
+    expect(mockNavigate).toHaveBeenCalledWith("EmailRecord", { item: gym });
+  });
+
   it("says when nothing is waiting", async () => {
     ep.getEmailInbox.mockResolvedValue(ok([]));
     ep.getStagedImports.mockResolvedValue(ok([]));
     const { getByText } = render(wrap(<EmailImportsScreen />));
-    await waitFor(() => expect(getByText("No emailed transactions waiting.")).toBeTruthy());
-    expect(getByText("No statement files waiting.")).toBeTruthy();
+    await waitFor(() => expect(getByText("Nothing to record. Every email has been dealt with.")).toBeTruthy());
   });
 
   it("shows the server's error", async () => {
@@ -229,6 +317,30 @@ describe("EmailRecordScreen", () => {
     expect(ep.recordEmail).toHaveBeenCalledWith("e1", { action: "record", accountId: 1, categoryId: 10, amount: 42.5 });
     expect(alert).toHaveBeenCalledWith("Recorded", expect.stringContaining("expense category"));
     expect(mockGoBack).toHaveBeenCalled();
+  });
+
+  it("shows the email itself and what was read from it", async () => {
+    const { findByText, getByText } = await open();
+    expect(await findByText(/You spent \$42\.50 at Coffee Shop/)).toBeTruthy();
+    expect(getByText("Card purchase")).toBeTruthy();
+    expect(getByText(/alerts@bank\.example · 2026-10-14/)).toBeTruthy();
+    expect(getByText("WHAT WE READ")).toBeTruthy();
+    expect(getByText(/· card ending 1234/)).toBeTruthy();
+    expect(getByText("Why this needs a look")).toBeTruthy();
+    expect(getByText("• No date in the email, so the date it arrived is used")).toBeTruthy();
+    expect(ep.getEmailInboxItem).toHaveBeenCalledWith("e1");
+  });
+
+  it("opens a recorded email read-only", async () => {
+    const { findByText, queryByLabelText, queryByText, getByText } = await open(
+      email({ action: "auto_recorded", recordedTransactionId: 55 }),
+    );
+    expect(await findByText(/You spent \$42\.50/)).toBeTruthy();
+    expect(getByText("Recorded by an email rule (transaction #55)")).toBeTruthy();
+    expect(queryByLabelText("Record")).toBeNull();
+    expect(queryByLabelText("ACCOUNT: none")).toBeNull();
+    expect(queryByText("Discard this email")).toBeNull();
+    expect(getByText("Close")).toBeTruthy();
   });
 
   it("offers Record anyway for a possible duplicate", async () => {

@@ -1620,6 +1620,31 @@ export interface EmailInboxItem {
   candidate: EmailCandidate | null;
 }
 
+/** How sure the parser was, and why (GET /api/import/email-inbox/[id] `signals`). */
+export interface EmailParseSignals {
+  detectedAmounts: { value: number; currency: string }[];
+  multipleAmounts: boolean;
+  dateAmbiguous: boolean;
+  usedFallbackDate: boolean;
+  signExplicit: boolean;
+  last4: string | null;
+}
+
+/** GET /api/import/email-inbox/[id] — the email itself, decrypted. */
+export interface EmailInboxDetail {
+  id: string;
+  fromAddress: string | null;
+  subject: string | null;
+  bodyText: string | null;
+  bodyHtml: string | null;
+  receivedAt: string;
+  action: EmailInboxAction;
+  sourceKind: "attachment" | "body";
+  parseConfidence: "high" | "low" | null;
+  candidate: (EmailCandidate & { last4?: string | null }) | null;
+  signals: EmailParseSignals | null;
+}
+
 /** PATCH /api/import/email-inbox/[id] — exactly one of categoryId / transferDestAccountId.
  *  amount / date / payee are sent only when the user changed them. */
 export interface EmailRecordBody {

@@ -384,6 +384,7 @@ import type {
   AutoRuleRecent,
   BankRowCommitBody,
   EmailInboxItem,
+  EmailInboxDetail,
   EmailRecordBody,
   EmailRecordResult,
   StagedImportSummary,
@@ -971,6 +972,11 @@ export const endpoints = {
   // The email inbox, newest first. Opening it also auto-records emails that
   // match an email rule, exactly as the web tab does.
   getEmailInbox: () => api.get<EmailInboxItem[]>("/api/import/email-inbox"),
+
+  // One email in full (subject, sender, text / HTML body) plus what the parser
+  // read from it and why it may need a closer look.
+  getEmailInboxItem: (id: string) =>
+    api.get<EmailInboxDetail>(`/api/import/email-inbox/${encodeURIComponent(id)}`),
 
   // Record one emailed transaction. A possible duplicate comes back as a 200
   // `{ ok: false, action: "possible_duplicate" }`: resend with `force` to book

@@ -1,8 +1,11 @@
-// Record one emailed transaction (a bank-alert email whose body was read as a
-// payment). Mirrors the web Email tab's Record: pick the account, then a
-// category or a transfer destination; the amount, date and payee can be
-// corrected first. An amount whose sign is unusual for the category (a refund
-// in an expense category) is recorded with a warning, never refused.
+// One emailed transaction. The email itself comes first (owner feedback
+// 2026-10-15: "I need to see the email, same as on the web, to know what it is
+// for"), then what was read from it and why it may need a closer look, then the
+// record form: pick the account, then a category or a transfer destination; the
+// amount, date and payee can be corrected first. An amount whose sign is
+// unusual for the category (a refund in an expense category) is recorded with a
+// warning, never refused. An email already recorded (or one with no amount in
+// it) opens read-only.
 
 import React, { useEffect, useMemo, useState } from "react";
 import {
@@ -22,11 +25,20 @@ import { useNavigation, useRoute, type RouteProp } from "@react-navigation/nativ
 import { useTheme } from "../theme";
 import { endpoints } from "../api/client";
 import { logger } from "../lib/logger";
-import { safeAccountName, safeName } from "../lib/format";
+import { formatCurrency, safeAccountName, safeName } from "../lib/format";
 import { PickerSheet, type PickerOption } from "../components/picker-sheet";
 import { DateField } from "../components/DateField";
-import { buildEmailRecordBody, emailFormInit, flipAmountSign, type EmailRecordForm } from "../lib/email-imports";
-import type { Category, InboxAccount } from "../../../shared/types";
+import {
+  buildEmailRecordBody,
+  emailBodyText,
+  emailFormInit,
+  emailStatus,
+  emailStatusLabel,
+  flipAmountSign,
+  reviewReasons,
+  type EmailRecordForm,
+} from "../lib/email-imports";
+import type { Category, EmailInboxDetail, InboxAccount } from "../../../shared/types";
 import type { MoreStackParamList } from "../navigation/MoreStack";
 
 type Picker = "account" | "category" | "dest" | null;
@@ -35,8 +47,18 @@ export default function EmailRecordScreen() {
   const { colors } = useTheme();
   const navigation = useNavigation();
   const { item } = useRoute<RouteProp<MoreStackParamList, "EmailRecord">>().params;
-  const candidate = item.candidate!;
-  const [form, setForm] = useState<EmailRecordForm>(() => emailFormInit(candidate));
+  const candidate = item.candidate;
+  // Only a bank-alert email still under review, with an amount read from it,
+  // can be recorded; anything else opens read-only.
+  const recordable = item.action === "needs_review" && item.sourceKind === "body" && candidate != null;
+  const canDiscard =
+    item.sourceKind === "body" && !["auto_recorded", "manually_recorded", "duplicate_skipped", "discarded"].includes(item.action);
+  const [form, setForm] = useState<EmailRecordForm>(() =>
+    emailFormInit(candidate ?? { date: "", amount: 0, currency: "USD", payee: "" }),
+  );
+  const [detail, setDetail] = useState<EmailInboxDetail | null>(null);
+  const [detailError, setDetailError] = useState<string | null>(null);
+  const [wholeEmail, setWholeEmail] = useState(false);
   const [accounts, setAccounts] = useState<InboxAccount[]>([]);
   const [categories, setCategories] = useState<Category[]>([]);
   const [picker, setPicker] = useState<Picker>(null);
@@ -58,6 +80,25 @@ export default function EmailRecordScreen() {
       alive = false;
     };
   }, []);
+
+  // The email itself (subject, sender, body) and what the parser read from it.
+  useEffect(() => {
+    let alive = true;
+    endpoints
+      .getEmailInboxItem(item.id)
+      .then((res) => {
+        if (!alive) return;
+        if (res.success) setDetail(res.data);
+        else setDetailError(res.error);
+      })
+      .catch((e) => {
+        logger.error("email-record", "detail threw", { detail: String(e) });
+        if (alive) setDetailError("Cannot connect to server");
+      });
+    return () => {
+      alive = false;
+    };
+  }, [item.id]);
 
   // An email records into a plain account; the body surface has no holding.
   const accountOptions: PickerOption[] = useMemo(
@@ -85,6 +126,7 @@ export default function EmailRecordScreen() {
   };
 
   const record = async (force = false) => {
+    if (!recordable || !candidate) return;
     const built = buildEmailRecordBody(candidate, form, { force });
     if (!built.ok) {
       setError(built.error);
@@ -151,30 +193,104 @@ export default function EmailRecordScreen() {
       <KeyboardAvoidingView style={styles.flex} behavior={Platform.OS === "ios" ? "padding" : undefined}>
         <View style={[styles.topBar, { borderBottomColor: colors.border }]}>
           <TouchableOpacity onPress={() => navigation.goBack()}>
-            <Text style={[styles.backBtn, { color: colors.primary }]}>Cancel</Text>
+            <Text style={[styles.backBtn, { color: colors.primary }]}>{recordable ? "Cancel" : "Close"}</Text>
           </TouchableOpacity>
-          <Text style={[styles.title, { color: colors.foreground }]}>Record email</Text>
-          <TouchableOpacity onPress={() => record(false)} disabled={saving} accessibilityRole="button" accessibilityLabel="Record">
-            {saving ? (
-              <ActivityIndicator size="small" color={colors.primary} />
-            ) : (
-              <Text style={[styles.saveBtn, { color: colors.primary }]}>Record</Text>
-            )}
-          </TouchableOpacity>
+          <Text style={[styles.title, { color: colors.foreground }]}>{recordable ? "Record email" : "Email"}</Text>
+          {recordable ? (
+            <TouchableOpacity onPress={() => record(false)} disabled={saving} accessibilityRole="button" accessibilityLabel="Record">
+              {saving ? (
+                <ActivityIndicator size="small" color={colors.primary} />
+              ) : (
+                <Text style={[styles.saveBtn, { color: colors.primary }]}>Record</Text>
+              )}
+            </TouchableOpacity>
+          ) : (
+            <View style={styles.topBarSpacer} />
+          )}
         </View>
 
         <ScrollView contentContainerStyle={styles.scroll} keyboardShouldPersistTaps="handled">
+          {/* The email, as it arrived. */}
           <View style={[styles.card, { backgroundColor: colors.card, borderColor: colors.border }]}>
-            <Text style={[styles.from, { color: colors.mutedForeground }]} numberOfLines={2}>
-              {safeName(item.subject, "(no subject)")} · {safeName(item.fromAddress, "unknown sender")}
+            <Text style={[styles.subject, { color: colors.foreground }]} selectable>
+              {safeName(item.subject, "(no subject)")}
             </Text>
-            {item.parseConfidence === "low" && (
-              <Text style={[styles.from, { color: colors.destructive, marginTop: 4 }]}>
-                The amount was hard to read in this email. Check it before recording.
+            <Text style={[styles.from, { color: colors.mutedForeground }]} selectable>
+              {safeName(item.fromAddress, "unknown sender")} · {item.receivedAt.slice(0, 10)}
+            </Text>
+            {!recordable && (
+              <Text style={[styles.status, { color: colors.mutedForeground }]}>
+                {emailStatusLabel(emailStatus(item, new Set()) ?? "recorded")}
+                {item.recordedTransactionId ? ` (transaction #${item.recordedTransactionId})` : ""}
+              </Text>
+            )}
+            <View style={[styles.bodyBox, { backgroundColor: colors.secondary, borderColor: colors.border }]}>
+              {detail ? (
+                <>
+                  <Text
+                    style={[styles.body, { color: colors.foreground }]}
+                    numberOfLines={wholeEmail ? undefined : 16}
+                    selectable
+                  >
+                    {emailBodyText(detail.bodyText, detail.bodyHtml) || "(this email has no text)"}
+                  </Text>
+                  <TouchableOpacity onPress={() => setWholeEmail((w) => !w)} accessibilityRole="button" style={styles.moreBtn}>
+                    <Text style={{ color: colors.primary, fontWeight: "600", fontSize: 13 }}>
+                      {wholeEmail ? "Show less" : "Show the whole email"}
+                    </Text>
+                  </TouchableOpacity>
+                </>
+              ) : detailError ? (
+                <Text style={[styles.body, { color: colors.destructive }]}>{detailError}</Text>
+              ) : (
+                <ActivityIndicator size="small" color={colors.primary} />
+              )}
+            </View>
+            {item.sourceKind === "attachment" && (
+              <Text style={[styles.from, { color: colors.mutedForeground, marginTop: 8 }]}>
+                This email carried a statement file. Its rows are reviewed as a file, not recorded one by one.
               </Text>
             )}
           </View>
 
+          {/* What was read from it, and why it may need a closer look (the web tab's panel). */}
+          {candidate && (
+            <View style={[styles.card, { backgroundColor: colors.card, borderColor: colors.border }]}>
+              <Text style={[fieldStyles.label, { color: colors.mutedForeground }]}>WHAT WE READ</Text>
+              <Text style={[styles.readLine, { color: colors.foreground }]}>
+                {formatCurrency(candidate.amount, candidate.currency)}
+                <Text style={{ color: colors.mutedForeground }}>
+                  {candidate.amount < 0 ? " · money out" : " · money in"}
+                  {detail?.signals && !detail.signals.signExplicit ? " (assumed)" : ""}
+                  {detail?.candidate?.last4 ? ` · card ending ${detail.candidate.last4}` : ""}
+                </Text>
+              </Text>
+              <Text style={[styles.readLine, { color: colors.foreground }]}>{safeName(candidate.payee, "Unknown payee")}</Text>
+              <Text style={[styles.readLine, { color: colors.foreground }]}>
+                {candidate.date}
+                {detail?.signals?.usedFallbackDate ? (
+                  <Text style={{ color: colors.mutedForeground }}> · the date it arrived</Text>
+                ) : null}
+              </Text>
+              {(() => {
+                const reasons = reviewReasons(candidate, detail?.signals, (v, c) => formatCurrency(v, c));
+                if (reasons.length === 0) return null;
+                return (
+                  <View style={styles.reasons}>
+                    <Text style={[styles.reasonHead, { color: colors.destructive }]}>Why this needs a look</Text>
+                    {reasons.map((r) => (
+                      <Text key={r} style={[styles.reason, { color: colors.foreground }]}>
+                        • {r}
+                      </Text>
+                    ))}
+                  </View>
+                );
+              })()}
+            </View>
+          )}
+
+          {recordable && candidate && (
+          <>
           <View style={[styles.card, { backgroundColor: colors.card, borderColor: colors.border }]}>
             <View style={fieldStyles.container}>
               <Text style={[fieldStyles.label, { color: colors.mutedForeground }]}>AMOUNT ({candidate.currency})</Text>
@@ -253,10 +369,15 @@ export default function EmailRecordScreen() {
               </TouchableOpacity>
             </View>
           )}
+          </>
+          )}
+          {!recordable && error && <Text style={[styles.error, { color: colors.destructive }]}>{error}</Text>}
 
-          <TouchableOpacity onPress={discard} accessibilityRole="button" style={styles.discard}>
-            <Text style={{ color: colors.destructive, fontWeight: "600" }}>Discard this email</Text>
-          </TouchableOpacity>
+          {canDiscard && (
+            <TouchableOpacity onPress={discard} accessibilityRole="button" style={styles.discard}>
+              <Text style={{ color: colors.destructive, fontWeight: "600" }}>Discard this email</Text>
+            </TouchableOpacity>
+          )}
         </ScrollView>
 
         <PickerSheet
@@ -295,6 +416,16 @@ const styles = StyleSheet.create({
   scroll: { padding: 16, paddingBottom: 32 },
   card: { borderRadius: 12, borderWidth: StyleSheet.hairlineWidth, padding: 16, marginBottom: 12 },
   from: { fontSize: 13, lineHeight: 18 },
+  topBarSpacer: { width: 52 },
+  subject: { fontSize: 16, fontWeight: "700", marginBottom: 2 },
+  status: { fontSize: 13, fontWeight: "600", marginTop: 6 },
+  bodyBox: { marginTop: 10, borderRadius: 8, borderWidth: StyleSheet.hairlineWidth, padding: 10 },
+  body: { fontSize: 13, lineHeight: 19 },
+  moreBtn: { marginTop: 8 },
+  readLine: { fontSize: 14, lineHeight: 21 },
+  reasons: { marginTop: 8 },
+  reasonHead: { fontSize: 12, fontWeight: "700", marginBottom: 2 },
+  reason: { fontSize: 13, lineHeight: 19 },
   amountRow: { flexDirection: "row", alignItems: "center", gap: 8 },
   amountInput: { flex: 1 },
   flipBtn: { borderWidth: StyleSheet.hairlineWidth, borderRadius: 8, paddingHorizontal: 14, paddingVertical: 9 },
