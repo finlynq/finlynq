@@ -18,7 +18,7 @@ import { formatCurrency } from "@/lib/currency";
 import { useDisplayCurrency } from "@/components/currency-provider";
 import { useActiveCurrencies } from "@/lib/hooks/useActiveCurrencies";
 import { LineChart, Line, XAxis, YAxis, Tooltip, ResponsiveContainer, BarChart, Bar, Legend } from "recharts";
-import { Plus, Pencil, Trash2, Landmark, CreditCard, FileText, Calendar, CheckCircle2, ChevronDown } from "lucide-react";
+import { Plus, Pencil, Trash2, Landmark, CreditCard, FileText, Calendar, CheckCircle2, ChevronDown, LayoutGrid, List } from "lucide-react";
 import { EmptyState } from "@/components/empty-state";
 import { ErrorState } from "@/components/error-state";
 import { ConfirmDialog } from "@/components/ui/confirm-dialog";
@@ -27,6 +27,15 @@ import { CspSafeBar } from "@/components/csp-safe-bar";
 import { isLoanCompleted } from "@/lib/loan-status";
 import { LoanInterestEntries } from "./_components/interest-entries";
 import { LoanScheduleEditor } from "./_components/schedule-editor";
+import { LoansList, LOAN_TYPE_BADGE_COLORS } from "./_components/loans-list";
+import {
+  LOANS_VIEW_STORAGE_KEY,
+  loanPaidPct,
+  loanShownRate,
+  loanTypeLabel,
+  parseLoansView,
+  type LoansView,
+} from "@/lib/loans/list-view";
 
 type Loan = {
   id: number; name: string; type: string; principal: number; annualRate: number;
@@ -97,14 +106,6 @@ const LOAN_TYPE_COLORS: Record<string, string> = {
   loan: "border-l-cyan-500",
   student_loan: "border-l-violet-500",
   credit_card: "border-l-rose-500",
-};
-
-const LOAN_TYPE_BADGE_COLORS: Record<string, string> = {
-  mortgage: "bg-indigo-100 text-indigo-700 dark:bg-indigo-950/50 dark:text-indigo-300",
-  lease: "bg-amber-100 text-amber-700 dark:bg-amber-950/50 dark:text-amber-300",
-  loan: "bg-cyan-100 text-cyan-700 dark:bg-cyan-950/50 dark:text-cyan-300",
-  student_loan: "bg-violet-100 text-violet-700 dark:bg-violet-950/50 dark:text-violet-300",
-  credit_card: "bg-rose-100 text-rose-700 dark:bg-rose-950/50 dark:text-rose-300",
 };
 
 function LoansSkeleton() {
@@ -269,6 +270,27 @@ function LoansPageContent() {
 
   const sortAccount = useDropdownOrder("account");
 
+  // Cards or the compact list (in-app feedback 2026-10-15: 17 loans, about
+  // three cards to a screen). Remembered per browser. Reading storage in the
+  // initializer is safe here: the page shows its skeleton until the loans load,
+  // so the server render and the first client render are the same either way.
+  const [view, setView] = useState<LoansView>(() => {
+    if (typeof window === "undefined") return "cards";
+    try {
+      return parseLoansView(window.localStorage.getItem(LOANS_VIEW_STORAGE_KEY));
+    } catch {
+      return "cards"; // storage blocked
+    }
+  });
+  function changeView(next: LoansView) {
+    setView(next);
+    try {
+      window.localStorage.setItem(LOANS_VIEW_STORAGE_KEY, next);
+    } catch {
+      // Storage blocked: the choice lasts until the page is left.
+    }
+  }
+
   // Schedule panel tab. Controlled so a deep link can open a specific one.
   const [panelTab, setPanelTab] = useState("chart");
   // `/loans?loan=<id>&tab=<tab>` opens that loan's schedule panel on that tab
@@ -305,6 +327,13 @@ function LoansPageContent() {
     ]);
     setAmort(amortRes);
     setWhatIf(Array.isArray(whatIfRes) ? whatIfRes : []);
+  }
+
+  // The panel renders below every loan, so with a long list it opened off
+  // screen and the click looked like it did nothing. Scroll to it.
+  function openSchedule(loan: Loan) {
+    scrollToPanel.current = true;
+    void viewAmortization(loan);
   }
 
   // ONE payload shape for both verbs, so a field added to the form reaches
@@ -407,7 +436,8 @@ function LoansPageContent() {
   const hasForeignLoan = loans.some((l) => l.currency && l.currency !== displayCurrency);
 
   const renderLoan = (loan: Loan) => {
-        const paidPct = loan.principal > 0 ? ((loan.principal - loan.remainingBalance) / loan.principal) * 100 : 0;
+        const paidPct = loanPaidPct(loan);
+        const shownRate = loanShownRate(loan);
         const borderClass = LOAN_TYPE_COLORS[loan.type] || "border-l-gray-400";
         const badgeClass = LOAN_TYPE_BADGE_COLORS[loan.type] || "";
         return (
@@ -416,14 +446,14 @@ function LoansPageContent() {
               <div className="flex items-center justify-between">
                 <div className="flex items-center gap-2">
                   <CardTitle>{loan.name}</CardTitle>
-                  <Badge variant="secondary" className={badgeClass}>{loan.type}</Badge>
+                  <Badge variant="secondary" className={badgeClass}>{loanTypeLabel(loan.type)}</Badge>
                   {loan.scheduleMode === "manual" && <Badge variant="outline" className="text-xs">Manual schedule</Badge>}
                   {loan.currency !== displayCurrency && (
                     <Badge variant="outline" className="font-mono text-xs">{loan.currency}</Badge>
                   )}
                 </div>
                 <div className="flex gap-2">
-                  <Button variant="outline" size="sm" onClick={() => viewAmortization(loan)}>View Schedule</Button>
+                  <Button variant="outline" size="sm" onClick={() => openSchedule(loan)}>View Schedule</Button>
                   <Button variant="ghost" size="icon" className="h-8 w-8" aria-label={`Edit loan ${loan.name}`} onClick={() => openEdit(loan)}><Pencil className="h-4 w-4" /></Button>
                   <Button variant="ghost" size="icon" className="h-8 w-8 text-destructive" aria-label={`Delete loan ${loan.name}`} onClick={() => setDeleteId(loan.id)}><Trash2 className="h-4 w-4" /></Button>
                 </div>
@@ -447,9 +477,9 @@ function LoansPageContent() {
                 </div>
                 <div><p className="text-xs text-muted-foreground">{FREQUENCY_LABELS[loan.paymentFrequency] ?? "Payment"}</p><p className="font-mono">{formatCurrency(loan.paymentPerPeriod ?? loan.monthlyPayment, loan.currency)}</p></div>
                 <div>
-                  <p className="text-xs text-muted-foreground">{(loan.interestMethod ?? "rate") === "rate" ? "Rate" : "Effective rate"}</p>
-                  <p className="font-mono" title={(loan.interestMethod ?? "rate") === "rate" ? undefined : "The yearly rate, on the balance still owed, that this loan works out to"}>
-                    {(loan.interestMethod ?? "rate") === "rate" ? loan.annualRate : loan.effectiveAnnualRate ?? loan.annualRate}%
+                  <p className="text-xs text-muted-foreground">{shownRate.effective ? "Effective rate" : "Rate"}</p>
+                  <p className="font-mono" title={shownRate.effective ? "The yearly rate, on the balance still owed, that this loan works out to" : undefined}>
+                    {shownRate.rate}%
                   </p>
                 </div>
                 <div><p className="text-xs text-muted-foreground">Total Interest</p><p className="font-mono">{formatCurrency(loan.totalInterest, loan.currency)}</p></div>
@@ -689,8 +719,32 @@ function LoansPageContent() {
         />
       )}
 
-      {/* Loan cards */}
-      {activeLoans.map(renderLoan)}
+      {loans.length > 0 && (
+        <div className="flex justify-end">
+          <Tabs value={view} onValueChange={(v) => changeView(v === "list" ? "list" : "cards")}>
+            <TabsList aria-label="How loans are shown">
+              <TabsTrigger value="cards" className="px-3"><LayoutGrid className="h-4 w-4" /> Cards</TabsTrigger>
+              <TabsTrigger value="list" className="px-3"><List className="h-4 w-4" /> List</TabsTrigger>
+            </TabsList>
+          </Tabs>
+        </div>
+      )}
+
+      {/* Active loans: cards, or one row each */}
+      {view === "list"
+        ? activeLoans.length > 0 && (
+            <div className="rounded-xl border bg-card">
+              <LoansList
+                loans={activeLoans}
+                displayCurrency={displayCurrency}
+                selectedId={selectedLoan?.id ?? null}
+                onSchedule={openSchedule}
+                onEdit={openEdit}
+                onDelete={(l) => setDeleteId(l.id)}
+              />
+            </div>
+          )
+        : activeLoans.map(renderLoan)}
 
       {/* Paid-off loans: collapsed by default */}
       {completedLoans.length > 0 && (
@@ -703,7 +757,20 @@ function LoansPageContent() {
             </span>
             <ChevronDown className="h-4 w-4 shrink-0 text-muted-foreground transition-transform group-open:rotate-180" />
           </summary>
-          <div className="space-y-6 px-4 pb-4">{completedLoans.map(renderLoan)}</div>
+          {view === "list" ? (
+            <div className="border-t">
+              <LoansList
+                loans={completedLoans}
+                displayCurrency={displayCurrency}
+                selectedId={selectedLoan?.id ?? null}
+                onSchedule={openSchedule}
+                onEdit={openEdit}
+                onDelete={(l) => setDeleteId(l.id)}
+              />
+            </div>
+          ) : (
+            <div className="space-y-6 px-4 pb-4">{completedLoans.map(renderLoan)}</div>
+          )}
         </details>
       )}
 
