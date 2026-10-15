@@ -27,6 +27,7 @@ import { safeAccountName, safeName } from "../lib/format";
 import { COMMON_CURRENCIES } from "../lib/constants";
 import { localDateISO } from "../lib/subscriptions";
 import { PickerSheet, type PickerOption } from "../components/picker-sheet";
+import { DateField } from "../components/DateField";
 import {
   LOAN_FREQUENCY_OPTIONS,
   LOAN_INTEREST_OPTIONS,
@@ -286,7 +287,16 @@ export default function AddLoanScreen() {
             {form.type === "lease"
               ? field("BUYOUT AT THE END (OPTIONAL)", "residualValue", { placeholder: "0.00", numeric: true })
               : null}
-            {field("START DATE (YYYY-MM-DD)", "startDate", { placeholder: "2026-10-15", last: true })}
+            <View style={[fieldStyles.container, { marginBottom: 0 }]}>
+              <Text style={[fieldStyles.label, { color: colors.mutedForeground }]}>START DATE</Text>
+              <DateField
+                title="Start date"
+                value={form.startDate}
+                onChange={(d) => set("startDate", d)}
+                style={input}
+                accessibilityLabel="START DATE"
+              />
+            </View>
           </View>
 
           <View style={[styles.card, { backgroundColor: colors.card, borderColor: colors.border }]}>

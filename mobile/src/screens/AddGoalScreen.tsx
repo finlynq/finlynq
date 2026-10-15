@@ -20,6 +20,7 @@ import { safeName } from "../lib/format";
 import { goalFormFromGoal } from "../lib/edit-prefill";
 import { GOAL_TYPES, GOAL_PRIORITIES, COMMON_CURRENCIES } from "../lib/constants";
 import type { Account } from "../../../shared/types";
+import { DateField } from "../components/DateField";
 import type { MoreStackParamList } from "../navigation/MoreStack";
 
 export default function AddGoalScreen() {
@@ -297,12 +298,13 @@ export default function AddGoalScreen() {
             {/* Deadline (optional) */}
             <View style={fieldStyles.container}>
               <Text style={[fieldStyles.label, { color: colors.mutedForeground }]}>DEADLINE (OPTIONAL)</Text>
-              <TextInput
-                style={[fieldStyles.input, { color: colors.foreground, backgroundColor: colors.secondary, borderColor: colors.border }]}
+              <DateField
+                title="Deadline"
                 value={deadline}
-                onChangeText={setDeadline}
-                placeholder="YYYY-MM-DD"
-                placeholderTextColor={colors.mutedForeground}
+                onChange={setDeadline}
+                allowClear
+                placeholder="No deadline"
+                style={[fieldStyles.input, { backgroundColor: colors.secondary, borderColor: colors.border }]}
               />
             </View>
 

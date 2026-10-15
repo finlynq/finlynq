@@ -22,6 +22,7 @@ import { logger } from "../lib/logger";
 import { safeAccountName, safeName } from "../lib/format";
 import { COMMON_CURRENCIES } from "../lib/constants";
 import { PickerSheet, type PickerOption } from "../components/picker-sheet";
+import { DateField } from "../components/DateField";
 import {
   FREQUENCY_LABELS,
   SUBSCRIPTION_FREQUENCIES,
@@ -323,15 +324,8 @@ export default function AddSubscriptionScreen() {
             </View>
 
             <View style={fieldStyles.container}>
-              <Text style={[fieldStyles.label, { color: colors.mutedForeground }]}>NEXT PAYMENT (YYYY-MM-DD)</Text>
-              <TextInput
-                style={input}
-                value={form.nextDate}
-                onChangeText={(v) => set("nextDate", v)}
-                placeholder="2026-10-15"
-                placeholderTextColor={colors.mutedForeground}
-                autoCapitalize="none"
-              />
+              <Text style={[fieldStyles.label, { color: colors.mutedForeground }]}>NEXT PAYMENT</Text>
+              <DateField title="Next payment" value={form.nextDate} onChange={(d) => set("nextDate", d)} style={input} />
             </View>
 
             <View style={fieldStyles.container}>
@@ -346,13 +340,13 @@ export default function AddSubscriptionScreen() {
 
             <View style={fieldStyles.container}>
               <Text style={[fieldStyles.label, { color: colors.mutedForeground }]}>REMIND ME TO CANCEL ON (OPTIONAL)</Text>
-              <TextInput
-                style={input}
+              <DateField
+                title="Remind me to cancel on"
                 value={form.cancelReminderDate}
-                onChangeText={(v) => set("cancelReminderDate", v)}
-                placeholder="YYYY-MM-DD"
-                placeholderTextColor={colors.mutedForeground}
-                autoCapitalize="none"
+                onChange={(d) => set("cancelReminderDate", d)}
+                allowClear
+                placeholder="No reminder"
+                style={input}
               />
             </View>
 

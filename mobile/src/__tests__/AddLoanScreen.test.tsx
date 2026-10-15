@@ -156,6 +156,21 @@ describe("AddLoanScreen: a new loan", () => {
     await waitFor(() => expect(mockGoBack).toHaveBeenCalled());
   });
 
+  // Dates are picked from a calendar, not typed (owner request 2026-10-15).
+  it("picks the start date from a calendar", async () => {
+    const u = await renderScreen();
+    fill(u, "NAME", "Car loan");
+    fill(u, "AMOUNT BORROWED", "12000");
+    fill(u, "YEARLY RATE (%)", "6");
+    fill(u, "TERM (MONTHS)", "24");
+    expect(u.getByText("Tue, Oct 13, 2026")).toBeTruthy();
+    fireEvent.press(u.getByLabelText("START DATE"));
+    fireEvent.press(u.getByTestId("calendar-day-1"));
+    expect(u.getByText("Thu, Oct 1, 2026")).toBeTruthy();
+    fireEvent.press(u.getByLabelText("Save"));
+    await waitFor(() => expect(createLoan).toHaveBeenCalledWith(expect.objectContaining({ startDate: "2026-10-01" })));
+  });
+
   it("says what is missing instead of asking the server", async () => {
     const u = await renderScreen();
     fill(u, "NAME", "Car loan");
