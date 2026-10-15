@@ -175,3 +175,15 @@ npx eas build --platform ios --profile production --auto-submit --non-interactiv
   opens the month there (`TransactionsList` takes `calendarDay` / `calendarMonth`, read once then
   cleared). Same data as the Transactions calendar (`GET /api/transactions/calendar?month=`); a
   server without that route hides the card. Pull-to-refresh on Home reloads it too.
+- **1.0.26 / vc35 (Android internal testing only)** (2026-10-15; no iOS build): **Loans** are compact
+  two-line rows grouped in one block instead of cards (in-app feedback: 17 loans, about three cards to
+  a screen). **Email imports** (More → Email imports): record a bank-alert email (account, then a
+  category or a transfer destination; amount with a ± flip, date and payee can be corrected; Record
+  anyway on a possible duplicate; discard), and review an emailed statement file (choose its account,
+  send its rows to the ledger, open Reconcile; discard). Same routes as the web's Email tab and
+  /import/pending. **Dates are picked from a calendar** everywhere (transactions, investment entries,
+  goals, loans, subscriptions, the email form) instead of typed. **Home calendar** shows what is still
+  expected after today: a hollow dot per subscription or detected recurring payment, the list on a
+  tapped day, and "Still expected this month" under the totals. **Reconcile** shows the server's note
+  when an amount's sign is unusual for the category. The server stopped refusing those (web PR #379,
+  prod 2026-10-15); against an older server such a row is still refused with its message.
