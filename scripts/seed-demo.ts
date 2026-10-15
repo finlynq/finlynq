@@ -11,7 +11,7 @@
  */
 
 import pg from "pg";
-import { createHash } from "crypto";
+import { createHash, randomUUID } from "crypto";
 import bcrypt from "bcryptjs";
 import {
   rewrapDEKForNewPassword,
@@ -22,6 +22,7 @@ import { stageSampleOfxImport } from "./seed-demo-pending-import";
 import { PostgresAdapter } from "../src/db/adapters/postgres";
 import { setAdapter, setDialect } from "../src/db";
 import { buildLotsForUser } from "../src/lib/portfolio/lots/backfill";
+import { buildLoanSchedule } from "../src/lib/loan-calculator";
 
 /** Mirror of src/lib/import-hash.ts generateImportHash(). Kept local so this
  *  CLI script doesn't reach into the Next.js bundle graph. Drift here breaks
@@ -79,13 +80,16 @@ const databaseUrl: string = (() => {
 // Account type uses single-letter codes in this app: "A" = asset, "L" = liability.
 // Category type uses "I" = income, "E" = expense.
 type AccountSeed = { type: "A" | "L"; group: string; name: string; isInvestment?: boolean };
-type CategorySeed = { type: "I" | "E"; group: string; name: string };
+// "R" = transfer / bookkeeping categories that are neither income nor spending.
+type CategorySeed = { type: "I" | "E" | "R"; group: string; name: string };
 
 const ACCOUNTS: AccountSeed[] = [
   { type: "A", group: "Banks", name: "Chequing" },
   { type: "A", group: "Banks", name: "Savings" },
   { type: "A", group: "Investments", name: "Brokerage", isInvestment: true },
   { type: "L", group: "Credit Cards", name: "Visa Rewards" },
+  // Tracks the demo car loan (see CAR_LOAN): its balance is what is owed.
+  { type: "L", group: "Loans", name: "Car Loan" },
 ];
 
 const CATEGORIES: CategorySeed[] = [
@@ -104,7 +108,24 @@ const CATEGORIES: CategorySeed[] = [
   { type: "E", group: "Health", name: "Fitness" },
   { type: "E", group: "Health", name: "Medical" },
   { type: "E", group: "Savings", name: "Transfer to Savings" },
+  // The car loan's interest, booked on the Car Loan account.
+  { type: "E", group: "Financial", name: "Loan interest" },
+  // The canonical names the app itself creates for transfers and opening
+  // balances, so the loan's payments and opening balance look like the
+  // app's own entries.
+  { type: "R", group: "Transfer", name: "Transfer" },
+  { type: "R", group: "Adjustments", name: "Opening Balance" },
 ];
+
+/**
+ * The demo's car loan, so the public Loans page, its payment schedule and its
+ * interest entries have something to show. Started six months back on the
+ * 15th; every payment that has come due is a transfer from Chequing, and its
+ * interest is a separate expense on the Car Loan account, the way the app
+ * books them. The MOST RECENT due payment's interest is left unbooked on
+ * purpose, so a visitor can try "Generate" on the Interest entries tab.
+ */
+const CAR_LOAN = { name: "Car loan", principal: 15000, annualRate: 5.9, termMonths: 48 };
 
 // ─── Transaction generation ────────────────────────────────────────────────
 
@@ -590,6 +611,81 @@ async function main() {
           encryptField(demoDek, ""),
           importHash,
         ]
+      );
+    }
+
+    // 5b. The car loan: opening balance, payments, interest, then the loan row.
+    const carAccountId = accountIds["Car Loan"];
+    const chequingId = accountIds["Chequing"];
+    if (carAccountId && chequingId) {
+      const today1 = new Date();
+      today1.setHours(0, 0, 0, 0);
+      const loanStart = isoDate(new Date(today1.getFullYear(), today1.getMonth() - 6, 15));
+      const todayIso = isoDate(today1);
+      const plan = buildLoanSchedule({
+        principal: CAR_LOAN.principal,
+        annualRate: CAR_LOAN.annualRate,
+        termMonths: CAR_LOAN.termMonths,
+        startDate: loanStart,
+        paymentFrequency: "monthly",
+      });
+      const due = plan.schedule.filter((r) => r.date <= todayIso);
+      console.log(`[seed-demo] Inserting a car loan with ${due.length} payments…`);
+      const insertTx = (
+        date: string,
+        accountId: number,
+        categoryId: number,
+        amount: number,
+        payee: string,
+        extra: { kind?: string; linkId?: string } = {},
+      ) =>
+        client.query(
+          `INSERT INTO transactions (user_id, date, account_id, category_id, currency, amount, payee, note, tags, is_business, source, kind, link_id)
+           VALUES ($1, $2, $3, $4, 'USD', $5, $6, $7, $8, 0, 'sample_data', $9, $10)`,
+          [
+            userId,
+            date,
+            accountId,
+            categoryId,
+            amount,
+            encryptField(demoDek, payee),
+            encryptField(demoDek, ""),
+            encryptField(demoDek, ""),
+            extra.kind ?? null,
+            extra.linkId ?? null,
+          ],
+        );
+      // What was borrowed: the account's opening balance (owed = negative).
+      await insertTx(loanStart, carAccountId, categoryIds["Opening Balance"], -CAR_LOAN.principal, "Opening balance", {
+        kind: "opening_balance",
+      });
+      for (const [i, row] of due.entries()) {
+        // The payment: one plain transfer pair, Chequing -> Car Loan.
+        const linkId = randomUUID();
+        await insertTx(row.date, chequingId, categoryIds["Transfer"], -row.payment, "Car loan payment", { linkId });
+        await insertTx(row.date, carAccountId, categoryIds["Transfer"], row.payment, "Car loan payment", { linkId });
+        // Its interest, except the latest one (left for the visitor to generate).
+        if (i < due.length - 1) {
+          await insertTx(row.date, carAccountId, categoryIds["Loan interest"], -row.interest, "Loan interest");
+        }
+      }
+      const loanName = encryptName(demoDek, CAR_LOAN.name);
+      await client.query(
+        `INSERT INTO loans (user_id, type, account_id, currency, principal, annual_rate, term_months, start_date,
+                            payment_amount, payment_frequency, extra_payment, residual_value, interest_method,
+                            interest_amount, note, name_ct, name_lookup, interest_category_id)
+         VALUES ($1, 'loan', $2, 'USD', $3, $4, $5, $6, NULL, 'monthly', 0, NULL, 'rate', NULL, '', $7, $8, $9)`,
+        [
+          userId,
+          carAccountId,
+          CAR_LOAN.principal,
+          CAR_LOAN.annualRate,
+          CAR_LOAN.termMonths,
+          loanStart,
+          loanName.ct,
+          loanName.lookup,
+          categoryIds["Loan interest"],
+        ],
       );
     }
 

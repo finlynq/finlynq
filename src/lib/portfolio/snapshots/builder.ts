@@ -59,6 +59,8 @@ export async function buildDailySnapshot(
   // Per-account market value + cost basis (in account currency).
   const perAccount = await getHoldingsValueByAccount(userId, dek, {
     asOfDate: date,
+    // Cost in the reporting currency at each purchase's own rate (below).
+    reportingCurrency,
   });
 
   // Per-account net contribution for the day, bucketed from the same-day legs
@@ -156,7 +158,12 @@ export async function buildDailySnapshot(
   for (const [accountId, v] of perAccount) {
     const fxRate = await fx(v.currency, reportingCurrency);
     const mv = v.value * fxRate;
-    const cb = v.costBasis * fxRate;
+    // Market value is converted at this date's rate; cost is NOT (2026-10-14,
+    // owner report). `costBasis * fxRate` re-priced every foreign purchase at
+    // each day's rate, so the Performance chart's cost line moved daily with
+    // no transaction behind it (and stayed flat on weekends, when FX does).
+    // Cost is what was paid: each purchase at the rate on its own date.
+    const cb = v.costBasisReporting ?? v.costBasis * fxRate;
     const contribution = (perAccountContribution.get(accountId) ?? 0) * fxRate;
     // FINLYNQ-303 — dual basis. `v.value` IS the native-currency valuation:
     // getHoldingsValueByAccount is documented and built to return market value

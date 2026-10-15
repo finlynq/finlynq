@@ -8,6 +8,7 @@ import { formatCurrency, getCurrentMonth, getMonthLabel } from "@/lib/currency";
 import { getDisplayCurrency, getRateMap, convertWithRateMap } from "@/lib/fx-service";
 import { convertReportingSlice } from "@/lib/fx/reporting-amount";
 import { getAccountBalances, getSpendingByCategoryWithReporting } from "@/lib/queries";
+import { computeGoalProgress } from "@/lib/goals-progress";
 import { getHoldingsValueByAccount, verifyHoldingDecryptHealth } from "@/lib/holdings-value";
 import { applyInvestmentMarketOverlay } from "@/lib/accounts/investment-balance-overlay";
 import { decryptField } from "@/lib/crypto/envelope";
@@ -120,29 +121,43 @@ async function findAccountName(msg: string, userId: string, dek: Buffer | null):
 type IntentCtx = { userId: string; dek: Buffer | null };
 type IntentHandler = (msg: string, ctx: IntentCtx) => Promise<ChatResponse | null>;
 
-const handleNetWorth: IntentHandler = async (_msg, ctx) => {
-  // FINLYNQ-183 — ONE user-facing currency, resolved per user. Never a literal.
-  const displayCurrency = await getDisplayCurrency(ctx.userId);
-  // FINLYNQ-123 — net worth is a POINT-IN-TIME figure, so every account
-  // balance converts at the CURRENT rate before anything is summed. The old
-  // code added raw `SUM(amount)` across mixed account currencies and labelled
-  // the result "CAD".
-  const rateMap = await getRateMap(displayCurrency, ctx.userId);
+// ─── Money in the display currency ──────────────────────────────────
+// FINLYNQ-183: ONE user-facing currency, resolved per user, never a literal.
+// FINLYNQ-123: a BALANCE (point in time) converts at the current rate; a FLOW
+// (income, spending) converts slice by slice through the stored historical
+// reporting amount. Never a raw SUM(amount) across currencies.
 
-  // Reuse the canonical balance query (same one the dashboard uses) — it
-  // carries `isInvestment`, which the hand-rolled query here did not.
-  // `includeArchived: true` — archived is a list/picker flag, so chat's net
-  // worth must count those balances or it contradicts the dashboard hero and
-  // MCP `get_net_worth` on the same question.
+type Money = { displayCurrency: string; rateMap: Map<string, number> };
+
+async function moneyContext(userId: string): Promise<Money> {
+  const displayCurrency = await getDisplayCurrency(userId);
+  return { displayCurrency, rateMap: await getRateMap(displayCurrency, userId) };
+}
+
+type AccountBalance = {
+  accountId: number;
+  name: string;
+  accountType: string;
+  group: string | null;
+  currency: string;
+  /** In the account's own currency. */
+  native: number;
+  /** In the display currency, at the current rate. */
+  display: number;
+};
+
+/**
+ * Every account's balance, native and in the display currency. Reuses the
+ * canonical balance query, and values investment accounts at MARKET through
+ * the ONE shared overlay every net-worth surface uses (FINLYNQ-151): an
+ * investment account's SUM(transactions.amount) is only the cash legs of its
+ * trades, which net to ~0. The overlay also owns the DEK gate and the
+ * FINLYNQ-281 stale-DEK probe, so a bad key degrades to ledger instead of
+ * pricing undecryptable symbols at qty×1. Archived accounts are included:
+ * archiving hides an account from pickers, it does not remove its money.
+ */
+async function accountBalances(ctx: IntentCtx, money: Money): Promise<AccountBalance[]> {
   const balances = await getAccountBalances(ctx.userId, { includeArchived: true });
-  // "Account balance for accounts with holdings = holdings.value" (FINLYNQ-151),
-  // applied through the ONE shared overlay every net-worth surface uses rather
-  // than a local ternary. An investment account's SUM(transactions.amount) is
-  // just the cash legs of buys/sells, which net to ~0 — chat used to report
-  // every brokerage account as roughly zero and disagreed with MCP
-  // `get_net_worth` on the same question. Going through the overlay also picks
-  // up its DEK gate and the FINLYNQ-281 stale-DEK probe for free, so a bad key
-  // degrades to ledger instead of pricing undecryptable symbols at qty×1.
   const marked = await applyInvestmentMarketOverlay(
     balances.map((b) => ({
       id: b.accountId,
@@ -154,21 +169,145 @@ const handleNetWorth: IntentHandler = async (_msg, ctx) => {
     () => getHoldingsValueByAccount(ctx.userId, ctx.dek),
     () => verifyHoldingDecryptHealth(ctx.userId, ctx.dek),
   );
-
-  let assets = 0;
-  let liabilities = 0;
-  const rows = balances.map((b, i) => {
+  return balances.map((b, i) => {
     const native = marked.rows[i]?.balance ?? Number(b.balance);
-    const display = convertWithRateMap(native, b.currency, rateMap);
-    if (b.accountType === "A") assets += display;
-    else liabilities += display;
     return {
+      accountId: b.accountId,
       name: decryptName(b.accountNameCt, ctx.dek, null) ?? "Account",
       accountType: b.accountType,
-      display,
+      group: b.accountGroup ?? null,
+      currency: b.currency,
+      native,
+      display: convertWithRateMap(native, b.currency, money.rateMap),
     };
   });
-  const netWorth = assets + liabilities; // liabilities are negative
+}
+
+/** Assets, liabilities (negative) and net worth, in the display currency. */
+function netWorthOf(rows: AccountBalance[]): { assets: number; liabilities: number; netWorth: number } {
+  let assets = 0;
+  let liabilities = 0;
+  for (const r of rows) {
+    if (r.accountType === "A") assets += r.display;
+    else liabilities += r.display;
+  }
+  return { assets, liabilities, netWorth: assets + liabilities };
+}
+
+/** Income and spending between two dates, in the display currency. */
+async function flowTotals(
+  userId: string,
+  start: string,
+  end: string,
+  money: Money,
+): Promise<{ income: number; expenses: number }> {
+  const slices = await db
+    .select({
+      type: schema.categories.type,
+      currency: schema.transactions.currency,
+      reportingCurrency: schema.transactions.reportingCurrency,
+      totalAmount: sql<number>`COALESCE(SUM(${schema.transactions.amount}), 0)`,
+      totalReporting: sql<number | null>`SUM(${schema.transactions.reportingAmount})`,
+    })
+    .from(schema.transactions)
+    .leftJoin(schema.categories, eq(schema.transactions.categoryId, schema.categories.id))
+    .where(
+      and(
+        eq(schema.transactions.userId, userId),
+        gte(schema.transactions.date, start),
+        lte(schema.transactions.date, end),
+        sql`${schema.categories.type} IN ('E', 'I')`
+      )
+    )
+    .groupBy(schema.categories.type, schema.transactions.currency, schema.transactions.reportingCurrency)
+    .all();
+  let income = 0;
+  let spending = 0;
+  for (const s of slices) {
+    const value = convertReportingSlice(s, money.displayCurrency, money.rateMap);
+    if (s.type === "I") income += value;
+    else spending += value;
+  }
+  // Expenses are stored negative; refunds in the same categories net out.
+  return { income, expenses: Math.abs(spending) };
+}
+
+type BudgetStatus = {
+  categoryId: number;
+  name: string;
+  budgeted: number;
+  spent: number;
+  pct: number;
+  status: "OVER" | "WARNING" | "OK";
+};
+
+/**
+ * This month's budgets against what was spent, both in the display currency:
+ * a budget's amount at the current rate, spending through the flow rules.
+ */
+async function budgetStatuses(ctx: IntentCtx, month: string, money: Money): Promise<BudgetStatus[]> {
+  // Stream D Phase 4 — ciphertext only.
+  const rows = await db
+    .select({
+      categoryId: schema.budgets.categoryId,
+      categoryNameCt: schema.categories.nameCt,
+      budgeted: schema.budgets.amount,
+      currency: schema.budgets.currency,
+    })
+    .from(schema.budgets)
+    .leftJoin(schema.categories, eq(schema.budgets.categoryId, schema.categories.id))
+    .where(and(eq(schema.budgets.userId, ctx.userId), eq(schema.budgets.month, month)))
+    .all();
+  if (rows.length === 0) return [];
+
+  const slices = await db
+    .select({
+      categoryId: schema.transactions.categoryId,
+      currency: schema.transactions.currency,
+      reportingCurrency: schema.transactions.reportingCurrency,
+      totalAmount: sql<number>`COALESCE(SUM(${schema.transactions.amount}), 0)`,
+      totalReporting: sql<number | null>`SUM(${schema.transactions.reportingAmount})`,
+    })
+    .from(schema.transactions)
+    .where(
+      and(
+        eq(schema.transactions.userId, ctx.userId),
+        inArray(schema.transactions.categoryId, rows.map((r) => r.categoryId)),
+        gte(schema.transactions.date, startOfMonth(0)),
+        lte(schema.transactions.date, endOfMonth(0))
+      )
+    )
+    .groupBy(schema.transactions.categoryId, schema.transactions.currency, schema.transactions.reportingCurrency)
+    .all();
+  const spentBy = new Map<number, number>();
+  for (const s of slices) {
+    if (s.categoryId == null) continue;
+    spentBy.set(
+      s.categoryId,
+      (spentBy.get(s.categoryId) ?? 0) + convertReportingSlice(s, money.displayCurrency, money.rateMap),
+    );
+  }
+
+  return rows.map((b) => {
+    const budgeted = convertWithRateMap(b.budgeted, b.currency, money.rateMap);
+    const spent = Math.abs(spentBy.get(b.categoryId) ?? 0);
+    const pct = budgeted > 0 ? Math.round((spent / budgeted) * 100) : 0;
+    const status: BudgetStatus["status"] = pct > 100 ? "OVER" : pct > 80 ? "WARNING" : "OK";
+    return {
+      categoryId: b.categoryId,
+      name: decryptName(b.categoryNameCt, ctx.dek, null) ?? "Unknown",
+      budgeted,
+      spent,
+      pct,
+      status,
+    };
+  });
+}
+
+const handleNetWorth: IntentHandler = async (_msg, ctx) => {
+  const money = await moneyContext(ctx.userId);
+  const rows = await accountBalances(ctx, money);
+  const { assets, liabilities, netWorth } = netWorthOf(rows);
 
   const chartData = rows
     .filter((r) => Math.abs(r.display) > 0)
@@ -178,8 +317,9 @@ const handleNetWorth: IntentHandler = async (_msg, ctx) => {
       type: r.accountType === "A" ? "Asset" : "Liability",
     }));
 
+  const cur = money.displayCurrency;
   return {
-    text: `Your net worth is ${formatCurrency(netWorth, displayCurrency)}.\n\nAssets: ${formatCurrency(assets, displayCurrency)}\nLiabilities: ${formatCurrency(Math.abs(liabilities), displayCurrency)}`,
+    text: `Your net worth is ${formatCurrency(netWorth, cur)}.\n\nAssets: ${formatCurrency(assets, cur)}\nLiabilities: ${formatCurrency(Math.abs(liabilities), cur)}`,
     chartType: "bar",
     chartData,
   };
@@ -274,66 +414,23 @@ const handleSpending: IntentHandler = async (msg, ctx) => {
 
 const handleBalance: IntentHandler = async (msg, ctx) => {
   const accountName = await findAccountName(msg, ctx.userId, ctx.dek);
+  const money = await moneyContext(ctx.userId);
+  const rows = await accountBalances(ctx, money);
 
   if (accountName) {
-    // Stream D Phase 4 — match by name_lookup HMAC.
-    const lookup = ctx.dek ? nameLookup(ctx.dek, accountName) : null;
-    const acc = lookup
-      ? await db
-          .select()
-          .from(schema.accounts)
-          .where(and(eq(schema.accounts.userId, ctx.userId), eq(schema.accounts.nameLookup, lookup)))
-          .get()
-      : null;
+    const acc = rows.find((r) => r.name.toLowerCase() === accountName.toLowerCase());
     if (!acc) return { text: `I couldn't find an account named "${accountName}".` };
-
-    const result = await db
-      .select({ total: sql<number>`COALESCE(SUM(${schema.transactions.amount}), 0)` })
-      .from(schema.transactions)
-      .where(
-        and(
-          eq(schema.transactions.userId, ctx.userId),
-          eq(schema.transactions.accountId, acc.id)
-        )
-      )
-      .get();
-
-    return {
-      text: `Your ${accountName} balance is ${formatCurrency(result?.total ?? 0, acc.currency)}.`,
-    };
+    // In the account's own currency; an investment account at market value.
+    return { text: `Your ${accountName} balance is ${formatCurrency(acc.native, acc.currency)}.` };
   }
 
-  // All account balances (Stream D Phase 4: ciphertext only)
-  const rawBalances = await db
-    .select({
-      accountNameCt: schema.accounts.nameCt,
-      accountType: schema.accounts.type,
-      currency: schema.accounts.currency,
-      balance: sql<number>`COALESCE(SUM(${schema.transactions.amount}), 0)`,
-    })
-    .from(schema.accounts)
-    .leftJoin(schema.transactions, eq(schema.accounts.id, schema.transactions.accountId))
-    .where(eq(schema.accounts.userId, ctx.userId))
-    .groupBy(schema.accounts.id, schema.accounts.nameCt, schema.accounts.type, schema.accounts.currency)
-    .orderBy(schema.accounts.type)
-    .all();
-  const balances = rawBalances.map((b) => ({
-    accountName: decryptName(b.accountNameCt, ctx.dek, null) ?? "Account",
-    accountType: b.accountType,
-    currency: b.currency,
-    balance: b.balance,
+  const shown = rows.filter((r) => Math.abs(r.native) > 0.01);
+  const lines = shown.map((r) => `  ${r.name}: ${formatCurrency(r.native, r.currency)}`);
+  // The chart compares accounts, so every bar is in the one display currency.
+  const chartData = shown.map((r) => ({
+    name: r.name,
+    value: Math.round(r.display * 100) / 100,
   }));
-
-  const lines = balances
-    .filter((b) => Math.abs(b.balance) > 0.01)
-    .map((b) => `  ${b.accountName}: ${formatCurrency(b.balance, b.currency)}`);
-
-  const chartData = balances
-    .filter((b) => Math.abs(b.balance) > 0.01)
-    .map((b) => ({
-      name: b.accountName,
-      value: Math.round(b.balance * 100) / 100,
-    }));
 
   return {
     text: `Here are your account balances:\n\n${lines.join("\n")}`,
@@ -345,67 +442,22 @@ const handleBalance: IntentHandler = async (msg, ctx) => {
 const handleBudget: IntentHandler = async (msg, ctx) => {
   const month = getCurrentMonth();
   const categoryName = await findCategoryName(msg, ctx.userId, ctx.dek);
+  const money = await moneyContext(ctx.userId);
+  const results = await budgetStatuses(ctx, month, money);
 
-  // Stream D Phase 4 — ciphertext only.
-  const rawBudgetRows = await db
-    .select({
-      categoryId: schema.budgets.categoryId,
-      categoryNameCt: schema.categories.nameCt,
-      budgeted: schema.budgets.amount,
-    })
-    .from(schema.budgets)
-    .leftJoin(schema.categories, eq(schema.budgets.categoryId, schema.categories.id))
-    .where(and(eq(schema.budgets.userId, ctx.userId), eq(schema.budgets.month, month)))
-    .all();
-  const budgetRows = rawBudgetRows.map((b) => ({
-    categoryId: b.categoryId,
-    categoryName: decryptName(b.categoryNameCt, ctx.dek, null),
-    budgeted: b.budgeted,
-  }));
-
-  if (budgetRows.length === 0) {
+  if (results.length === 0) {
     return { text: `You don't have any budgets set for ${getMonthLabel(month)}.` };
   }
 
-  // Get actual spending for each budgeted category
-  const start = startOfMonth(0);
-  const end = endOfMonth(0);
-
-  const results = await Promise.all(budgetRows.map(async (b) => {
-    const spent = await db
-      .select({ total: sql<number>`COALESCE(SUM(${schema.transactions.amount}), 0)` })
-      .from(schema.transactions)
-      .where(
-        and(
-          eq(schema.transactions.userId, ctx.userId),
-          eq(schema.transactions.categoryId, b.categoryId),
-          gte(schema.transactions.date, start),
-          lte(schema.transactions.date, end)
-        )
-      )
-      .get();
-
-    const actualSpent = Math.abs(spent?.total ?? 0);
-    const pct = b.budgeted > 0 ? Math.round((actualSpent / b.budgeted) * 100) : 0;
-    const status = pct > 100 ? "OVER" : pct > 80 ? "WARNING" : "OK";
-
-    return {
-      name: b.categoryName ?? "Unknown",
-      budgeted: b.budgeted,
-      spent: actualSpent,
-      pct,
-      status,
-    };
-  }));
-
+  const fmt = (n: number) => formatCurrency(n, money.displayCurrency);
   if (categoryName) {
     const match = results.find((r) => r.name.toLowerCase() === categoryName.toLowerCase());
     if (match) {
       const statusText = match.status === "OVER"
-        ? `You're over budget by ${formatCurrency(match.spent - match.budgeted, "CAD")}!`
-        : `You have ${formatCurrency(match.budgeted - match.spent, "CAD")} remaining.`;
+        ? `You're over budget by ${fmt(match.spent - match.budgeted)}!`
+        : `You have ${fmt(match.budgeted - match.spent)} remaining.`;
       return {
-        text: `${match.name} budget for ${getMonthLabel(month)}: ${formatCurrency(match.spent, "CAD")} of ${formatCurrency(match.budgeted, "CAD")} (${match.pct}%).\n${statusText}`,
+        text: `${match.name} budget for ${getMonthLabel(month)}: ${fmt(match.spent)} of ${fmt(match.budgeted)} (${match.pct}%).\n${statusText}`,
       };
     }
   }
@@ -415,7 +467,7 @@ const handleBudget: IntentHandler = async (msg, ctx) => {
 
   let summary = `Budget overview for ${getMonthLabel(month)}:\n\n`;
   if (overBudget.length > 0) {
-    summary += `Over budget (${overBudget.length}):\n${overBudget.map((r) => `  ${r.name}: ${r.pct}% (${formatCurrency(r.spent, "CAD")} / ${formatCurrency(r.budgeted, "CAD")})`).join("\n")}\n\n`;
+    summary += `Over budget (${overBudget.length}):\n${overBudget.map((r) => `  ${r.name}: ${r.pct}% (${fmt(r.spent)} / ${fmt(r.budgeted)})`).join("\n")}\n\n`;
   }
   if (warnings.length > 0) {
     summary += `Approaching limit (${warnings.length}):\n${warnings.map((r) => `  ${r.name}: ${r.pct}%`).join("\n")}\n\n`;
@@ -425,8 +477,8 @@ const handleBudget: IntentHandler = async (msg, ctx) => {
 
   const chartData = results.map((r) => ({
     name: r.name,
-    budgeted: r.budgeted,
-    spent: r.spent,
+    budgeted: Math.round(r.budgeted * 100) / 100,
+    spent: Math.round(r.spent * 100) / 100,
   }));
 
   return {
@@ -448,6 +500,7 @@ const handleTransactions: IntentHandler = async (msg, ctx) => {
         date: schema.transactions.date,
         payee: schema.transactions.payee,
         amount: schema.transactions.amount,
+        currency: schema.transactions.currency,
         categoryNameCt: schema.categories.nameCt,
       })
       .from(schema.transactions)
@@ -460,7 +513,9 @@ const handleTransactions: IntentHandler = async (msg, ctx) => {
           lte(schema.transactions.date, range.end)
         )
       )
-      .orderBy(asc(schema.transactions.amount))
+      // "Largest" across currencies is ranked on the stored reporting amount
+      // (FINLYNQ-123); a row without one falls back to its own amount.
+      .orderBy(asc(sql`COALESCE(${schema.transactions.reportingAmount}, ${schema.transactions.amount})`))
       .limit(5)
       .all();
     const result = rawResult.map((r) => ({
@@ -471,14 +526,17 @@ const handleTransactions: IntentHandler = async (msg, ctx) => {
     if (result.length === 0) return { text: `No expenses found during ${range.label}.` };
 
     const decrypted = result.map((t) => ({ ...t, payee: safeDecrypt(ctx.dek, t.payee) }));
+    const money = await moneyContext(ctx.userId);
 
+    // Each expense in its own currency; the chart compares them, so its bars
+    // are in the display currency.
     const lines = decrypted.map(
-      (t) => `  ${t.date} — ${t.payee || "No payee"} — ${formatCurrency(Math.abs(t.amount), "CAD")} (${t.categoryName})`
+      (t) => `  ${t.date} — ${t.payee || "No payee"} — ${formatCurrency(Math.abs(t.amount), t.currency || money.displayCurrency)} (${t.categoryName})`
     );
 
     const chartData = decrypted.map((t) => ({
       name: t.payee || "Unknown",
-      value: Math.round(Math.abs(t.amount) * 100) / 100,
+      value: Math.round(Math.abs(convertWithRateMap(t.amount, t.currency, money.rateMap)) * 100) / 100,
       date: t.date,
       category: t.categoryName,
     }));
@@ -513,6 +571,7 @@ const handleTransactions: IntentHandler = async (msg, ctx) => {
       payee: schema.transactions.payee,
       note: schema.transactions.note,
       amount: schema.transactions.amount,
+      currency: schema.transactions.currency,
       categoryNameCt: schema.categories.nameCt,
       accountNameCt: schema.accounts.nameCt,
     })
@@ -544,10 +603,12 @@ const handleTransactions: IntentHandler = async (msg, ctx) => {
     return { text: searchTerm ? `No transactions matching "${searchTerm}" found.` : `No transactions found for ${range.label}.` };
   }
 
+  const displayCurrency = await getDisplayCurrency(ctx.userId);
   const tableData = decrypted.map((t) => ({
     date: t.date,
     payee: t.payee || "—",
-    amount: formatCurrency(t.amount, "CAD"),
+    // Each row in its own currency.
+    amount: formatCurrency(t.amount, t.currency || displayCurrency),
     category: t.categoryName ?? "—",
     account: t.accountName ?? "—",
   }));
@@ -562,36 +623,14 @@ const handleTransactions: IntentHandler = async (msg, ctx) => {
 };
 
 const handleTrends: IntentHandler = async (_msg, ctx) => {
-  // Compare spending month over month
+  // Compare spending month over month, every month in the display currency.
   const months = 6;
+  const money = await moneyContext(ctx.userId);
   const monthlyData: { month: string; income: number; expenses: number }[] = [];
 
   for (let i = months - 1; i >= 0; i--) {
-    const start = startOfMonth(-i);
-    const end = endOfMonth(-i);
-    const label = monthLabel(-i);
-
-    const result = await db
-      .select({
-        type: schema.categories.type,
-        total: sql<number>`COALESCE(SUM(${schema.transactions.amount}), 0)`,
-      })
-      .from(schema.transactions)
-      .leftJoin(schema.categories, eq(schema.transactions.categoryId, schema.categories.id))
-      .where(
-        and(
-          eq(schema.transactions.userId, ctx.userId),
-          gte(schema.transactions.date, start),
-          lte(schema.transactions.date, end),
-          sql`${schema.categories.type} IN ('E', 'I')`
-        )
-      )
-      .groupBy(schema.categories.type)
-      .all();
-
-    const income = result.find((r) => r.type === "I")?.total ?? 0;
-    const expenses = Math.abs(result.find((r) => r.type === "E")?.total ?? 0);
-    monthlyData.push({ month: label, income, expenses });
+    const { income, expenses } = await flowTotals(ctx.userId, startOfMonth(-i), endOfMonth(-i), money);
+    monthlyData.push({ month: monthLabel(-i), income, expenses });
   }
 
   const recent = monthlyData[monthlyData.length - 1];
@@ -625,49 +664,57 @@ const handleGoals: IntentHandler = async (_msg, ctx) => {
       nameCt: schema.goals.nameCt,
       type: schema.goals.type,
       targetAmount: schema.goals.targetAmount,
-      accountId: schema.goals.accountId,
+      currency: schema.goals.currency,
       deadline: schema.goals.deadline,
-      status: schema.goals.status,
     })
     .from(schema.goals)
     .where(and(eq(schema.goals.userId, ctx.userId), eq(schema.goals.status, "active")))
     .all();
-  const goals = rawGoals.map((g) => ({
-    ...g,
-    name: decryptName(g.nameCt, ctx.dek, null) ?? "Goal",
-  }));
 
-  if (goals.length === 0) {
+  if (rawGoals.length === 0) {
     return { text: "You don't have any active goals. Head to the Goals page to create one!" };
   }
 
-  const withProgress = await Promise.all(goals.map(async (g) => {
-    let currentAmount = 0;
-    if (g.accountId) {
-      const result = await db
-        .select({ total: sql<number>`COALESCE(SUM(${schema.transactions.amount}), 0)` })
-        .from(schema.transactions)
-        .where(
-          and(
-            eq(schema.transactions.userId, ctx.userId),
-            eq(schema.transactions.accountId, g.accountId)
-          )
-        )
-        .get();
-      currentAmount = result?.total ?? 0;
-    }
-    const progress = g.targetAmount > 0 ? Math.min((currentAmount / g.targetAmount) * 100, 100) : 0;
+  // Progress is the SAME figure the Goals page and MCP show: the shared
+  // aggregator sums every account in `goal_accounts` (issue #130), values
+  // investment accounts at market and converts each into the goal's currency.
+  // The old code read only the legacy single `goals.account_id`, at ledger.
+  const links = await db
+    .select({ goalId: schema.goalAccounts.goalId, accountId: schema.goalAccounts.accountId })
+    .from(schema.goalAccounts)
+    .where(eq(schema.goalAccounts.userId, ctx.userId))
+    .all();
+  const accountsByGoal = new Map<number, number[]>();
+  for (const l of links) accountsByGoal.set(l.goalId, [...(accountsByGoal.get(l.goalId) ?? []), l.accountId]);
+  const progressByGoal = await computeGoalProgress(
+    ctx.userId,
+    ctx.dek,
+    rawGoals.map((g) => ({
+      id: g.id,
+      type: g.type,
+      currency: g.currency ?? null,
+      targetAmount: g.targetAmount,
+      deadline: g.deadline ?? null,
+      accountIds: accountsByGoal.get(g.id) ?? [],
+    })),
+  );
+  const displayCurrency = await getDisplayCurrency(ctx.userId);
+
+  const withProgress = rawGoals.map((g) => {
+    const p = progressByGoal.get(g.id);
     return {
-      name: g.name,
+      name: decryptName(g.nameCt, ctx.dek, null) ?? "Goal",
+      currency: g.currency || displayCurrency,
       target: g.targetAmount,
-      current: Math.round(currentAmount * 100) / 100,
-      progress: Math.round(progress),
+      current: Math.round((p?.currentAmount ?? 0) * 100) / 100,
+      progress: Math.round(p?.progress ?? 0),
       deadline: g.deadline,
     };
-  }));
+  });
 
+  // Each goal in its own currency.
   const lines = withProgress.map(
-    (g) => `  ${g.name}: ${g.progress}% (${formatCurrency(g.current, "CAD")} / ${formatCurrency(g.target, "CAD")})${g.deadline ? ` — due ${g.deadline}` : ""}`
+    (g) => `  ${g.name}: ${g.progress}% (${formatCurrency(g.current, g.currency)} / ${formatCurrency(g.target, g.currency)})${g.deadline ? ` — due ${g.deadline}` : ""}`
   );
 
   const chartData = withProgress.map((g) => ({
@@ -691,41 +738,22 @@ const handleForecast: IntentHandler = async (msg, ctx) => {
   const affordMatch = lower.match(/(?:can i afford|do i have enough for)\s*\$?([\d,]+(?:\.\d{2})?)/);
   if (affordMatch) {
     const amount = parseFloat(affordMatch[1].replace(/,/g, ""));
-    // Get total balance across bank accounts
-    const bankAccounts = await db
-      .select({ id: schema.accounts.id })
-      .from(schema.accounts)
-      .where(
-        and(
-          eq(schema.accounts.userId, ctx.userId),
-          // GH #307 — shared canonical cash-group set (was a hardcoded
-          // "Banks"/"Cash Accounts" subset that missed Checking/Savings/Cash).
-          inArray(schema.accounts.group, [...CASH_GROUP_NAMES])
-        )
-      )
-      .all();
+    // The cash in bank accounts (GH #307 — the shared canonical cash-group
+    // set), each converted to the display currency before it is added up.
+    const money = await moneyContext(ctx.userId);
+    const cashGroups = new Set<string>(CASH_GROUP_NAMES);
+    const rows = await accountBalances(ctx, money);
+    const currentBalance = rows
+      .filter((r) => r.group != null && cashGroups.has(r.group))
+      .reduce((sum, r) => sum + r.display, 0);
 
-    let currentBalance = 0;
-    for (const ba of bankAccounts) {
-      const result = await db
-        .select({ total: sql<number>`COALESCE(SUM(${schema.transactions.amount}), 0)` })
-        .from(schema.transactions)
-        .where(
-          and(
-            eq(schema.transactions.userId, ctx.userId),
-            eq(schema.transactions.accountId, ba.id)
-          )
-        )
-        .get();
-      currentBalance += result?.total ?? 0;
-    }
-
+    const fmt = (n: number) => formatCurrency(n, money.displayCurrency);
     const canAfford = currentBalance >= amount;
     const remaining = currentBalance - amount;
     return {
       text: canAfford
-        ? `Yes! Your bank balance is ${formatCurrency(currentBalance, "CAD")}. After spending ${formatCurrency(amount, "CAD")}, you'd have ${formatCurrency(remaining, "CAD")} left.`
-        : `Not quite. Your bank balance is ${formatCurrency(currentBalance, "CAD")}, which is ${formatCurrency(amount - currentBalance, "CAD")} short of ${formatCurrency(amount, "CAD")}.`,
+        ? `Yes! Your bank balance is ${fmt(currentBalance)}. After spending ${fmt(amount)}, you'd have ${fmt(remaining)} left.`
+        : `Not quite. Your bank balance is ${fmt(currentBalance)}, which is ${fmt(amount - currentBalance)} short of ${fmt(amount)}.`,
     };
   }
 
@@ -736,8 +764,11 @@ const handleForecast: IntentHandler = async (msg, ctx) => {
       amount: schema.recurringTransactions.amount,
       frequency: schema.recurringTransactions.frequency,
       nextDate: schema.recurringTransactions.nextDate,
+      // A recurring row has no currency of its own: it is its account's.
+      currency: schema.accounts.currency,
     })
     .from(schema.recurringTransactions)
+    .leftJoin(schema.accounts, eq(schema.recurringTransactions.accountId, schema.accounts.id))
     .where(
       and(
         eq(schema.recurringTransactions.userId, ctx.userId),
@@ -756,8 +787,9 @@ const handleForecast: IntentHandler = async (msg, ctx) => {
     .slice(0, 10)
     .map((r) => ({ ...r, payee: safeDecrypt(ctx.dek, r.payee) }));
 
+  const billCurrency = await getDisplayCurrency(ctx.userId);
   const lines = upcoming.map(
-    (r) => `  ${r.nextDate} — ${r.payee}: ${formatCurrency(Math.abs(r.amount), "CAD")} (${r.frequency})`
+    (r) => `  ${r.nextDate} — ${r.payee}: ${formatCurrency(Math.abs(r.amount), r.currency || billCurrency)} (${r.frequency})`
   );
 
   const chartData = upcoming.map((r) => ({
@@ -776,49 +808,12 @@ const handleForecast: IntentHandler = async (msg, ctx) => {
 
 const handleSummary: IntentHandler = async (_msg, ctx) => {
   const month = getCurrentMonth();
-  const start = startOfMonth(0);
-  const end = endOfMonth(0);
+  const money = await moneyContext(ctx.userId);
 
-  // Net worth
-  const balances = await db
-    .select({
-      accountType: schema.accounts.type,
-      balance: sql<number>`COALESCE(SUM(${schema.transactions.amount}), 0)`,
-    })
-    .from(schema.accounts)
-    .leftJoin(schema.transactions, eq(schema.accounts.id, schema.transactions.accountId))
-    .where(eq(schema.accounts.userId, ctx.userId))
-    .groupBy(schema.accounts.id, schema.accounts.type)
-    .all();
-
-  let assets = 0, liabilities = 0;
-  for (const b of balances) {
-    if (b.accountType === "A") assets += b.balance;
-    else liabilities += b.balance;
-  }
-  const netWorth = assets + liabilities;
-
-  // Month income vs expenses
-  const monthResult = await db
-    .select({
-      type: schema.categories.type,
-      total: sql<number>`COALESCE(SUM(${schema.transactions.amount}), 0)`,
-    })
-    .from(schema.transactions)
-    .leftJoin(schema.categories, eq(schema.transactions.categoryId, schema.categories.id))
-    .where(
-      and(
-        eq(schema.transactions.userId, ctx.userId),
-        gte(schema.transactions.date, start),
-        lte(schema.transactions.date, end),
-        sql`${schema.categories.type} IN ('E', 'I')`
-      )
-    )
-    .groupBy(schema.categories.type)
-    .all();
-
-  const income = monthResult.find((r) => r.type === "I")?.total ?? 0;
-  const expenses = Math.abs(monthResult.find((r) => r.type === "E")?.total ?? 0);
+  // Net worth: the same figure the "net worth" answer gives.
+  const { netWorth } = netWorthOf(await accountBalances(ctx, money));
+  // This month's income and expenses.
+  const { income, expenses } = await flowTotals(ctx.userId, startOfMonth(0), endOfMonth(0), money);
   const savings = income - expenses;
 
   // Active goals count
@@ -828,28 +823,7 @@ const handleSummary: IntentHandler = async (_msg, ctx) => {
     .where(and(eq(schema.goals.userId, ctx.userId), eq(schema.goals.status, "active")))
     .get();
 
-  // Budgets over
-  const budgetRows = await db
-    .select()
-    .from(schema.budgets)
-    .where(and(eq(schema.budgets.userId, ctx.userId), eq(schema.budgets.month, month)))
-    .all();
-  let overBudgetCount = 0;
-  for (const b of budgetRows) {
-    const spent = await db
-      .select({ total: sql<number>`COALESCE(SUM(${schema.transactions.amount}), 0)` })
-      .from(schema.transactions)
-      .where(
-        and(
-          eq(schema.transactions.userId, ctx.userId),
-          eq(schema.transactions.categoryId, b.categoryId),
-          gte(schema.transactions.date, start),
-          lte(schema.transactions.date, end)
-        )
-      )
-      .get();
-    if (Math.abs(spent?.total ?? 0) > b.amount) overBudgetCount++;
-  }
+  const overBudgetCount = (await budgetStatuses(ctx, month, money)).filter((b) => b.status === "OVER").length;
 
   const chartData = [
     { name: "Income", value: Math.round(income * 100) / 100 },
@@ -857,14 +831,15 @@ const handleSummary: IntentHandler = async (_msg, ctx) => {
     { name: "Savings", value: Math.round(savings * 100) / 100 },
   ];
 
+  const fmt = (n: number) => formatCurrency(n, money.displayCurrency);
   return {
     text: [
       `Here's your financial summary for ${getMonthLabel(month)}:`,
       "",
-      `Net worth: ${formatCurrency(netWorth, "CAD")}`,
-      `Income this month: ${formatCurrency(income, "CAD")}`,
-      `Expenses this month: ${formatCurrency(expenses, "CAD")}`,
-      `Savings: ${formatCurrency(savings, "CAD")} (${income > 0 ? Math.round((savings / income) * 100) : 0}% savings rate)`,
+      `Net worth: ${fmt(netWorth)}`,
+      `Income this month: ${fmt(income)}`,
+      `Expenses this month: ${fmt(expenses)}`,
+      `Savings: ${fmt(savings)} (${income > 0 ? Math.round((savings / income) * 100) : 0}% savings rate)`,
       "",
       `Active goals: ${goalCount?.count ?? 0}`,
       overBudgetCount > 0 ? `Budgets over limit: ${overBudgetCount}` : "All budgets on track!",

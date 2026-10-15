@@ -23,7 +23,8 @@
  *   - `payee`/`note`/`tags` re-encrypted under the user's DEK regardless of
  *     the bank row's encryption_tier. transactions table is user-tier only.
  *   - `created_at = updated_at = NOW()` (audit-trio) via column defaults.
- *   - Sign-vs-category invariant enforced when a `categoryId` is provided.
+ *   - Sign-vs-category checked when a `categoryId` is provided — ADVISORY
+ *     (2026-10-15): returned as `warning`, never a refusal.
  *   - Investment-account constraint: refuses materialize into an investment
  *     account (those require `portfolio_holding_id`, which this surface
  *     doesn't collect).
@@ -47,11 +48,15 @@ export type MaterializeTxnFailCode =
   | "bank_not_found"
   | "account_not_found"
   | "category_not_found"
-  | "investment_account_unsupported"
-  | "sign_category_mismatch";
+  | "investment_account_unsupported";
 
 export type MaterializeTxnResult =
-  | { ok: true; transactionId: number }
+  | {
+      ok: true;
+      transactionId: number;
+      /** The sign is unusual for the category; booked anyway. */
+      warning?: string;
+    }
   | {
       ok: false;
       code: MaterializeTxnFailCode;
@@ -147,24 +152,13 @@ export async function materializeBankRowAsTransaction(
   const notePlain = decodeBankString(bank.encryptionTier, dek, bank.note);
   const tagsPlain = decodeBankString(bank.encryptionTier, dek, bank.tags);
 
-  // Sign-vs-category invariant — enforced BEFORE the INSERT so we don't
-  // create-then-fail. The bank row's amount is the source of truth; we
-  // never flip signs.
-  if (categoryId != null) {
-    const violation = await validateSignVsCategoryById(
-      userId,
-      dek,
-      categoryId,
-      bank.amount,
-    );
-    if (violation) {
-      return {
-        ok: false,
-        code: "sign_category_mismatch",
-        message: violation.message,
-      };
-    }
-  }
+  // Sign-vs-category is a WARNING, never a refusal (2026-10-15, owner
+  // request): a refund in an expense category is still real money. The bank
+  // row's amount is the source of truth; we never flip signs.
+  const violation =
+    categoryId != null
+      ? await validateSignVsCategoryById(userId, dek, categoryId, bank.amount)
+      : null;
 
   // Cross-tenant FK guard on categoryId.
   if (categoryId != null) {
@@ -226,7 +220,11 @@ export async function materializeBankRowAsTransaction(
 
   invalidateUser(userId);
 
-  return { ok: true, transactionId: inserted.transactionId };
+  return {
+    ok: true,
+    transactionId: inserted.transactionId,
+    ...(violation ? { warning: violation.message } : {}),
+  };
 }
 
 /**

@@ -107,6 +107,8 @@ export function InboxToCategorizeTab({
   const [snapshot, setSnapshot] = useState<SnapshotShape | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // Booked, but the sign is unusual for the category (advisory, 2026-10-15).
+  const [notice, setNotice] = useState<string | null>(null);
   const [busyBankId, setBusyBankId] = useState<string | null>(null);
   const [categories, setCategories] = useState<DialogCategory[]>([]);
   const [holdings, setHoldings] = useState<DialogHolding[]>([]);
@@ -303,10 +305,12 @@ export function InboxToCategorizeTab({
           body: JSON.stringify({ categoryId }),
         },
       );
+      const body = await res.json().catch(() => ({}));
       if (!res.ok) {
-        const body = await res.json().catch(() => ({}));
         throw new Error(body.error ?? `HTTP ${res.status}`);
       }
+      // The sign is unusual for the category: booked anyway, worth a mention.
+      return (body?.data?.warning as string | undefined) ?? null;
     },
     [],
   );
@@ -408,8 +412,10 @@ export function InboxToCategorizeTab({
       if (sug?.kind === "create") {
         setBusyBankId(bankId);
         setError(null);
+        setNotice(null);
         try {
-          await categorizeOne(bankId, sug.categoryId);
+          const warning = await categorizeOne(bankId, sug.categoryId);
+          if (warning) setNotice(`Booked. ${warning}`);
           await refresh();
         } catch (e) {
           setError(e instanceof Error ? e.message : String(e));
@@ -491,6 +497,11 @@ export function InboxToCategorizeTab({
       {error && (
         <div className="rounded-md border border-rose-200 bg-rose-50 p-3 text-sm text-rose-800 whitespace-pre-line">
           {error}
+        </div>
+      )}
+      {notice && (
+        <div className="rounded-md border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900 whitespace-pre-line dark:border-amber-900/50 dark:bg-amber-950/40 dark:text-amber-200">
+          {notice}
         </div>
       )}
 

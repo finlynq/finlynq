@@ -36,6 +36,8 @@ const HTTP_LOANS = readFileSync(path.join(ROOT, "mcp-server/tools/loans.ts"), "u
 const STDIO_TOOLS = readFileSync(path.join(ROOT, "mcp-server/register-core-tools.ts"), "utf8");
 const REST_LOANS = readFileSync(path.join(ROOT, "src/app/api/loans/route.ts"), "utf8");
 const LOANS_PAGE = readFileSync(path.join(ROOT, "src/app/(app)/loans/page.tsx"), "utf8");
+// Per-loan rows render here since the cards were replaced by a list (2026-10-15).
+const LOANS_LIST = readFileSync(path.join(ROOT, "src/app/(app)/loans/_components/loans-list.tsx"), "utf8");
 const SCHEMA = readFileSync(path.join(ROOT, "src/db/schema-pg.ts"), "utf8");
 
 /**
@@ -162,10 +164,14 @@ describe("wiring: every loan surface carries the currency", () => {
     // they must read the server-converted companions to do it.
     expect(code).toContain("remainingBalanceDisplay");
     expect(code).toContain("monthlyEquivalentPaymentDisplay");
-    expect(code).toContain("formatCurrency(loan.remainingBalance, loan.currency)");
-    // The old bug, verbatim: native balance rendered in the display currency.
-    expect(code).not.toContain("formatCurrency(loan.remainingBalance, displayCurrency)");
-    expect(code).not.toContain("formatCurrency(loan.totalInterest, displayCurrency)");
+    const list = codeOnly(LOANS_LIST);
+    expect(list).toContain("formatCurrency(l.remainingBalance, l.currency)");
+    expect(list).toContain("formatCurrency(l.totalInterest, l.currency)");
+    // The old bug, verbatim: native amounts rendered in the display currency.
+    for (const c of [code, list]) {
+      expect(c).not.toMatch(/formatCurrency\((loan|l)\.remainingBalance, displayCurrency\)/);
+      expect(c).not.toMatch(/formatCurrency\((loan|l)\.totalInterest, displayCurrency\)/);
+    }
   });
 
   it("the page can edit a loan, through the SAME dialog as create", () => {

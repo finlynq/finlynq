@@ -318,7 +318,11 @@ export function registerReconcileTools(server: McpServer, ctx: PgToolContext) {
       }
       return err(result.message);
     }
-    return dataResponse({ mode: "category", transactionId: result.transactionId });
+    return dataResponse({
+      mode: "category",
+      transactionId: result.transactionId,
+      ...(result.warning ? { warning: result.warning } : {}),
+    });
   }
 
   // ── reconcile op: apply_rules — lifted VERBATIM from apply_rules_to_bank_rows ─
@@ -449,7 +453,7 @@ export function registerReconcileTools(server: McpServer, ctx: PgToolContext) {
           .int()
           .positive()
           .optional()
-          .describe("Category mode: stamp this category on the new tx (sign-vs-category enforced)."),
+          .describe("Category mode: stamp this category on the new tx. An amount whose sign is unusual for the category is still booked; the response carries a warning."),
         accountId: z
           .number()
           .int()

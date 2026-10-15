@@ -58,10 +58,13 @@ export class SignCategoryMismatchError extends Error {
     public categoryName: string,
     public categoryType: "E" | "I",
   ) {
-    const direction = categoryType === "E" ? "non-positive (≤ 0)" : "non-negative (≥ 0)";
-    const role = categoryType === "E" ? "expense" : "income";
+    // Worded as a heads-up, not a rule: every caller books the row anyway
+    // (2026-10-15 — a refund in an expense category is real money).
+    const role = categoryType === "E" ? "an expense" : "an income";
+    const sign = categoryType === "E" ? "positive" : "negative";
+    const usual = categoryType === "E" ? "a refund" : "a reversal";
     super(
-      `Category "${categoryName}" is type '${categoryType}' (${role}), so amount must be ${direction}; got ${amount}. Flip the sign or pick a different category.`,
+      `"${categoryName}" is ${role} category but this amount is ${sign} (${amount}). That's fine for ${usual}; otherwise flip the sign or pick a different category.`,
     );
     this.name = "SignCategoryMismatchError";
   }

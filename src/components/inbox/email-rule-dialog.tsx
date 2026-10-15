@@ -388,11 +388,7 @@ export function EmailRuleDialog({
         if (!rec.ok) {
           const b = await rec.json().catch(() => ({}));
           const reason = b.code ?? b.error ?? `HTTP ${rec.status}`;
-          setNotice(
-            reason === "sign_category_mismatch"
-              ? "Rule created — but this email didn't record: the amount sign doesn't match the category. Adjust the flip/category and use Record on the row."
-              : `Rule created — but this email didn't record (${reason}).`,
-          );
+          setNotice(`Rule created — but this email didn't record (${reason}).`);
           onSaved();
           setSaving(false);
           return;
@@ -645,8 +641,8 @@ export function EmailRuleDialog({
           )}
 
           <p className="text-[11px] text-muted-foreground">
-            Auto-record needs a category (the income/expense sign must match). Without one, the rule resolves
-            the account and waits for a click.
+            Auto-record needs a category. Without one, the rule resolves the account and waits for a click.
+            An amount whose sign is unusual for the category (a refund, say) is still recorded.
           </p>
         </div>
 

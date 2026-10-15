@@ -2,7 +2,6 @@
 
 
 import { useEffect, useRef, useState, useCallback } from "react";
-import Link from "next/link";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -13,20 +12,19 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/u
 import { useDropdownOrder } from "@/components/dropdown-order-provider";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { Badge } from "@/components/ui/badge";
 import { formatCurrency } from "@/lib/currency";
 import { useDisplayCurrency } from "@/components/currency-provider";
 import { useActiveCurrencies } from "@/lib/hooks/useActiveCurrencies";
 import { LineChart, Line, XAxis, YAxis, Tooltip, ResponsiveContainer, BarChart, Bar, Legend } from "recharts";
-import { Plus, Pencil, Trash2, Landmark, CreditCard, FileText, Calendar, CheckCircle2, ChevronDown } from "lucide-react";
+import { Plus, Landmark, CreditCard, FileText, Calendar, CheckCircle2, ChevronDown } from "lucide-react";
 import { EmptyState } from "@/components/empty-state";
 import { ErrorState } from "@/components/error-state";
 import { ConfirmDialog } from "@/components/ui/confirm-dialog";
 import { parseSaveError } from "@/lib/save-error";
-import { CspSafeBar } from "@/components/csp-safe-bar";
 import { isLoanCompleted } from "@/lib/loan-status";
 import { LoanInterestEntries } from "./_components/interest-entries";
 import { LoanScheduleEditor } from "./_components/schedule-editor";
+import { LoansList } from "./_components/loans-list";
 
 type Loan = {
   id: number; name: string; type: string; principal: number; annualRate: number;
@@ -51,6 +49,7 @@ type Loan = {
   displayCurrency: string;
   remainingBalanceDisplay: number | null;
   monthlyEquivalentPaymentDisplay: number | null;
+  totalInterestDisplay: number | null;
 };
 type AmortRow = { period: number; date: string; payment: number; principal: number; interest: number; balance: number; interestOverridden?: boolean };
 type AccrualRow = { month: string; interest: number };
@@ -64,10 +63,6 @@ const FREQUENCY_OPTIONS = [
   { value: "quarterly", label: "Quarterly" },
   { value: "annual", label: "Annual" },
 ] as const;
-
-const FREQUENCY_LABELS: Record<string, string> = Object.fromEntries(
-  FREQUENCY_OPTIONS.map((f) => [f.value, f.label])
-);
 
 // How a loan's interest is entered. Mirrors INTEREST_METHODS in loan-calculator.ts.
 const INTEREST_METHOD_OPTIONS = [
@@ -89,23 +84,7 @@ function equivalentTermMonths(loan: Loan): number {
   return Math.max(1, Math.round((loan.periodsRemaining / perYear) * 12));
 }
 type WhatIf = { extraPayment: number; monthsSaved: number; interestSaved: number; newPayoffDate: string; totalInterest: number };
-type Account = { id: number; name: string; currency?: string | null };
-
-const LOAN_TYPE_COLORS: Record<string, string> = {
-  mortgage: "border-l-indigo-500",
-  lease: "border-l-amber-500",
-  loan: "border-l-cyan-500",
-  student_loan: "border-l-violet-500",
-  credit_card: "border-l-rose-500",
-};
-
-const LOAN_TYPE_BADGE_COLORS: Record<string, string> = {
-  mortgage: "bg-indigo-100 text-indigo-700 dark:bg-indigo-950/50 dark:text-indigo-300",
-  lease: "bg-amber-100 text-amber-700 dark:bg-amber-950/50 dark:text-amber-300",
-  loan: "bg-cyan-100 text-cyan-700 dark:bg-cyan-950/50 dark:text-cyan-300",
-  student_loan: "bg-violet-100 text-violet-700 dark:bg-violet-950/50 dark:text-violet-300",
-  credit_card: "bg-rose-100 text-rose-700 dark:bg-rose-950/50 dark:text-rose-300",
-};
+type Account = { id: number; name: string; currency?: string | null; isInvestment?: boolean };
 
 function LoansSkeleton() {
   return (
@@ -129,39 +108,16 @@ function LoansSkeleton() {
           </Card>
         ))}
       </div>
-      {Array.from({ length: 2 }).map((_, i) => (
-        <Card key={i}>
-          <CardHeader>
-            <div className="flex items-center justify-between">
-              <div className="flex items-center gap-2">
-                <div className="h-6 w-36 bg-muted animate-pulse rounded" />
-                <div className="h-5 w-16 bg-muted animate-pulse rounded-full" />
-              </div>
-              <div className="flex gap-2">
-                <div className="h-8 w-24 bg-muted animate-pulse rounded" />
-                <div className="h-8 w-8 bg-muted animate-pulse rounded" />
-              </div>
-            </div>
-          </CardHeader>
-          <CardContent>
-            <div className="grid grid-cols-2 md:grid-cols-5 gap-4 mb-4">
-              {Array.from({ length: 5 }).map((_, j) => (
-                <div key={j}>
-                  <div className="h-3 w-16 bg-muted animate-pulse rounded mb-1" />
-                  <div className="h-5 w-24 bg-muted animate-pulse rounded" />
-                </div>
-              ))}
-            </div>
-            <div className="space-y-1">
-              <div className="flex justify-between">
-                <div className="h-3 w-32 bg-muted animate-pulse rounded" />
-                <div className="h-3 w-8 bg-muted animate-pulse rounded" />
-              </div>
-              <div className="h-2.5 w-full bg-muted animate-pulse rounded-full" />
-            </div>
-          </CardContent>
-        </Card>
-      ))}
+      <div className="rounded-xl border bg-card divide-y">
+        {Array.from({ length: 5 }).map((_, i) => (
+          <div key={i} className="flex items-center gap-4 px-4 py-3">
+            <div className="h-4 w-40 bg-muted animate-pulse rounded" />
+            <div className="ml-auto h-4 w-24 bg-muted animate-pulse rounded" />
+            <div className="hidden sm:block h-4 w-20 bg-muted animate-pulse rounded" />
+            <div className="hidden sm:block h-1.5 w-16 bg-muted animate-pulse rounded-full" />
+          </div>
+        ))}
+      </div>
     </div>
   );
 }
@@ -269,6 +225,7 @@ function LoansPageContent() {
 
   const sortAccount = useDropdownOrder("account");
 
+
   // Schedule panel tab. Controlled so a deep link can open a specific one.
   const [panelTab, setPanelTab] = useState("chart");
   // `/loans?loan=<id>&tab=<tab>` opens that loan's schedule panel on that tab
@@ -305,6 +262,13 @@ function LoansPageContent() {
     ]);
     setAmort(amortRes);
     setWhatIf(Array.isArray(whatIfRes) ? whatIfRes : []);
+  }
+
+  // The panel renders below every loan, so with a long list it opened off
+  // screen and the click looked like it did nothing. Scroll to it.
+  function openSchedule(loan: Loan) {
+    scrollToPanel.current = true;
+    void viewAmortization(loan);
   }
 
   // ONE payload shape for both verbs, so a field added to the form reaches
@@ -405,75 +369,6 @@ function LoansPageContent() {
   // Whether any loan is booked in something other than the display currency —
   // drives the "converted at today's rate" caveat on the two total tiles.
   const hasForeignLoan = loans.some((l) => l.currency && l.currency !== displayCurrency);
-
-  const renderLoan = (loan: Loan) => {
-        const paidPct = loan.principal > 0 ? ((loan.principal - loan.remainingBalance) / loan.principal) * 100 : 0;
-        const borderClass = LOAN_TYPE_COLORS[loan.type] || "border-l-gray-400";
-        const badgeClass = LOAN_TYPE_BADGE_COLORS[loan.type] || "";
-        return (
-          <Card key={loan.id} className={`border-l-4 ${borderClass}`}>
-            <CardHeader>
-              <div className="flex items-center justify-between">
-                <div className="flex items-center gap-2">
-                  <CardTitle>{loan.name}</CardTitle>
-                  <Badge variant="secondary" className={badgeClass}>{loan.type}</Badge>
-                  {loan.scheduleMode === "manual" && <Badge variant="outline" className="text-xs">Manual schedule</Badge>}
-                  {loan.currency !== displayCurrency && (
-                    <Badge variant="outline" className="font-mono text-xs">{loan.currency}</Badge>
-                  )}
-                </div>
-                <div className="flex gap-2">
-                  <Button variant="outline" size="sm" onClick={() => viewAmortization(loan)}>View Schedule</Button>
-                  <Button variant="ghost" size="icon" className="h-8 w-8" aria-label={`Edit loan ${loan.name}`} onClick={() => openEdit(loan)}><Pencil className="h-4 w-4" /></Button>
-                  <Button variant="ghost" size="icon" className="h-8 w-8 text-destructive" aria-label={`Delete loan ${loan.name}`} onClick={() => setDeleteId(loan.id)}><Trash2 className="h-4 w-4" /></Button>
-                </div>
-              </div>
-            </CardHeader>
-            <CardContent>
-              <div className="grid grid-cols-2 md:grid-cols-5 gap-4 mb-4">
-                <div>
-                  <p className="text-xs text-muted-foreground">
-                    Remaining
-                    {loan.balanceSource === "account" && loan.accountId != null && (
-                      <Link href={`/accounts/${loan.accountId}`} className="ml-1 text-emerald-600 hover:underline" title={`Live balance from ${loan.accountName ?? "the linked account"}. Open the account.`}>
-                        · from account
-                      </Link>
-                    )}
-                  </p>
-                  <p className="font-mono font-bold text-rose-600">{formatCurrency(loan.remainingBalance, loan.currency)}</p>
-                  {loan.currency !== displayCurrency && loan.remainingBalanceDisplay != null && (
-                    <p className="text-xs text-muted-foreground font-mono">≈ {formatCurrency(loan.remainingBalanceDisplay, displayCurrency)}</p>
-                  )}
-                </div>
-                <div><p className="text-xs text-muted-foreground">{FREQUENCY_LABELS[loan.paymentFrequency] ?? "Payment"}</p><p className="font-mono">{formatCurrency(loan.paymentPerPeriod ?? loan.monthlyPayment, loan.currency)}</p></div>
-                <div>
-                  <p className="text-xs text-muted-foreground">{(loan.interestMethod ?? "rate") === "rate" ? "Rate" : "Effective rate"}</p>
-                  <p className="font-mono" title={(loan.interestMethod ?? "rate") === "rate" ? undefined : "The yearly rate, on the balance still owed, that this loan works out to"}>
-                    {(loan.interestMethod ?? "rate") === "rate" ? loan.annualRate : loan.effectiveAnnualRate ?? loan.annualRate}%
-                  </p>
-                </div>
-                <div><p className="text-xs text-muted-foreground">Total Interest</p><p className="font-mono">{formatCurrency(loan.totalInterest, loan.currency)}</p></div>
-                <div>
-                  <p className="text-xs text-muted-foreground">{loan.type === "lease" ? "Term end" : "Payoff"}</p>
-                  <p className="font-mono">{loan.payoffDate}</p>
-                  {loan.type === "lease" && loan.residualValue != null && loan.residualValue > 0 && (
-                    <p className="text-xs text-muted-foreground">residual {formatCurrency(loan.residualValue, loan.currency)}</p>
-                  )}
-                </div>
-              </div>
-              <div className="space-y-1">
-                <div className="flex justify-between text-xs"><span>Principal paid: {formatCurrency(loan.principalPaid, loan.currency)}</span><span>{Math.round(paidPct)}%</span></div>
-                <CspSafeBar
-                  percent={paidPct}
-                  className="bg-rose-200"
-                  fillClassName="bg-emerald-500"
-                  ariaLabel={`Loan ${loan.name} paid`}
-                />
-              </div>
-            </CardContent>
-          </Card>
-        );
-  };
 
   if (loading) return <LoansSkeleton />;
   if (loadError) return <ErrorState title="Couldn't load loans" message="We couldn't load your loans. Please try again." onRetry={() => { setLoading(true); load(); }} />;
@@ -608,7 +503,12 @@ function LoansPageContent() {
                     setForm((f) => ({ ...f, accountId: v, currency: acct?.currency || f.currency }));
                   }}
                   items={sortAccount(
-                    accounts.map((a): ComboboxItemShape => ({ value: String(a.id), label: a.name })),
+                    accounts
+                      // Interest is booked on the linked account and its balance becomes the
+                      // loan's, which an investment account can't do (the server refuses it too).
+                      // A loan already on one keeps it listed so the form still shows it.
+                      .filter((a) => a.isInvestment !== true || a.id === editingLoan?.accountId)
+                      .map((a): ComboboxItemShape => ({ value: String(a.id), label: a.name })),
                     (a) => Number(a.value),
                     (a, z) => (a.label ?? "").localeCompare(z.label ?? ""),
                   )}
@@ -684,8 +584,20 @@ function LoansPageContent() {
         />
       )}
 
-      {/* Loan cards */}
-      {activeLoans.map(renderLoan)}
+      {/* One row per loan (in-app feedback 2026-10-15: with 17 loans, the
+          cards this replaced fitted about three to a screen). */}
+      {activeLoans.length > 0 && (
+        <div className="rounded-xl border bg-card">
+          <LoansList
+            loans={activeLoans}
+            displayCurrency={displayCurrency}
+            selectedId={selectedLoan?.id ?? null}
+            onSchedule={openSchedule}
+            onEdit={openEdit}
+            onDelete={(l) => setDeleteId(l.id)}
+          />
+        </div>
+      )}
 
       {/* Paid-off loans: collapsed by default */}
       {completedLoans.length > 0 && (
@@ -698,7 +610,16 @@ function LoansPageContent() {
             </span>
             <ChevronDown className="h-4 w-4 shrink-0 text-muted-foreground transition-transform group-open:rotate-180" />
           </summary>
-          <div className="space-y-6 px-4 pb-4">{completedLoans.map(renderLoan)}</div>
+          <div className="border-t">
+            <LoansList
+              loans={completedLoans}
+              displayCurrency={displayCurrency}
+              selectedId={selectedLoan?.id ?? null}
+              onSchedule={openSchedule}
+              onEdit={openEdit}
+              onDelete={(l) => setDeleteId(l.id)}
+            />
+          </div>
         </details>
       )}
 

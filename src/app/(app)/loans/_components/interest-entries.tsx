@@ -68,6 +68,11 @@ export function LoanInterestEntries({
   // The suggested rate awaiting confirmation, or null when the dialog is closed.
   const [rateToApply, setRateToApply] = useState<number | null>(null);
   const [rateSaving, setRateSaving] = useState(false);
+  // Making the interest category from here: the picker only lists existing
+  // categories, and a first loan usually has none to pick.
+  const [creating, setCreating] = useState(false);
+  const [newCategoryName, setNewCategoryName] = useState("Loan interest");
+  const [creatingBusy, setCreatingBusy] = useState(false);
 
   // `category` previews the ledger under that category; "" uses the loan's own.
   const load = useCallback(
@@ -132,6 +137,37 @@ export function LoanInterestEntries({
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ loanId: loan.id, categoryId: Number(value) }),
     }).catch(() => {});
+  }
+
+  async function createCategory() {
+    const name = newCategoryName.trim();
+    if (!name || creatingBusy) return;
+    setCreatingBusy(true);
+    setError("");
+    try {
+      const res = await fetch("/api/categories", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name, type: "E", group: "Financial" }),
+      });
+      if (!res.ok) {
+        setError(await parseSaveError(res, "Could not create the category."));
+        return;
+      }
+      const created = await res.json().catch(() => null);
+      const id = Number(created?.id);
+      if (!Number.isInteger(id) || id <= 0) {
+        setError("Could not create the category.");
+        return;
+      }
+      setCategories((cur) => [...cur, { id, name, type: "E" }]);
+      setCreating(false);
+      await pickCategory(String(id));
+    } catch {
+      setError("Could not reach the server. Nothing was saved.");
+    } finally {
+      setCreatingBusy(false);
+    }
   }
 
   const today = todayISO();
@@ -255,12 +291,40 @@ export function LoanInterestEntries({
             placeholder="Pick an expense category"
           />
         </div>
+        {!creating && (
+          <Button variant="outline" onClick={() => { setCreating(true); setError(""); }}>
+            New category
+          </Button>
+        )}
         <Button onClick={() => post(due)} disabled={saving || !loaded || due.length === 0}>
           {due.length === 0
             ? "Nothing due"
             : `Generate ${due.length} due ${due.length === 1 ? "entry" : "entries"} (${formatCurrency(dueTotal, loan.currency)})`}
         </Button>
       </div>
+
+      {creating && (
+        <div className="flex flex-wrap items-end gap-2">
+          <div className="w-64">
+            <Label htmlFor="new-interest-category" className="mb-1 block text-xs text-muted-foreground">
+              New expense category
+            </Label>
+            <Input
+              id="new-interest-category"
+              value={newCategoryName}
+              onChange={(e) => setNewCategoryName(e.target.value)}
+              onKeyDown={(e) => { if (e.key === "Enter") void createCategory(); }}
+              autoFocus
+            />
+          </div>
+          <Button onClick={() => void createCategory()} disabled={creatingBusy || !newCategoryName.trim()}>
+            {creatingBusy ? "Creating…" : "Create and use"}
+          </Button>
+          <Button variant="ghost" onClick={() => setCreating(false)} disabled={creatingBusy}>
+            Cancel
+          </Button>
+        </div>
+      )}
 
       {error && <p className="text-sm text-destructive">{error}</p>}
 
