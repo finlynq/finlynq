@@ -9,21 +9,11 @@ import type {
 } from "../../../shared/types";
 import { isValidIsoDate } from "./subscriptions";
 
-// Cards, or one compact row per loan (in-app feedback 2026-10-15: someone with
-// 17 loans could see about three at a time). Mirrors the web's Cards / List
-// switch in pf-app `src/lib/loans/list-view.ts`; keep the two in sync.
-export type LoansView = "cards" | "list";
-export const LOANS_VIEW_KEY = "pf-loans-view";
-
-/** Anything other than "list" (nothing stored, junk) means cards. */
-export function parseLoansView(raw: string | null | undefined): LoansView {
-  return raw === "list" ? "list" : "cards";
-}
-
 /**
- * Short "per period" suffix for a payment in the compact list, written straight
+ * Short "per period" suffix for a payment on a loan's row, written straight
  * after the amount (hence the space before "2×/mo", which the web sets apart
- * with a margin instead).
+ * with a margin instead). Same set as the web's `PAYMENT_FREQUENCY_SHORT` in
+ * pf-app `src/lib/loans/list-view.ts`; keep the two in sync.
  */
 export const PAYMENT_FREQUENCY_SHORT: Record<string, string> = {
   weekly: "/wk",

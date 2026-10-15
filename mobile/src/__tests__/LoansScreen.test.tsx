@@ -1,9 +1,7 @@
 import React from "react";
 import { render, waitFor, fireEvent } from "@testing-library/react-native";
 import LoansScreen from "../screens/LoansScreen";
-import AsyncStorage from "@react-native-async-storage/async-storage";
 import {
-  LOANS_VIEW_KEY,
   buildLoanPayload,
   isLoanCompleted,
   loanFormInit,
@@ -11,7 +9,6 @@ import {
   loanRateLabel,
   loanTotals,
   loanTypeLabel,
-  parseLoansView,
   splitLoans,
   splitSchedule,
 } from "../lib/loans";
@@ -286,11 +283,13 @@ describe("LoansScreen", () => {
 
   it("lists active loans with their balance, payment and end date", async () => {
     getLoans.mockResolvedValue(ok([loan({})]));
-    const { getByText, queryByText } = render(screen());
+    const { getByText, getAllByText, queryByText } = render(screen());
     await waitFor(() => expect(getByText("Car loan")).toBeTruthy());
-    expect(getByText("Auto loan · 6%")).toBeTruthy();
-    expect(getByText(/33% paid of/)).toBeTruthy();
-    expect(getByText("2028-01-15")).toBeTruthy();
+    // One two-line row (in-app feedback 2026-10-15: with 17 loans, the cards
+    // these replaced fitted about three to a screen).
+    expect(getAllByText("$8,000")).toHaveLength(2); // the row and the total
+    expect(getByText("$531.85/mo · 6%")).toBeTruthy();
+    expect(getByText("33% paid · ends 2028-01")).toBeTruthy();
     expect(queryByText(/paid-off/)).toBeNull();
   });
 
@@ -325,7 +324,7 @@ describe("LoansScreen", () => {
     );
     const { getByText } = render(screen());
     await waitFor(() => expect(getByText("Car loan")).toBeTruthy());
-    expect(getByText(/could not be scheduled/)).toBeTruthy();
+    expect(getByText("Could not be scheduled. Tap to fix.")).toBeTruthy();
   });
 
   it("opens a loan's payment schedule when it is tapped", async () => {
@@ -353,7 +352,7 @@ describe("LoansScreen", () => {
     getLoans.mockResolvedValue(ok([loan({ scheduleMode: "manual", remainingBalance: 9487, periodsRemaining: 0 })]));
     const { getByText, queryByText } = render(screen());
     await waitFor(() => expect(getByText("Car loan")).toBeTruthy());
-    expect(getByText("Auto loan · Manual schedule")).toBeTruthy();
+    expect(getByText("$531.85/mo · Manual schedule")).toBeTruthy();
     expect(queryByText(/paid-off/)).toBeNull();
   });
 
@@ -370,64 +369,14 @@ describe("LoansScreen", () => {
   });
 });
 
-// In-app feedback 2026-10-15: with 17 loans, about three cards fit on a screen.
-describe("LoansScreen list view", () => {
-  const getItem = AsyncStorage.getItem as jest.Mock;
-  const setItem = AsyncStorage.setItem as jest.Mock;
-
-  beforeEach(() => {
-    getItem.mockReset();
-    getItem.mockResolvedValue(null);
-    setItem.mockClear();
-  });
-
-  it("reads a stored choice, defaulting to cards", () => {
-    expect(parseLoansView("list")).toBe("list");
-    expect(parseLoansView("cards")).toBe("cards");
-    expect(parseLoansView(null)).toBe("cards");
-    expect(parseLoansView("grid")).toBe("cards");
-  });
-
-  it("switches to two-line rows and remembers the choice", async () => {
-    getLoans.mockResolvedValue(ok([loan({})]));
-    const { getByText, queryByText } = render(screen());
-    await waitFor(() => expect(getByText("Car loan")).toBeTruthy());
-    expect(getByText(/33% paid of/)).toBeTruthy();
-
-    fireEvent.press(getByText("List"));
-    expect(getByText("$531.85/mo · 6%")).toBeTruthy();
-    expect(getByText("33% paid · ends 2028-01")).toBeTruthy();
-    expect(queryByText(/33% paid of/)).toBeNull();
-    expect(setItem).toHaveBeenCalledWith(LOANS_VIEW_KEY, "list");
-
-    fireEvent.press(getByText("Cards"));
-    expect(getByText(/33% paid of/)).toBeTruthy();
-    expect(setItem).toHaveBeenLastCalledWith(LOANS_VIEW_KEY, "cards");
-  });
-
-  it("opens in the list when that was the last choice", async () => {
-    getItem.mockResolvedValue("list");
+describe("LoansScreen rows", () => {
+  it("say how often a loan is paid", async () => {
     getLoans.mockResolvedValue(ok([loan({ paymentFrequency: "biweekly", paymentPerPeriod: 245.5 })]));
     const { getByText } = render(screen());
     await waitFor(() => expect(getByText("$245.50/2 wk · 6%")).toBeTruthy());
   });
 
-  it("a row opens the schedule, or the form for a loan that could not be scheduled", async () => {
-    getItem.mockResolvedValue("list");
-    const car = loan({ id: 4 });
-    const bad = loan({ id: 5, name: "Bad loan", remainingBalance: null, periodsRemaining: null, payoffDate: null });
-    getLoans.mockResolvedValue(ok([car, bad]));
-    const { getByText } = render(screen());
-    await waitFor(() => expect(getByText("Could not be scheduled. Tap to fix.")).toBeTruthy());
-
-    fireEvent.press(getByText("Car loan"));
-    expect(mockNavigate).toHaveBeenCalledWith("LoanDetail", { loan: car });
-    fireEvent.press(getByText("Bad loan"));
-    expect(mockNavigate).toHaveBeenCalledWith("AddLoan", { loan: bad });
-  });
-
   it("paid-off loans use the same rows once shown", async () => {
-    getItem.mockResolvedValue("list");
     getLoans.mockResolvedValue(
       ok([loan({ id: 1 }), loan({ id: 2, name: "Old laptop", remainingBalance: 0, periodsRemaining: 0, remainingBalanceDisplay: 0 })]),
     );
