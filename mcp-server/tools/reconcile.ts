@@ -318,7 +318,11 @@ export function registerReconcileTools(server: McpServer, ctx: PgToolContext) {
       }
       return err(result.message);
     }
-    return dataResponse({ mode: "category", transactionId: result.transactionId });
+    return dataResponse({
+      mode: "category",
+      transactionId: result.transactionId,
+      ...(result.warning ? { warning: result.warning } : {}),
+    });
   }
 
   // ── reconcile op: apply_rules — lifted VERBATIM from apply_rules_to_bank_rows ─

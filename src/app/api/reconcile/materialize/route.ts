@@ -20,8 +20,9 @@
  * web client already depends on. External HTTP contract preserved byte-for-byte:
  *   - `*_not_found`                 → 404 `{error:"Not found"}`
  *   - `investment_account_unsupported` → 400 `{error, code}`
- *   - `sign_category_mismatch`      → 400 `{error, code}`
- *   - success                       → `{success:true,data:{transactionId}}`
+ *   - success                       → `{success:true,data:{transactionId, warning?}}`
+ *     (`warning`: the sign is unusual for the category — booked anyway; this
+ *     was a 400 `sign_category_mismatch` until 2026-10-15)
  */
 
 import { NextRequest, NextResponse } from "next/server";
@@ -67,7 +68,6 @@ export async function POST(request: NextRequest) {
       case "category_not_found":
         return NextResponse.json({ error: "Not found" }, { status: 404 });
       case "investment_account_unsupported":
-      case "sign_category_mismatch":
         return NextResponse.json(
           { error: result.message, code: result.code },
           { status: 400 },
@@ -77,6 +77,9 @@ export async function POST(request: NextRequest) {
 
   return NextResponse.json({
     success: true,
-    data: { transactionId: result.transactionId },
+    data: {
+      transactionId: result.transactionId,
+      ...(result.warning ? { warning: result.warning } : {}),
+    },
   });
 }

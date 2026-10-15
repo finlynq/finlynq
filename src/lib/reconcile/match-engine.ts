@@ -918,9 +918,9 @@ function roundDelta(d: number): number {
 //   - Investment-account guard — refuses to materialize into an investment
 //      account (would need a `portfolio_holding_id` which this surface
 //      doesn't collect). Returns `matched: false` with a logged skip.
-//   - Sign-vs-category invariant validated BEFORE INSERT. Mismatch logs a
-//      warning and skips materialization for that row; the bank row stays
-//      in "To categorize" so the user can pick a different category.
+//   - Sign-vs-category is ADVISORY (2026-10-15, owner request): a mismatch
+//      (a refund in an expense category, a reversal in an income one) is
+//      still booked and reported as the row's `warning`, never skipped.
 //   - tx + link INSERTs share one DB transaction per bank row.
 //   - `invalidateUser(userId)` after the loop closes so MCP tx cache is
 //      fresh on the next read.
@@ -968,6 +968,8 @@ export interface ApplyRulesPerRowResult {
    *  'transfer_dest_not_found' / 'transfer_write_failed'). Absent on clean
    *  matches. */
   skipReason?: string;
+  /** Set when the row was booked but its sign is unusual for the category. */
+  warning?: string;
   /** When skipReason='possible_ledger_duplicate', the id of the existing
    *  unlinked ledger transaction this bank row appears to duplicate. */
   duplicateOfTransactionId?: number;
@@ -1373,23 +1375,15 @@ export async function applyRulesToBankRows(
       continue;
     }
 
-    // Sign-vs-category invariant — same enforcement as /materialize and
-    // /approve. Mismatch logs a skip and leaves the bank row in the
-    // unlinked pool so the user can pick a different category.
+    // Sign-vs-category is a warning, not a refusal (same as /approve and
+    // /categorize): skipping left such rows stuck in "To categorize" on
+    // every sync, with nothing the rule could ever do about them.
     const violation = await validateSignVsCategoryById(
       userId,
       dek,
       categoryId,
       bank.amount,
     );
-    if (violation) {
-      perRow.push({
-        bankRowId: bank.id,
-        matched: true,
-        skipReason: "sign_category_mismatch",
-      });
-      continue;
-    }
 
     // Cross-tenant FK guard on categoryId. The rule's action was already
     // ownership-checked at rule-create time, but defensive re-check costs
@@ -1472,6 +1466,7 @@ export async function applyRulesToBankRows(
         bankRowId: bank.id,
         matched: true,
         transactionId: inserted,
+        ...(violation ? { warning: violation.message } : {}),
       });
     } catch (err) {
 

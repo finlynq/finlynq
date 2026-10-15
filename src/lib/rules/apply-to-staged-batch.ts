@@ -56,9 +56,10 @@
  *    that fail the ownership check are SKIPPED silently (row stays as-is for
  *    that action; other actions on the same rule still fire).
  *
- * 6. **Sign-vs-category mismatch on `set_category` = skip just that action.**
- *    Per user decision 2026-05-22: don't refuse the whole row. The user can
- *    fix at approve time. Other actions on the same rule still apply.
+ * 6. **Sign-vs-category never blocks `set_category`** (2026-10-15, owner
+ *    request; it used to skip just that action). A refund in an expense
+ *    category or a reversal in an income one gets the rule's category like
+ *    any other row; the sign check is advisory everywhere.
  *
  * Stdio MCP refuses these write paths — no DEK on stdio transport; the new
  * surfaces (`/apply-rules`, `/create-rule` post-FINLYNQ-88) are HTTP-only,
@@ -79,7 +80,6 @@ import { computePureActionPatch } from "@/lib/rules/execute";
 import { decryptRuleFields } from "@/lib/rules/crypto";
 import type { Action, ConditionGroup } from "@/lib/rules/schema";
 import { defaultHoldingForInvestmentAccount } from "@/lib/investment-account";
-import { validateSignVsCategoryById } from "@/lib/transactions/sign-category-invariant";
 
 export interface ApplyResult {
   rowsTouched: number;
@@ -322,43 +322,34 @@ export async function applyRulesToStagedBatch(
     // 4a — Pure-action patch via the shared helper.
     const patch = computePureActionPatch(match.actions, probe);
 
-    // 4a.i — set_category: sign-vs-category guard. Skip just this action on
-    // mismatch; other actions still fire.
+    // 4a.i — set_category. The sign is NOT checked here: it is advisory
+    // everywhere, and a staged row is not booked yet anyway.
     if (patch.categoryId != null) {
       if (!ownedCategoryIds.has(patch.categoryId)) {
         // Cross-tenant: skip just this action. Don't write `category`.
       } else {
-        const violation = await validateSignVsCategoryById(
-          userId,
-          dek,
-          patch.categoryId,
-          row.amount,
-        );
-        if (violation == null) {
-          // Re-encrypt the category NAME at the row's existing tier. The
-          // staged_transactions.category column stores the display name as
-          // ciphertext (tier-branched). Resolve the category's plaintext
-          // name via decryptField over its name_ct.
-          let plainName = "";
-          const catRow = (await client
-            .select({ nameCt: schema.categories.nameCt })
-            .from(schema.categories)
-            .where(and(
-              eq(schema.categories.id, patch.categoryId),
-              eq(schema.categories.userId, userId),
-            ))
-            .execute()) as Array<{ nameCt: string | null }>;
-          const ct = catRow[0]?.nameCt;
-          if (ct) {
-            try {
-              plainName = decryptField(dek, ct) ?? "";
-            } catch {
-              plainName = "";
-            }
+        // Re-encrypt the category NAME at the row's existing tier. The
+        // staged_transactions.category column stores the display name as
+        // ciphertext (tier-branched). Resolve the category's plaintext
+        // name via decryptField over its name_ct.
+        let plainName = "";
+        const catRow = (await client
+          .select({ nameCt: schema.categories.nameCt })
+          .from(schema.categories)
+          .where(and(
+            eq(schema.categories.id, patch.categoryId),
+            eq(schema.categories.userId, userId),
+          ))
+          .execute()) as Array<{ nameCt: string | null }>;
+        const ct = catRow[0]?.nameCt;
+        if (ct) {
+          try {
+            plainName = decryptField(dek, ct) ?? "";
+          } catch {
+            plainName = "";
           }
-          update.category = encode(plainName, row.encryptionTier);
         }
-        // violation != null → skip this action; leave row.category as-is.
+        update.category = encode(plainName, row.encryptionTier);
       }
     }
 

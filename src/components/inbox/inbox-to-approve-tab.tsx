@@ -116,6 +116,8 @@ export function InboxToApproveTab({
   const [snapshot, setSnapshot] = useState<SnapshotShape | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // Booked, but the sign is unusual for the category (advisory, 2026-10-15).
+  const [notice, setNotice] = useState<string | null>(null);
   const [busyBankId, setBusyBankId] = useState<string | null>(null);
   const [bulkBusy, setBulkBusy] = useState(false);
   const [categories, setCategories] = useState<DialogCategory[]>([]);
@@ -315,10 +317,12 @@ export function InboxToApproveTab({
           body: JSON.stringify({ categoryId }),
         },
       );
+      const body = await res.json().catch(() => ({}));
       if (!res.ok) {
-        const body = await res.json().catch(() => ({}));
         throw new Error(body.error ?? `HTTP ${res.status}`);
       }
+      // The sign is unusual for the category: booked anyway, worth a mention.
+      return (body?.data?.warning as string | undefined) ?? null;
     },
     [],
   );
@@ -453,8 +457,10 @@ export function InboxToApproveTab({
       }
       setBusyBankId(bankId);
       setError(null);
+      setNotice(null);
       try {
-        await approveOne(bankId, categoryId);
+        const warning = await approveOne(bankId, categoryId);
+        if (warning) setNotice(`Approved. ${warning}`);
         await refresh();
       } catch (e) {
         setError(e instanceof Error ? e.message : String(e));
@@ -531,7 +537,9 @@ export function InboxToApproveTab({
     if (suggestedUnlinked.length === 0) return;
     setBulkBusy(true);
     setError(null);
+    setNotice(null);
     const errors: string[] = [];
+    let unusualSign = 0;
     await Promise.all(
       suggestedUnlinked.map(async (b) => {
         const sug = suggestionByBank.get(b.id);
@@ -562,7 +570,7 @@ export function InboxToApproveTab({
           return;
         }
         try {
-          await approveOne(b.id, categoryId);
+          if (await approveOne(b.id, categoryId)) unusualSign += 1;
         } catch (e) {
           errors.push(
             `${b.payee ?? b.id}: ${e instanceof Error ? e.message : String(e)}`,
@@ -573,6 +581,11 @@ export function InboxToApproveTab({
     if (errors.length > 0) {
       setError(
         `Approved ${suggestedUnlinked.length - errors.length}/${suggestedUnlinked.length} suggested rows. ${errors.length} skipped:\n${errors.join("\n")}`,
+      );
+    }
+    if (unusualSign > 0) {
+      setNotice(
+        `${unusualSign} approved ${unusualSign === 1 ? "row has" : "rows have"} an amount whose sign is unusual for its category (a refund in an expense category, say). Booked as they are.`,
       );
     }
     await refresh();
@@ -602,6 +615,11 @@ export function InboxToApproveTab({
       {error && (
         <div className="rounded-md border border-rose-200 bg-rose-50 p-3 text-sm text-rose-800 whitespace-pre-line">
           {error}
+        </div>
+      )}
+      {notice && (
+        <div className="rounded-md border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900 whitespace-pre-line dark:border-amber-900/50 dark:bg-amber-950/40 dark:text-amber-200">
+          {notice}
         </div>
       )}
 

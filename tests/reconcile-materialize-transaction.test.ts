@@ -10,7 +10,7 @@
  *   - `import_hash` copied VERBATIM from the bank row (never recomputed)
  *   - payee/note/tags re-encrypted under the user DEK (transactions is user-tier)
  *   - investment-account materialize refused with `investment_account_unsupported`
- *   - sign-vs-category mismatch refused with `sign_category_mismatch`
+ *   - sign-vs-category mismatch BOOKED with a `warning` (advisory since 2026-10-15)
  *   - `invalidateUser(userId)` called after a successful commit
  *
  * No live DB — a programmable Drizzle mock dequeues per-test result arrays and
@@ -217,9 +217,12 @@ describe("materializeBankRowAsTransaction", () => {
     expect(invalidateUser).not.toHaveBeenCalled();
   });
 
-  it("refuses on a sign-vs-category mismatch (no INSERT)", async () => {
+  // Owner request 2026-10-15: a refund in an expense category (or a reversal
+  // in an income one) is real money, so the sign check only warns.
+  it("books a sign-vs-category mismatch and returns the warning", async () => {
     state.selectResults.push([bankRow()]); // bank lookup
     state.selectResults.push([{ id: 5, isInvestment: false }]); // account lookup
+    state.selectResults.push([{ id: 7 }]); // category FK guard
     validateSignVsCategoryById.mockResolvedValueOnce({
       message: "Income category on an outflow row",
     });
@@ -231,10 +234,14 @@ describe("materializeBankRowAsTransaction", () => {
       categoryId: 7,
     });
 
-    expect(res.ok).toBe(false);
-    expect(res.ok === false && res.code).toBe("sign_category_mismatch");
-    expect(state.txRan).toBe(false);
-    expect(invalidateUser).not.toHaveBeenCalled();
+    expect(res).toEqual({
+      ok: true,
+      transactionId: 9001,
+      warning: "Income category on an outflow row",
+    });
+    expect(state.txRan).toBe(true);
+    expect(state.inserts.find((i) => i.table === "transactions")).toBeDefined();
+    expect(invalidateUser).toHaveBeenCalledWith(USER);
   });
 
   it("returns bank_not_found for a cross-tenant / missing bank id", async () => {

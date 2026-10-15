@@ -18,7 +18,9 @@
  *
  * `recordEmailInboxRow` is the SINGLE materialize path — the auto-sweep AND the
  * manual "Record" click in the Email tab both call it, so the dedup +
- * sign/investment/ownership guards + bank-ledger promotion can't diverge.
+ * investment/ownership guards + bank-ledger promotion can't diverge. A sign
+ * that doesn't match the category (a refund in an expense category, a
+ * reversal in an income one) is a WARNING, never a refusal (2026-10-15).
  *
  * Auto-record is gated on a SENDER/SUBJECT RULE MATCH — the v1 anti-spoof
  * posture (Mailpit doesn't verify SPF/DKIM). Without a matching auto-rule an
@@ -64,6 +66,8 @@ export interface RecordEmailResult {
   /** For possible_duplicate — the existing transaction it matched. */
   duplicateOfTransactionId?: number;
   reason?: string;
+  /** Set when the amount's sign is unusual for the category (recorded anyway). */
+  warning?: string;
 }
 
 // Per-user in-flight guard (HMR-safe via globalThis), mirrors tryBeginRebuild.
@@ -231,7 +235,7 @@ export async function processPendingInboxEmails(
  * Materialize one body email into the ledger. Shared by the auto-sweep and the
  * manual "Record" click. Loads the staged candidate, recomputes the import_hash
  * with the resolved account, dedups against bank_transactions, runs the
- * sign/investment/ownership guards, promotes to the bank ledger, and writes the
+ * investment/ownership guards (sign-vs-category only warns), promotes to the bank ledger, and writes the
  * categorized transaction + primary link. Updates the email_inbox action.
  */
 export async function recordEmailInboxRow(
@@ -332,6 +336,7 @@ export async function recordEmailInboxRow(
     eff.amount,
   );
   if (!guard.ok) return { status: "invalid", reason: guard.reason };
+  const signWarning = guard.warning;
 
   // Recorded currency: rule override → account currency → USD last-ditch. The
   // body-parsed currency (a bare `$` ⇒ USD) is deliberately NOT used — a CAD
@@ -438,7 +443,7 @@ export async function recordEmailInboxRow(
     .set({ action: opts.finalAction, recordedTransactionId: txId })
     .where(eq(schema.emailInbox.id, inboxId));
   await markStagedImported(inbox.stagedImportId, cand.id);
-  return { status: "recorded", transactionId: txId };
+  return { status: "recorded", transactionId: txId, ...(signWarning ? { warning: signWarning } : {}) };
 }
 
 /** Mark an inbox row discarded (user dismissed it) + reject its staged copy. */
@@ -591,7 +596,7 @@ async function checkGuards(
   // (createTransferPair resolves the canonical Transfer category itself).
   categoryId: number | null,
   amount: number,
-): Promise<{ ok: boolean; reason?: string; accountCurrency?: string }> {
+): Promise<{ ok: boolean; reason?: string; accountCurrency?: string; warning?: string }> {
   // Investment-account guard — the body surface doesn't collect a holding.
   const acct = await db
     .select({
@@ -613,9 +618,11 @@ async function checkGuards(
       .limit(1);
     if (!cat[0]) return { ok: false, reason: "category_not_found" };
 
-    // Sign-vs-category — same enforcement as /approve.
+    // Sign-vs-category is ADVISORY (2026-10-15, owner request): a refund in
+    // an expense category or a reversal in an income one is real money, so it
+    // is recorded and the caller shows the warning. Never refuse on it.
     const violation = await validateSignVsCategoryById(userId, dek, categoryId, amount);
-    if (violation) return { ok: false, reason: "sign_category_mismatch" };
+    return { ok: true, accountCurrency: acct[0].currency ?? undefined, warning: violation?.message };
   }
 
   return { ok: true, accountCurrency: acct[0].currency ?? undefined };

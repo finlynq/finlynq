@@ -27,8 +27,9 @@
  *   }
  *
  * Response:
- *   200  { success: true, data: { transactionId } }
- *   400  { error, code? }   — validation / sign-vs-category / investment guard
+ *   200  { success: true, data: { transactionId, warning? } }   — `warning` =
+ *        the sign is unusual for the category (booked anyway, 2026-10-15)
+ *   400  { error, code? }   — validation / investment guard
  *   404  { error: 'Not found' }   — bank row, account, or category not owned by user
  *   423  { error: 'session_locked' }   — DEK unavailable
  *
@@ -39,7 +40,7 @@
  *     (scripts/migrations/20260527_transactions_source_auto_rule.sql)
  *   - import_hash copied VERBATIM from the bank row
  *   - payee re-encrypted under the user's DEK
- *   - sign-vs-category enforced BEFORE INSERT
+ *   - sign-vs-category is ADVISORY: returned as `warning`, never a refusal
  *   - investment-account guard refuses cleanly
  *   - tx + link INSERT in one DB transaction
  *   - invalidateUser(userId) after commit
@@ -146,18 +147,14 @@ export async function POST(
     );
   }
 
+  // Advisory only (2026-10-15): a suggestion lands here precisely when a
+  // rule's category didn't match the sign, so refusing made it unbookable.
   const violation = await validateSignVsCategoryById(
     userId,
     dek,
     parsed.data.categoryId,
     bank.amount,
   );
-  if (violation) {
-    return NextResponse.json(
-      { error: violation.message, code: "sign_category_mismatch" },
-      { status: 400 },
-    );
-  }
 
   const cat = await db
     .select({ id: schema.categories.id })
@@ -219,7 +216,10 @@ export async function POST(
 
   invalidateUser(userId);
 
-  return NextResponse.json({ success: true, data: inserted });
+  return NextResponse.json({
+    success: true,
+    data: { ...inserted, ...(violation ? { warning: violation.message } : {}) },
+  });
 }
 
 function decodeBankString(

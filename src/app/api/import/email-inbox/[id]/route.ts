@@ -198,6 +198,8 @@ export async function PATCH(
     ok: true,
     action: "manually_recorded",
     transactionId: result.transactionId,
+    // Advisory only: the sign is unusual for the category, recorded anyway.
+    ...(result.warning ? { warning: result.warning } : {}),
   });
 }
 

@@ -114,6 +114,8 @@ export function InboxEmailTab() {
   const [categories, setCategories] = useState<CategoryOpt[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  // Booked, but the sign is unusual for the category (advisory, 2026-10-15).
+  const [notice, setNotice] = useState<string | null>(null);
   const [openId, setOpenId] = useState<string | null>(null);
   const [detail, setDetail] = useState<EmailInboxDetail | null>(null);
   const [acting, setActing] = useState(false);
@@ -219,6 +221,7 @@ export function InboxEmailTab() {
           return;
         }
         setDupPrompt(null);
+        setNotice(b.warning ? `Recorded. ${b.warning}` : null);
         setOpenId(null);
         setDetail(null);
         await load();
@@ -292,6 +295,11 @@ export function InboxEmailTab() {
       {error && (
         <div className="rounded-md border border-rose-200 bg-rose-50 p-3 text-sm text-rose-800">
           {error}
+        </div>
+      )}
+      {notice && (
+        <div className="rounded-md border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900 whitespace-pre-line dark:border-amber-900/50 dark:bg-amber-950/40 dark:text-amber-200">
+          {notice}
         </div>
       )}
 

@@ -37,9 +37,11 @@
  *   }
  *
  * Response:
- *   200  { success: true, data: { transactionId } }   — transactionId is the
- *                                 source leg id for the transfer path.
- *   400  { error, code? }   — validation / sign-vs-category / investment guard /
+ *   200  { success: true, data: { transactionId, warning? } }   — transactionId
+ *                                 is the source leg id for the transfer path;
+ *                                 `warning` = the sign is unusual for the
+ *                                 category (booked anyway, 2026-10-15).
+ *   400  { error, code? }   — validation / investment guard /
  *                             transfer guard (transfer_self / transfer_inflow /
  *                             transfer_investment_dest)
  *   404  { error: 'Not found' }   — bank row / account / category / transfer
@@ -56,8 +58,8 @@
  *   - `payee` re-encrypted under the user's DEK. `transactions` is user-tier
  *     only; the bank row's encryption_tier may be 'service' (email webhook)
  *     and we never preserve service-tier wrappings across materialization.
- *   - Sign-vs-category invariant enforced BEFORE INSERT so we don't
- *     create-then-fail.
+ *   - Sign-vs-category is ADVISORY: checked, returned as `warning`, never a
+ *     refusal (a refund in an expense category is real money).
  *   - Investment-account guard — refuses materialization into an investment
  *     account (would need a portfolio_holding_id which this surface
  *     doesn't collect; Phase 3 covers non-investment accounts only).
@@ -229,24 +231,16 @@ export async function POST(
     );
   }
 
-  // Sign-vs-category invariant — enforced BEFORE the INSERT so we don't
-  // create-then-fail. The bank row's amount is the source of truth; we
-  // never flip signs.
+  // Sign-vs-category is a WARNING, never a refusal (2026-10-15, owner
+  // request): a refund in an expense category or a reversal in an income one
+  // is still booked, and the caller shows the message. The bank row's amount
+  // is the source of truth; we never flip signs.
   const violation = await validateSignVsCategoryById(
     userId,
     dek,
     categoryId,
     bank.amount,
   );
-  if (violation) {
-    return NextResponse.json(
-      {
-        error: violation.message,
-        code: "sign_category_mismatch",
-      },
-      { status: 400 },
-    );
-  }
 
   // Cross-tenant FK guard on categoryId.
   const cat = await db
@@ -320,7 +314,10 @@ export async function POST(
 
   invalidateUser(userId);
 
-  return NextResponse.json({ success: true, data: inserted });
+  return NextResponse.json({
+    success: true,
+    data: { ...inserted, ...(violation ? { warning: violation.message } : {}) },
+  });
 }
 
 /**
