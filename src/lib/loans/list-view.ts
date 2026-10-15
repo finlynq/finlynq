@@ -1,18 +1,7 @@
-// What the Loans page shows for one loan, shared by its card and list views so
-// the two can never disagree. Pure and client-safe.
+// What the Loans page's list shows for one loan. Pure and client-safe.
 //
-// The list view exists because of in-app feedback (2026-10-15): with 17 loans,
-// the cards fit about three to a screen.
-
-export type LoansView = "cards" | "list";
-
-/** localStorage key for the chosen view. A per-browser convenience only. */
-export const LOANS_VIEW_STORAGE_KEY = "pf-loans-view";
-
-/** Anything other than "list" (absent, blocked storage, junk) means cards. */
-export function parseLoansView(raw: string | null | undefined): LoansView {
-  return raw === "list" ? "list" : "cards";
-}
+// The list replaced the page's loan cards after in-app feedback (2026-10-15):
+// with 17 loans, the cards fitted about three to a screen.
 
 /**
  * Share of the principal paid off, 0 to 100.

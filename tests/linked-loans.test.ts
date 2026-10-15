@@ -63,8 +63,8 @@ describe("where the link goes", () => {
     }
   });
 
-  it("the loan card links back to its account", () => {
-    expect(read("src/app/(app)/loans/page.tsx")).toContain("href={`/accounts/${loan.accountId}`}");
+  it("the loans list links back to each loan's account", () => {
+    expect(read("src/app/(app)/loans/_components/loans-list.tsx")).toContain("href={`/accounts/${l.accountId}`}");
   });
 });
 

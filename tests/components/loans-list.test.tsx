@@ -1,8 +1,8 @@
 /**
  * @vitest-environment jsdom
  *
- * Loans list view (in-app feedback 2026-10-15: with 17 loans the cards fit
- * about three to a screen). One row per loan, amounts in the loan's own
+ * Loans list (in-app feedback 2026-10-15: with 17 loans the cards it replaced
+ * fitted about three to a screen). One row per loan, amounts in the loan's own
  * currency, amount columns sorted by the display-currency companion.
  */
 
@@ -25,6 +25,8 @@ function loan(over: Partial<LoanListRow> & { id: number; name: string }): LoanLi
     monthlyPayment: 200,
     monthlyEquivalentPayment: 200,
     payoffDate: "2030-01-01",
+    totalInterest: 1_000,
+    totalInterestDisplay: 1_000,
     remainingBalance: 5_000,
     balanceSource: "projection",
     accountId: null,
@@ -73,11 +75,28 @@ describe("LoansList", () => {
       loan({ id: 2, name: "Dollar loan", remainingBalance: 50_000, remainingBalanceDisplay: 50_000 }),
     ]);
     expect(screen.getByText("RUB")).toBeTruthy();
+    // What it is worth in the display currency sits under the native balance.
+    expect(screen.getByText(/≈ \$10,000\.00/)).toBeTruthy();
+    expect(screen.queryAllByText(/≈/)).toHaveLength(1);
 
     fireEvent.click(screen.getByText("Remaining"));
     expect(names()).toEqual(["Rouble loan", "Dollar loan"]);
     fireEvent.click(screen.getByText("Remaining"));
     expect(names()).toEqual(["Dollar loan", "Rouble loan"]);
+  });
+
+  it("sorts total interest by its converted figure, shown in the loan's currency", () => {
+    renderList([
+      loan({ id: 1, name: "Rouble loan", currency: "RUB", totalInterest: 300_000, totalInterestDisplay: 3_300 }),
+      loan({ id: 2, name: "Dollar loan", totalInterest: 4_000, totalInterestDisplay: 4_000 }),
+    ]);
+    fireEvent.click(screen.getByText("Total interest"));
+    expect(names()).toEqual(["Rouble loan", "Dollar loan"]);
+  });
+
+  it("shows a lease's residual under its term end", () => {
+    renderList([loan({ id: 1, name: "Car lease", type: "lease", residualValue: 4_000 })]);
+    expect(screen.getByText("residual $4,000.00")).toBeTruthy();
   });
 
   it("flags a loan the server could not schedule; its name opens the form, not a schedule", () => {

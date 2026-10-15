@@ -1,6 +1,6 @@
 /**
- * Loans page display helpers shared by the card and list views (in-app
- * feedback 2026-10-15: with 17 loans the cards fit about three to a screen).
+ * Loans page list helpers (in-app feedback 2026-10-15: with 17 loans the
+ * cards the list replaced fitted about three to a screen).
  */
 
 import { describe, it, expect } from "vitest";
@@ -8,19 +8,8 @@ import {
   loanPaidPct,
   loanShownRate,
   loanTypeLabel,
-  parseLoansView,
   PAYMENT_FREQUENCY_SHORT,
 } from "@/lib/loans/list-view";
-
-describe("parseLoansView", () => {
-  it("reads 'list' and treats everything else as cards", () => {
-    expect(parseLoansView("list")).toBe("list");
-    expect(parseLoansView("cards")).toBe("cards");
-    expect(parseLoansView(null)).toBe("cards");
-    expect(parseLoansView(undefined)).toBe("cards");
-    expect(parseLoansView("LIST")).toBe("cards");
-  });
-});
 
 describe("loanPaidPct", () => {
   it("is the share of the principal paid", () => {

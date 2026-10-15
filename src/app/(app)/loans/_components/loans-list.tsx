@@ -1,12 +1,13 @@
 "use client";
 
-// Compact list of loans: one row per loan (in-app feedback 2026-10-15: with 17
-// loans, the cards fit about three to a screen). Renders through the shared
-// DataTable, so every column sorts.
+// The Loans page's list: one row per loan. It replaced the page's loan cards
+// after in-app feedback (2026-10-15: with 17 loans, the cards fitted about
+// three to a screen). Renders through the shared DataTable, so every column
+// sorts.
 //
-// Amounts stay in each loan's OWN currency, as on the cards. Sorting by an
-// amount uses the server's display-currency companion instead, so loans in
-// different currencies order by what they are actually worth (FINLYNQ-123).
+// Amounts stay in each loan's OWN currency. Sorting by an amount uses the
+// server's display-currency companion instead, so loans in different
+// currencies order by what they are actually worth (FINLYNQ-123).
 
 import Link from "next/link";
 import { CalendarRange, Link2, Pencil, Trash2 } from "lucide-react";
@@ -17,7 +18,7 @@ import { CspSafeBar } from "@/components/csp-safe-bar";
 import { formatCurrency } from "@/lib/currency";
 import { loanPaidPct, loanShownRate, loanTypeLabel, PAYMENT_FREQUENCY_SHORT } from "@/lib/loans/list-view";
 
-export const LOAN_TYPE_BADGE_COLORS: Record<string, string> = {
+const LOAN_TYPE_BADGE_COLORS: Record<string, string> = {
   mortgage: "bg-indigo-100 text-indigo-700 dark:bg-indigo-950/50 dark:text-indigo-300",
   lease: "bg-amber-100 text-amber-700 dark:bg-amber-950/50 dark:text-amber-300",
   loan: "bg-cyan-100 text-cyan-700 dark:bg-cyan-950/50 dark:text-cyan-300",
@@ -45,8 +46,11 @@ export type LoanListRow = {
   accountName: string | null;
   scheduleMode?: "calculated" | "manual";
   currency: string;
+  totalInterest: number | null;
+  residualValue?: number | null;
   remainingBalanceDisplay: number | null;
   monthlyEquivalentPaymentDisplay: number | null;
+  totalInterestDisplay?: number | null;
 };
 
 type Props<T extends LoanListRow> = {
@@ -127,19 +131,26 @@ export function LoansList<T extends LoanListRow>({
         // The server could not build a schedule for this loan; it needs fixing.
         if (l.remainingBalance == null) return <span className="text-xs text-destructive">Can&apos;t schedule</span>;
         return (
-          <span className="inline-flex items-center justify-end gap-1">
-            {l.balanceSource === "account" && l.accountId != null && (
-              <Link
-                href={`/accounts/${l.accountId}`}
-                className="text-emerald-600 hover:text-emerald-700"
-                title={`Live balance from ${l.accountName ?? "the linked account"}. Open the account.`}
-                aria-label={`Balance from ${l.accountName ?? "the linked account"}. Open the account.`}
-              >
-                <Link2 className="h-3.5 w-3.5" />
-              </Link>
+          <div>
+            <span className="inline-flex items-center justify-end gap-1">
+              {l.balanceSource === "account" && l.accountId != null && (
+                <Link
+                  href={`/accounts/${l.accountId}`}
+                  className="text-emerald-600 hover:text-emerald-700"
+                  title={`Live balance from ${l.accountName ?? "the linked account"}. Open the account.`}
+                  aria-label={`Balance from ${l.accountName ?? "the linked account"}. Open the account.`}
+                >
+                  <Link2 className="h-3.5 w-3.5" />
+                </Link>
+              )}
+              <span className="font-mono font-semibold text-rose-600">{formatCurrency(l.remainingBalance, l.currency)}</span>
+            </span>
+            {l.currency !== displayCurrency && l.remainingBalanceDisplay != null && (
+              <div className="font-mono text-xs text-muted-foreground">
+                ≈ {formatCurrency(l.remainingBalanceDisplay, displayCurrency)}
+              </div>
             )}
-            <span className="font-mono font-semibold text-rose-600">{formatCurrency(l.remainingBalance, l.currency)}</span>
-          </span>
+          </div>
         );
       },
     },
@@ -177,13 +188,30 @@ export function LoansList<T extends LoanListRow>({
       className: "hidden md:table-cell",
     },
     {
+      key: "interest",
+      header: "Total interest",
+      align: "right",
+      accessor: (l) => l.totalInterestDisplay ?? l.totalInterest,
+      render: (l) => (
+        <span className="whitespace-nowrap font-mono" title="Interest over the whole loan">
+          {l.totalInterest == null ? "—" : formatCurrency(l.totalInterest, l.currency)}
+        </span>
+      ),
+      className: "hidden lg:table-cell",
+    },
+    {
       key: "payoff",
       header: "Payoff",
       accessor: (l) => l.payoffDate,
       render: (l) => (
-        <span className="whitespace-nowrap font-mono text-sm" title={l.type === "lease" ? "Term end" : undefined}>
-          {l.payoffDate ?? "—"}
-        </span>
+        <div title={l.type === "lease" ? "Term end" : undefined}>
+          <span className="whitespace-nowrap font-mono text-sm">{l.payoffDate ?? "—"}</span>
+          {l.type === "lease" && l.residualValue != null && l.residualValue > 0 && (
+            <div className="whitespace-nowrap text-xs text-muted-foreground">
+              residual {formatCurrency(l.residualValue, l.currency)}
+            </div>
+          )}
+        </div>
       ),
       className: "hidden sm:table-cell",
     },

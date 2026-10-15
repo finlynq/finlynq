@@ -170,6 +170,7 @@ export async function GET(request: NextRequest) {
       displayCurrency,
       remainingBalanceDisplay: null,
       monthlyEquivalentPaymentDisplay: null,
+      totalInterestDisplay: null,
       dataIntegrity: { error, value },
     });
     // Issue #213 — guard against legacy bad start_date so the whole list
@@ -265,6 +266,8 @@ export async function GET(request: NextRequest) {
         summary.monthlyEquivalentPayment,
         loan.currency,
       ),
+      // Sorts the Loans list's Interest column across currencies.
+      totalInterestDisplay: toDisplay(summary.totalInterest, loan.currency),
     };
   });
 
