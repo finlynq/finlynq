@@ -72,25 +72,40 @@ export function LoansList<T extends LoanListRow>({
       key: "name",
       header: "Loan",
       accessor: (l) => l.name,
-      render: (l) => (
-        <div className="flex min-w-0 items-center gap-1.5">
-          <button
-            type="button"
-            className="truncate text-left font-medium hover:underline"
-            title="Open its schedule"
-            onClick={() => onSchedule(l)}
-          >
-            {l.name}
-          </button>
-          {l.scheduleMode === "manual" && (
-            <Badge variant="outline" className="shrink-0 text-[10px]">Manual</Badge>
-          )}
-          {l.currency !== displayCurrency && (
-            <Badge variant="outline" className="shrink-0 font-mono text-[10px]">{l.currency}</Badge>
-          )}
-        </div>
-      ),
-      className: "max-w-[16rem]",
+      render: (l) => {
+        // A loan the server could not schedule has no schedule; its form is
+        // where it gets fixed.
+        const broken = l.remainingBalance == null;
+        return (
+          <div className="min-w-0">
+            <div className="flex min-w-0 items-center gap-1.5">
+              <button
+                type="button"
+                className="truncate text-left font-medium hover:underline"
+                title={broken ? "Fix its details" : "Open its schedule"}
+                onClick={() => (broken ? onEdit(l) : onSchedule(l))}
+              >
+                {l.name}
+              </button>
+              {l.scheduleMode === "manual" && (
+                <Badge variant="outline" className="shrink-0 text-[10px]">Manual</Badge>
+              )}
+              {l.currency !== displayCurrency && (
+                <Badge variant="outline" className="shrink-0 font-mono text-[10px]">{l.currency}</Badge>
+              )}
+            </div>
+            {/* On a phone the payment and share paid columns are hidden;
+                they ride under the name instead. */}
+            {!broken && (
+              <div className="mt-0.5 truncate text-xs text-muted-foreground sm:hidden">
+                {formatCurrency(l.paymentPerPeriod ?? l.monthlyPayment, l.currency)}
+                {PAYMENT_FREQUENCY_SHORT[l.paymentFrequency] ?? ""} · {Math.round(loanPaidPct(l))}% paid
+              </div>
+            )}
+          </div>
+        );
+      },
+      className: "max-w-[9rem] sm:max-w-[16rem]",
     },
     {
       key: "type",
@@ -141,6 +156,7 @@ export function LoansList<T extends LoanListRow>({
           </span>
         </span>
       ),
+      className: "hidden sm:table-cell",
     },
     {
       key: "rate",
@@ -158,7 +174,7 @@ export function LoansList<T extends LoanListRow>({
           </span>
         );
       },
-      className: "hidden sm:table-cell",
+      className: "hidden md:table-cell",
     },
     {
       key: "payoff",
@@ -169,6 +185,7 @@ export function LoansList<T extends LoanListRow>({
           {l.payoffDate ?? "—"}
         </span>
       ),
+      className: "hidden sm:table-cell",
     },
     {
       key: "paid",
@@ -190,6 +207,7 @@ export function LoansList<T extends LoanListRow>({
           </span>
         );
       },
+      className: "hidden sm:table-cell",
     },
     {
       key: "actions",
@@ -201,7 +219,7 @@ export function LoansList<T extends LoanListRow>({
           <Button
             variant="ghost"
             size="icon"
-            className="h-7 w-7"
+            className="hidden h-7 w-7 sm:inline-flex"
             aria-label={`View schedule for ${l.name}`}
             title="View schedule"
             disabled={l.remainingBalance == null}

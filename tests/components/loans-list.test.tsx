@@ -38,7 +38,7 @@ function loan(over: Partial<LoanListRow> & { id: number; name: string }): LoanLi
 }
 
 function names(): string[] {
-  return screen.getAllByTitle("Open its schedule").map((b) => b.textContent ?? "");
+  return screen.getAllByTitle(/Open its schedule|Fix its details/).map((b) => b.textContent ?? "");
 }
 
 function renderList(loans: LoanListRow[], handlers: Partial<Record<"onSchedule" | "onEdit" | "onDelete", (l: LoanListRow) => void>> = {}) {
@@ -80,12 +80,22 @@ describe("LoansList", () => {
     expect(names()).toEqual(["Dollar loan", "Rouble loan"]);
   });
 
-  it("flags a loan the server could not schedule and offers no schedule for it", () => {
+  it("flags a loan the server could not schedule; its name opens the form, not a schedule", () => {
     const onSchedule = vi.fn();
-    renderList([loan({ id: 7, name: "Broken", remainingBalance: null, remainingBalanceDisplay: null, payoffDate: null })], { onSchedule });
+    const onEdit = vi.fn();
+    const broken = loan({ id: 7, name: "Broken", remainingBalance: null, remainingBalanceDisplay: null, payoffDate: null });
+    renderList([broken], { onSchedule, onEdit });
     expect(screen.getByText("Can't schedule")).toBeTruthy();
     const btn = screen.getByLabelText("View schedule for Broken") as HTMLButtonElement;
     expect(btn.disabled).toBe(true);
+    fireEvent.click(screen.getByText("Broken"));
+    expect(onEdit).toHaveBeenCalledWith(broken);
+    expect(onSchedule).not.toHaveBeenCalled();
+  });
+
+  it("puts the payment and share paid under the name for phones", () => {
+    renderList([loan({ id: 1, name: "Car", paymentPerPeriod: 245.5, paymentFrequency: "biweekly" })]);
+    expect(screen.getByText(/\$245\.50\/2 wk · 50% paid/)).toBeTruthy();
   });
 
   it("hands the row's loan to the schedule, edit and delete actions", () => {
