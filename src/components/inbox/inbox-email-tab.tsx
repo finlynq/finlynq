@@ -28,6 +28,7 @@ import {
 import { Trash2, RefreshCw, Mail, Wand2 } from "lucide-react";
 import { safeAccountName, safeName } from "@/lib/safe-name";
 import { formatCurrency } from "@/lib/currency";
+import { buildTxDrillUrl } from "@/lib/transactions/drill-url";
 import { EmailRuleDialog } from "./email-rule-dialog";
 
 type Action =
@@ -82,6 +83,15 @@ interface EmailInboxDetail {
   sourceKind: "attachment" | "body";
   candidate?: BodyCandidate | null;
   signals?: BodySignals | null;
+  /** A rule matched this waiting email; why it wasn't recorded. */
+  heldByRule?: {
+    ruleId: number;
+    ruleName: string;
+    mode: "auto" | "review";
+    accountId: number;
+    canRecord: boolean;
+    duplicate: { transactionId: number; date: string; amount: number; payee: string | null } | null;
+  } | null;
 }
 
 interface AccountOpt {
@@ -234,6 +244,40 @@ export function InboxEmailTab() {
     [pickAccount, pickCategory, editAmount, editDate, editPayee, items, load],
   );
 
+  // Record with the rule that matched the email (its account, category,
+  // payee rename…). `force` books it over a possible-duplicate hold.
+  const recordWithRule = useCallback(
+    async (id: string, force: boolean) => {
+      setActing(true);
+      try {
+        const res = await fetch(`/api/import/email-inbox/${id}`, {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ action: "record_rule", force }),
+        });
+        const b = await res.json().catch(() => ({}));
+        if (!res.ok) {
+          throw new Error(b.code ? `${b.error} (${b.code})` : (b.error ?? `HTTP ${res.status}`));
+        }
+        if (b.action === "possible_duplicate") {
+          // Held after all: reload the detail so the hold and its button show.
+          const d = await fetch(`/api/import/email-inbox/${id}`);
+          if (d.ok) setDetail(await d.json());
+          return;
+        }
+        setNotice(b.warning ? `Recorded. ${b.warning}` : null);
+        setOpenId(null);
+        setDetail(null);
+        await load();
+      } catch (e) {
+        setError(e instanceof Error ? e.message : String(e));
+      } finally {
+        setActing(false);
+      }
+    },
+    [load],
+  );
+
   const discard = useCallback(
     async (id: string) => {
       setActing(true);
@@ -360,6 +404,12 @@ export function InboxEmailTab() {
                             <span className="truncate">{it.candidate.payee}</span>
                           </>
                         )}
+                        {it.action === "needs_review" && it.matchedRuleId != null && (
+                          <>
+                            <span>·</span>
+                            <span className="text-amber-700 dark:text-amber-300">rule matched</span>
+                          </>
+                        )}
                       </div>
                     </button>
                     <Button
@@ -474,6 +524,76 @@ export function InboxEmailTab() {
                           )}
                         </div>
                       )}
+
+                      {canRecord && detail?.heldByRule && (() => {
+                        const h = detail.heldByRule;
+                        if (!h) return null;
+                        const acct = accounts.find((a) => a.id === h.accountId);
+                        if (h.duplicate) {
+                          const d = h.duplicate;
+                          const ccy = acct?.currency ?? detail.candidate?.currency ?? "USD";
+                          return (
+                            <div className="rounded-md border border-amber-200 bg-amber-50 p-2.5 text-xs text-amber-800 dark:border-amber-900 dark:bg-amber-950/40 dark:text-amber-200">
+                              <p>
+                                Rule &ldquo;{h.ruleName}&rdquo; matched, but this wasn&apos;t recorded:
+                                it looks like a duplicate of{" "}
+                                <a
+                                  href={buildTxDrillUrl({ id: String(d.transactionId) })}
+                                  className="font-medium underline"
+                                >
+                                  {d.payee || `transaction #${d.transactionId}`}{" "}
+                                  {formatCurrency(d.amount, ccy)} on {d.date}
+                                </a>
+                                {acct ? ` in ${safeAccountName(acct)}` : ""}. Only the amount and a
+                                date within 4 days are compared, so a separate purchase of the same
+                                amount is held too.
+                              </p>
+                              <div className="mt-2 flex gap-2">
+                                <Button
+                                  size="sm"
+                                  variant="outline"
+                                  onClick={() => void recordWithRule(it.id, true)}
+                                  disabled={acting}
+                                >
+                                  Record anyway
+                                </Button>
+                                <Button
+                                  size="sm"
+                                  variant="ghost"
+                                  onClick={() => void discard(it.id)}
+                                  disabled={acting}
+                                >
+                                  Discard
+                                </Button>
+                              </div>
+                            </div>
+                          );
+                        }
+                        return (
+                          <div className="rounded-md border p-2.5 text-xs text-muted-foreground">
+                            <p>
+                              Rule &ldquo;{h.ruleName}&rdquo; matched.{" "}
+                              {!h.canRecord
+                                ? "It has no category, so it can't record on its own: pick one below."
+                                : h.mode === "review"
+                                  ? "It's set to wait for your click."
+                                  : "It wasn't recorded automatically."}
+                            </p>
+                            {h.canRecord && (
+                              <div className="mt-2">
+                                <Button
+                                  size="sm"
+                                  variant="outline"
+                                  onClick={() => void recordWithRule(it.id, false)}
+                                  disabled={acting}
+                                >
+                                  Record with this rule
+                                </Button>
+                              </div>
+                            )}
+                          </div>
+                        );
+                      })()}
 
                       {canRecord && (
                         <div className="flex flex-wrap items-end gap-2">

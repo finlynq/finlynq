@@ -7,7 +7,8 @@
  *
  *   - amount + currency ($ € £ ¥ / CAD USD EUR GBP / C$ US$ …, both orders)
  *   - date            (ISO, "Mon DD, YYYY", "DD Mon YYYY", numeric → normalizeDate)
- *   - payee           (anchors: "at|to|from <X>", "merchant: <X>"; else subject)
+ *   - payee           ("merchant/payee/vendor/store: <X>", then "at|to|from <X>",
+ *                      then "details/description: <X>"; else the subject)
  *   - debit/credit    (spent|debited|charged|sent vs deposit|credited|refund)
  *   - last-4          (display only — NEVER part of import_hash)
  *
@@ -218,30 +219,119 @@ function detectSign(haystack: string): { sign: -1 | 1; explicit: boolean } {
 }
 
 // ─── Payee extraction ────────────────────────────────────────────────────────
+// Labels that name the counterparty outright, tried first. Only "merchant"
+// also takes a dash ("Merchant - X"): "Play Store - receipt" is not a store.
+const MERCHANT_LABELS = ["merchant name", "merchant"];
+const OTHER_PAYEE_LABELS = ["payee name", "payee", "vendor", "store"];
+// Generic labels, tried only after the "at/to/from X" sentence pattern, since
+// "Details:" can head unrelated text. Rogers Bank alerts carry the merchant
+// here: "… ending in 4034. Details: AMZN Mktp CA*592YT6GL2."
+const GENERIC_PAYEE_LABELS = ["details", "description"];
+
+// A merchant starts with a capital, a digit, `*` or `#`, or reads like "eBay";
+// "Details: visit our website" does not.
+const MERCHANT_START = /^(?:[A-Z0-9*#]|[a-z]+[A-Z])/;
+
+// Where a labelled value stops, on a line that may hold the whole flattened
+// HTML body.
+const PAYEE_VALUE_END = [
+  // A sentence end: a period followed by a capitalised word or the end. Not
+  // the dot inside AMAZON.COM, nor "ST. LOUIS" (followed by capitals).
+  /\.(?=\s*$|\s+\*?[A-Z][a-z])/,
+  /[;|]/,
+  // "STARBUCKS, Toronto ON": the city after a comma.
+  /,\s/,
+  // The next "Label:" ("Amount:", "Transaction Date:").
+  /\s+\*?[A-Z][A-Za-z]*(?:\s+[A-Za-z]+)?\*?:/,
+  // An amount ("$15.81", "C$ 15.81").
+  /\s+(?:[A-Z]{1,3})?[$€£¥₹]\s?\d/,
+];
+
+function labelledPayee(text: string, labels: string[], separator: string = ":"): string | null {
+  const alt = labels.map((l) => l.replace(/ /g, "\\s+")).join("|");
+  // Allows `*Merchant:* X`: plain-text versions of HTML mark bold with `*`.
+  const re = new RegExp(`\\b(?:${alt})\\*?[ \\t]*${separator}[ \\t]*([^\\n]{2,160})`, "gi");
+  for (const m of text.matchAll(re)) {
+    let value = m[1];
+    for (const end of PAYEE_VALUE_END) {
+      const hit = value.match(end);
+      if (hit?.index != null) value = value.slice(0, hit.index);
+    }
+    const cleaned = cleanMerchant(value);
+    if (cleaned.length >= 2 && /[A-Za-z]/.test(cleaned) && MERCHANT_START.test(cleaned)) {
+      return cleaned;
+    }
+  }
+  return null;
+}
+
+/** A bank's merchant text as written: whitespace collapsed, wrapping `*` and
+ *  trailing punctuation dropped. Inner `*` stays ("SQ *SAUNDERS FARM",
+ *  "GOOGLE *Google One"), unlike cleanPayee, which would join the words. */
+function cleanMerchant(raw: string): string {
+  return raw
+    .replace(/\s+/g, " ")
+    .trim()
+    .replace(/^[*\s]+|[*\s.,;:\-]+$/g, "")
+    .slice(0, 80);
+}
+
+/** The subject-line payee, the last resort: "Purchase amount alert" →
+ *  "Purchase amount". Exported so the inbox sweep can tell a payee that fell
+ *  back to the subject from one the body named. */
+export function subjectPayee(subject: string | null): string | null {
+  if (!subject) return null;
+  const s = cleanPayee(
+    subject.replace(/\b(re|fwd?):/gi, "").replace(/\b(alert|notification|receipt|transaction)\b/gi, ""),
+  );
+  return s && s.length >= 2 ? s : null;
+}
+
+/**
+ * The payee a waiting email should carry now that the parser reads more, or
+ * null to keep the stored one. Emails staged before it read "Details:
+ * <merchant>" fell back to the subject line ("Purchase amount"); only a payee
+ * that IS that fallback (or "Unknown") is replaced, so a payee that came from
+ * the body or was edited is never overwritten.
+ */
+export function refreshedPayee(
+  stored: string | null,
+  subject: string | null,
+  parsed: string | null | undefined,
+): string | null {
+  if (stored == null || !parsed || parsed === "Unknown" || parsed === stored) return null;
+  if (stored !== "Unknown" && stored !== subjectPayee(subject)) return null;
+  return parsed;
+}
+
 function extractPayee(text: string, subject: string | null): string | null {
-  // "merchant: STARBUCKS"
-  const labelled = text.match(/\bmerchant\s*[:\-]\s*([^\n.,;]{2,60})/i);
-  if (labelled) return cleanPayee(labelled[1]);
+  // "Merchant: STARBUCKS", "Payee: JANE DOE"
+  const specific =
+    labelledPayee(text, MERCHANT_LABELS, "[:\\-]") ?? labelledPayee(text, OTHER_PAYEE_LABELS);
+  if (specific) return specific;
 
   // "at STARBUCKS on", "to John Doe for", "from PayPal."  — stop at a
   // connective word or sentence punctuation.
   const anchored = text.match(
     /\b(?:at|to|from)\s+([A-Z0-9][^\n]*?)(?=\s+(?:on|for|with|using|ending|via|—|-)\b|[.,;!?\n]|$)/,
   );
-  if (anchored) {
+  // "This email was sent to JANE.DOE@EXAMPLE.COM" is a footer, not a payee:
+  // the capture stops at the address's first dot, which would make the
+  // account holder's name the payee. Later matches are footer text too.
+  const isAddress =
+    anchored != null &&
+    /^[\w.+-]*@/.test(text.slice((anchored.index ?? 0) + anchored[0].length));
+  if (anchored && !isAddress) {
     const cleaned = cleanPayee(anchored[1]);
     if (cleaned && cleaned.length >= 2) return cleaned;
   }
 
-  // Fall back to the subject line (minus common noise).
-  if (subject) {
-    const s = cleanPayee(
-      subject.replace(/\b(re|fwd?):/gi, "").replace(/\b(alert|notification|receipt|transaction)\b/gi, ""),
-    );
-    if (s && s.length >= 2) return s;
-  }
+  // "Details: AMZN Mktp CA*592YT6GL2."
+  const generic = labelledPayee(text, GENERIC_PAYEE_LABELS);
+  if (generic) return generic;
 
-  return null;
+  // Fall back to the subject line (minus common noise).
+  return subjectPayee(subject);
 }
 
 function cleanPayee(raw: string): string {

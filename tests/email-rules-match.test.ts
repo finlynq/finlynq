@@ -51,8 +51,8 @@ describe("ruleMatchesEmail — text fields", () => {
 });
 
 describe("ruleMatchesEmail — whitespace counts as one space", () => {
-  // Rogers Bank purchase alert as its plain-text part arrives: hard-wrapped at
-  // 76 columns, which falls exactly between "AMZN" and "Mktp".
+  // A Rogers-style purchase alert with its plain-text part hard-wrapped at 76
+  // columns, which here falls between "AMZN" and "Mktp".
   const rogers = ctx({
     fromAddress: "onlineservices@rogersbank.com",
     subject: "Purchase amount alert",

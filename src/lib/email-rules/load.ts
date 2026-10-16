@@ -15,9 +15,9 @@
  * Text is matched as ONE line: any run of whitespace (line breaks, tabs,
  * non-breaking spaces, repeated spaces) counts as a single space, in the email
  * text AND in a contains/exact value (a regex pattern is left as written; its
- * `\s+` still matches). Bank alerts often carry a plain-text part hard-wrapped
- * at 76 columns, so "Details: AMZN Mktp CA" arrived as "AMZN\nMktp CA" and a
- * rule for "AMZN Mktp CA" silently never matched (Rogers Bank, 2026-10-16).
+ * `\s+` still matches). The plain-text part is matched raw (only the HTML part
+ * goes through htmlToText), and plain-text email is commonly hard-wrapped at 76
+ * columns, so a value spanning a wrap would otherwise never match.
  *
  * Back-compat: pre-migration rows have `conditions = null` + the flat
  * match_type/op/value tri; the loader synthesizes a 1-element group from the
