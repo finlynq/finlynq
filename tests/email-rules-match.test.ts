@@ -50,6 +50,51 @@ describe("ruleMatchesEmail — text fields", () => {
   });
 });
 
+describe("ruleMatchesEmail — whitespace counts as one space", () => {
+  // Rogers Bank purchase alert as its plain-text part arrives: hard-wrapped at
+  // 76 columns, which falls exactly between "AMZN" and "Mktp".
+  const rogers = ctx({
+    fromAddress: "onlineservices@rogersbank.com",
+    subject: "Purchase amount alert",
+    body:
+      "$15.81 on Oct 10, 2026 on your credit card ending in 4034. Details: AMZN\r\n" +
+      "Mktp CA*592YT6GL2.\r\n\r\nLearn how to manage account alerts.\r\n\r\nThank you for choosing Rogers Bank.",
+    payee: "Purchase amount",
+    amount: -15.81,
+  });
+
+  it("matches a contains value across a wrapped line (the reported rule)", () => {
+    const r = rule([
+      { field: "sender", op: "contains", value: "onlineservices@rogersbank.com" },
+      { field: "body", op: "contains", value: "AMZN Mktp CA" },
+    ]);
+    expect(ruleMatchesEmail(r, rogers)).toBe(true);
+  });
+
+  it("treats tabs, non-breaking spaces and repeated spaces as one space", () => {
+    const body = "Details: AMZN  Mktp\t CA*1";
+    expect(ruleMatchesEmail(rule([{ field: "body", op: "contains", value: "AMZN Mktp CA" }]), ctx({ body }))).toBe(true);
+    // ...in the rule's value too.
+    expect(ruleMatchesEmail(rule([{ field: "body", op: "contains", value: "AMZN  Mktp\nCA" }]), rogers)).toBe(true);
+  });
+
+  it("applies to exact and to the other text fields", () => {
+    expect(
+      ruleMatchesEmail(rule([{ field: "subject", op: "exact", value: "purchase amount alert" }]), ctx({ subject: "Purchase\n  amount alert " })),
+    ).toBe(true);
+    expect(ruleMatchesEmail(rule([{ field: "payee", op: "contains", value: "Whole Foods" }]), ctx({ payee: "WHOLE FOODS #12" }))).toBe(true);
+  });
+
+  it("lets a regex with a literal space match across the wrap", () => {
+    expect(ruleMatchesEmail(rule([{ field: "body", op: "regex", value: "AMZN Mktp CA\\*\\w+" }]), rogers)).toBe(true);
+    expect(ruleMatchesEmail(rule([{ field: "body", op: "regex", value: "AMZN\\s+Mktp" }]), rogers)).toBe(true);
+  });
+
+  it("still needs the space: words run together don't match", () => {
+    expect(ruleMatchesEmail(rule([{ field: "body", op: "contains", value: "AMZN Mktp" }]), ctx({ body: "Details: AMZNMktp CA" }))).toBe(false);
+  });
+});
+
 describe("ruleMatchesEmail — AND across mixed fields", () => {
   it("all conditions must match", () => {
     const r = rule([

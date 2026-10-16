@@ -12,6 +12,13 @@
  * a null DEK leaves text values as ciphertext (won't substring-match), so
  * matching is deferred to the sweep, never the webhook.
  *
+ * Text is matched as ONE line: any run of whitespace (line breaks, tabs,
+ * non-breaking spaces, repeated spaces) counts as a single space, in the email
+ * text AND in a contains/exact value (a regex pattern is left as written; its
+ * `\s+` still matches). Bank alerts often carry a plain-text part hard-wrapped
+ * at 76 columns, so "Details: AMZN Mktp CA" arrived as "AMZN\nMktp CA" and a
+ * rule for "AMZN Mktp CA" silently never matched (Rogers Bank, 2026-10-16).
+ *
  * Back-compat: pre-migration rows have `conditions = null` + the flat
  * match_type/op/value tri; the loader synthesizes a 1-element group from the
  * (decrypted) flat tri so they match exactly as before.
@@ -158,14 +165,21 @@ function textHaystack(field: string, ctx: EmailMatchContext): string {
   }
 }
 
+/** Collapse every run of whitespace to one space (see the header). JS `\s`
+ *  covers \r\n, tabs and U+00A0, so a wrapped line or an `&nbsp;` both read as
+ *  an ordinary space. */
+function oneLine(s: string): string {
+  return s.replace(/\s+/g, " ");
+}
+
 function matchText(field: string, op: string, value: unknown, ctx: EmailMatchContext): boolean {
   if (typeof value !== "string" || value === "") return false;
-  let haystack = textHaystack(field, ctx);
+  let haystack = oneLine(textHaystack(field, ctx));
   switch (op) {
     case "contains":
-      return haystack.toLowerCase().includes(value.toLowerCase());
+      return haystack.toLowerCase().includes(oneLine(value).toLowerCase());
     case "exact":
-      return haystack.trim().toLowerCase() === value.trim().toLowerCase();
+      return haystack.trim().toLowerCase() === oneLine(value).trim().toLowerCase();
     case "regex":
       // ReDoS guard: cap the body haystack before a user-authored regex.
       if (field === "body" && haystack.length > MAX_BODY_REGEX) {
