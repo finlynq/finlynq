@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { parseEmailBody } from "@/lib/email-import/parse-body";
+import { parseEmailBody, refreshedPayee } from "@/lib/email-import/parse-body";
 
 describe("parseEmailBody", () => {
   it("parses a classic bank 'you spent' alert (high confidence)", () => {
@@ -126,6 +126,96 @@ describe("parseEmailBody", () => {
     // 03/04 could be Mar 4 or Apr 3 → ambiguous → low.
     expect(r.confidence).toBe("low");
     expect(r.candidate).not.toBeNull();
+  });
+});
+
+describe("parseEmailBody — merchant name", () => {
+  // The plain-text part of a Rogers Bank alert, card number changed.
+  const rogers = (lead: string, details: string) =>
+    `${lead} on Oct 10, 2026 on your credit card ending in 1234. Details: ${details}\r\n\r\n` +
+    "*Learn how to manage account alerts. ( https://example.com/alerts )*\r\n\r\n" +
+    "Thank you for choosing Rogers Bank.\r\n\r\nThis is an automated message. Please do not reply to this email.";
+  const payeeOf = (text: string, subject = "Purchase amount alert") =>
+    parseEmailBody({ subject, text }).candidate!.payee;
+
+  it("reads the merchant after 'Details:' instead of the subject line", () => {
+    const r = parseEmailBody({ subject: "Purchase amount alert", text: rogers("$15.81", "AMZN Mktp CA*592YT6GL2.") });
+    expect(r.candidate!.payee).toBe("AMZN Mktp CA*592YT6GL2");
+    expect(r.confidence).toBe("high");
+  });
+
+  it("keeps the descriptor as the bank wrote it: inner '*', dots, '#', '-'", () => {
+    expect(payeeOf(rogers("$13.56", "SQ *SAUNDERS FARM INC."))).toBe("SQ *SAUNDERS FARM INC");
+    expect(payeeOf(rogers("$13.50", "AMAZON.COM PMTS - CA."))).toBe("AMAZON.COM PMTS - CA");
+    expect(payeeOf(rogers("$14.40", "WAL-MART #3638."))).toBe("WAL-MART #3638");
+    expect(payeeOf(rogers("A recurring payment of $26.99", "GOOGLE *Google One."), "Recurring payment alert")).toBe(
+      "GOOGLE *Google One",
+    );
+  });
+
+  it("finds it the same way in an HTML-only email", () => {
+    const r = parseEmailBody({
+      subject: "Purchase amount alert",
+      html:
+        "<table><tr><td><p>$15.81 on Oct 10, 2026 on your credit card ending in 1234. Details: AMZN\n" +
+        "Mktp CA*592YT6GL2.</p><p><a href='#'>Learn how to manage account alerts.</a></p>" +
+        "<p>Thank you for choosing Rogers Bank.</p></td></tr></table>",
+    });
+    expect(r.candidate!.payee).toBe("AMZN Mktp CA*592YT6GL2");
+  });
+
+  it("stops at the next label, an amount, or a comma on a flattened line", () => {
+    expect(
+      payeeOf("Transaction details: Merchant: STARBUCKS #12 Amount: $5.25 Date: 2026-06-05", "Card alert"),
+    ).toBe("STARBUCKS #12");
+    expect(payeeOf("Merchant: UBER EATS, Toronto ON. You spent $18.40 on 2026-06-05.", "Card alert")).toBe("UBER EATS");
+    expect(payeeOf("Payee: JANE DOE $40.00 sent on 2026-06-05.", "Transfer")).toBe("JANE DOE");
+  });
+
+  it("does not let 'Details:' beat a merchant named in the sentence", () => {
+    expect(payeeOf("You spent $42.17 at STARBUCKS on Jun 5, 2026. Details: View in the app.", "Transaction alert")).toBe(
+      "STARBUCKS",
+    );
+  });
+
+  it("ignores label text that isn't a merchant", () => {
+    // "For more details: visit…" starts lowercase; "Play Store - receipt" is not "Store:".
+    expect(payeeOf("$9.99 charged on Jun 5, 2026. For more details: visit our website.", "Purchase alert")).toBe(
+      "Purchase",
+    );
+    expect(payeeOf("Your Google Play Store - receipt for $9.99 on Jun 5, 2026.", "Google Play order")).toBe(
+      "Google Play order",
+    );
+  });
+
+  it("never takes the payee from a 'sent to <email address>' footer", () => {
+    // Canadian Tire Bank's payment notice: no merchant, and a footer naming the
+    // account holder's address. The old parser returned "JANE".
+    const text =
+      "This email is to confirm that a payment had been successfully posted to your account.\n\n" +
+      "*Payment Amount:* $60.30\n*Transaction Date:* 2026-10-12\n\n" +
+      "This email was sent to JANE.DOE@EXAMPLE.COM by donotreply@notify.example.com.\n" +
+      "If you no longer wish to receive emails from Canadian Tire Bank or Canadian Tire Services Limited again, unsubscribe.";
+    expect(payeeOf(text, "Your Payment has been received")).toBe("Your Payment has been received");
+  });
+});
+
+describe("refreshedPayee", () => {
+  it("replaces a payee that was only the subject-line fallback", () => {
+    expect(refreshedPayee("Purchase amount", "Purchase amount alert", "AMZN Mktp CA")).toBe("AMZN Mktp CA");
+    expect(refreshedPayee("Unknown", "Purchase amount alert", "AMZN Mktp CA")).toBe("AMZN Mktp CA");
+  });
+
+  it("keeps a payee that came from the body or was edited", () => {
+    expect(refreshedPayee("STARBUCKS", "Transaction alert", "STARBUCKS #12")).toBeNull();
+    expect(refreshedPayee("Amazon", "Purchase amount alert", "AMZN Mktp CA")).toBeNull();
+  });
+
+  it("keeps it when the parser has nothing better", () => {
+    expect(refreshedPayee("Purchase amount", "Purchase amount alert", "Purchase amount")).toBeNull();
+    expect(refreshedPayee("Purchase amount", "Purchase amount alert", "Unknown")).toBeNull();
+    expect(refreshedPayee("Purchase amount", "Purchase amount alert", undefined)).toBeNull();
+    expect(refreshedPayee(null, "Purchase amount alert", "AMZN Mktp CA")).toBeNull();
   });
 });
 

@@ -31,6 +31,7 @@ import { and, eq, gte, lte } from "drizzle-orm";
 import { db, schema } from "@/db";
 import { encryptField, tryDecryptField } from "@/lib/crypto/envelope";
 import { decryptStaged } from "@/lib/crypto/staging-envelope";
+import { encryptStagingMeta, type EncryptionTier } from "@/lib/crypto/staging-metadata";
 import { generateImportHash, checkDuplicates } from "@/lib/import-hash";
 import { upsertBankTransaction } from "@/lib/bank-ledger";
 import { createTransferPair } from "@/lib/transfer";
@@ -38,7 +39,12 @@ import { validateSignVsCategoryById } from "@/lib/transactions/sign-category-inv
 import { invalidateUser } from "@/lib/mcp/user-tx-cache";
 import { loadActiveEmailRules, firstMatchingRule } from "@/lib/email-rules/load";
 import { applyEmailTransform, type EmailTransform } from "@/lib/email-import/apply-transform";
-import { htmlToText } from "@/lib/email-import/parse-body";
+import {
+  htmlToText,
+  parseEmailBody,
+  refreshedPayee,
+  type ParseEmailBodyInput,
+} from "@/lib/email-import/parse-body";
 import {
   findStrictLedgerDuplicate,
   shiftDays,
@@ -127,6 +133,7 @@ export async function processPendingInboxEmails(
         stagedImportId: schema.emailInbox.stagedImportId,
         encryptionTier: schema.emailInbox.encryptionTier,
         parseConfidence: schema.emailInbox.parseConfidence,
+        receivedAt: schema.emailInbox.receivedAt,
       })
       .from(schema.emailInbox)
       .where(
@@ -142,12 +149,6 @@ export async function processPendingInboxEmails(
 
     for (const row of rows) {
       try {
-        // Only HIGH-confidence candidates auto-record; low/unparseable stay.
-        if (row.parseConfidence !== "high") {
-          result.needsReview += 1;
-          continue;
-        }
-
         const fromAddress = decodeInbox(row.encryptionTier, dek, row.fromAddress);
         const subject = decodeInbox(row.encryptionTier, dek, row.subject);
         // body / payee / amount for the new condition fields.
@@ -161,6 +162,7 @@ export async function processPendingInboxEmails(
         if (row.stagedImportId) {
           const cand = await db
             .select({
+              id: schema.stagedTransactions.id,
               amount: schema.stagedTransactions.amount,
               payee: schema.stagedTransactions.payee,
               encryptionTier: schema.stagedTransactions.encryptionTier,
@@ -171,7 +173,19 @@ export async function processPendingInboxEmails(
           if (cand[0]) {
             amount = cand[0].amount;
             payee = decodeStaged(cand[0].encryptionTier, dek, cand[0].payee);
+            payee = await refreshSubjectPayee(dek, cand[0], payee, {
+              text: bodyText,
+              html: bodyHtml,
+              subject,
+              receivedDate: row.receivedAt.toISOString().slice(0, 10),
+            });
           }
+        }
+
+        // Only HIGH-confidence candidates auto-record; low/unparseable stay.
+        if (row.parseConfidence !== "high") {
+          result.needsReview += 1;
+          continue;
         }
 
         const rule = firstMatchingRule(rules, { fromAddress, subject, body, payee, amount });
@@ -800,6 +814,25 @@ function decodeInbox(tier: string | null, dek: Buffer, value: string | null): st
   } catch {
     return null;
   }
+}
+
+/** Re-read a waiting email's body and, when its staged payee is only the
+ *  subject-line fallback, store the merchant the parser now finds (see
+ *  `refreshedPayee`). Returns the payee to use from here on. */
+async function refreshSubjectPayee(
+  dek: Buffer,
+  cand: { id: string; encryptionTier: string | null },
+  stored: string | null,
+  input: ParseEmailBodyInput,
+): Promise<string | null> {
+  const next = refreshedPayee(stored, input.subject ?? null, parseEmailBody(input).candidate?.payee);
+  if (next == null) return stored;
+  const tier: EncryptionTier = cand.encryptionTier === "user" ? "user" : "service";
+  await db
+    .update(schema.stagedTransactions)
+    .set({ payee: encryptStagingMeta(next, tier, dek) })
+    .where(eq(schema.stagedTransactions.id, cand.id));
+  return next;
 }
 
 function decodeStaged(tier: string | null, dek: Buffer, value: string | null): string | null {
