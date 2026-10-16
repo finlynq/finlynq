@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { getTransactions, getTransactionCount, createTransaction, updateTransaction, getAccountById, type TxSortFilter } from "@/lib/queries";
 import { requireAuth } from "@/lib/auth/require-auth";
 import { requireEncryption } from "@/lib/auth/require-encryption";
-import { encryptTxWrite, decryptTxRows, filterDecryptedBySearch, nameLookup, decryptName } from "@/lib/crypto/encrypted-columns";
+import { encryptTxWrite, decryptTxRows, redactTxCiphertext, filterDecryptedBySearch, nameLookup, decryptName } from "@/lib/crypto/encrypted-columns";
 import { decryptField } from "@/lib/crypto/envelope";
 import { invalidateUser as invalidateUserTxCache } from "@/lib/mcp/user-tx-cache";
 import { buildHoldingResolver } from "@/lib/external-import/portfolio-holding-resolver";
@@ -86,11 +86,10 @@ const putSchema = z.object({
 
 export async function GET(request: NextRequest) {
   // GET must stay accessible even when the session has no cached DEK
-  // (e.g. first request after a server restart). `decryptTxRows` passes
-  // rows through unchanged when dek is null — encrypted rows surface as
-  // `v1:...` ciphertext, which is ugly but recoverable (re-login
-  // repopulates the DEK cache), whereas 423-ing the whole transactions
-  // page blocks the user entirely.
+  // (e.g. first request after a server restart). Without a DEK the
+  // encrypted payee/note/tags are blanked (redactTxCiphertext) so the page
+  // shows "—" rather than `v1:...` ciphertext; unlocking repopulates the DEK
+  // cache. 423-ing the whole transactions page would block the user entirely.
   //
   // Take the DEK from `auth.context`, which every strategy populates: the
   // session cache for cookie auth (account.ts), and the api_key_dek unwrap
@@ -303,6 +302,8 @@ export async function GET(request: NextRequest) {
 
   const rawRows = await getTransactions(userId, filters);
   let decrypted = decryptTxRows(dek, rawRows as Array<Parameters<typeof decryptTxRows>[1][number]>);
+  // Locked session: never ship ciphertext to the client (display-only rows).
+  if (!dek) decrypted = redactTxCiphertext(decrypted);
 
   // Resolve every Stream-D-encrypted display name and strip the *_ct
   // companion fields before serializing. Falls back to plaintext (legacy

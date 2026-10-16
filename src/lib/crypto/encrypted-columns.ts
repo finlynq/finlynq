@@ -169,6 +169,28 @@ export function decryptTxRows<T extends Partial<Record<TxEncryptedKey, string | 
 }
 
 /**
+ * For READ RESPONSES served without a DEK (locked session): blank every
+ * still-encrypted transaction field (`v1:...`) to null so the UI shows "—"
+ * instead of ciphertext. Legacy plaintext values pass through. Never use on
+ * rows that will be written back — it is display-only.
+ */
+export function redactTxCiphertext<T extends Partial<Record<TxEncryptedKey, string | null | undefined>>>(
+  rows: T[],
+): T[] {
+  return rows.map((r) => {
+    let out: T | null = null;
+    for (const k of TX_ENCRYPTED_FIELDS) {
+      const v = r[k];
+      if (typeof v === "string" && v.startsWith("v1:")) {
+        out ??= { ...r };
+        (out as Record<string, string | null>)[k] = null;
+      }
+    }
+    return out ?? r;
+  });
+}
+
+/**
  * In-memory substring filter for the `search` query param. We can't push
  * substring search down into SQL on encrypted columns; for small row counts
  * (< ~10k per user) the decrypted scan is a few ms.
