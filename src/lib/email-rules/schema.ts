@@ -11,7 +11,8 @@
  *
  * `sender`/`subject` match the email headers; `body` matches the decrypted body
  * (text, or HTML stripped to text); `payee`/`amount` match the parser's extracted
- * candidate. AND-only: a rule matches when ALL its conditions match (no OR in v1).
+ * candidate. Text is matched as one line — line breaks and repeated spaces count
+ * as a single space (see load.ts). AND-only: a rule matches when ALL its conditions match (no OR in v1).
  *
  * Encryption: only string `value`s for STRING_FIELDS are user-DEK encrypted at
  * rest (see crypto.ts) — numeric amount thresholds stay plaintext + matchable,
