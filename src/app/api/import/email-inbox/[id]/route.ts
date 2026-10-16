@@ -3,7 +3,9 @@
  *
  *   GET    — decrypted detail (from/subject/body) for the sandboxed-iframe view.
  *   PATCH  — { action: 'record', accountId, categoryId } → materialize a
- *            deduped transaction (manually_recorded), or { action: 'discard' }.
+ *            deduped transaction (manually_recorded); { action: 'record_rule',
+ *            force? } → the same with the rule that matched the email;
+ *            or { action: 'discard' }.
  *   DELETE — local delete (+ provider.deleteReceived, a no-op now: the
  *            DevManager relay already deleted the Mailpit copy on the ingest 2xx;
  *            Resend has no delete API).
@@ -20,8 +22,12 @@ import { requireEncryption } from "@/lib/auth/require-encryption";
 import { validateBody } from "@/lib/validate";
 import {
   recordEmailInboxRow,
+  recordWithMatchedRule,
+  matchedRuleHold,
   discardEmailInboxRow,
   decodeInbox,
+  type MatchedRuleHold,
+  type RecordEmailResult,
 } from "@/lib/email-import/process-pending-inbox";
 import { getInboundProvider } from "@/lib/email-import/providers";
 import { parseEmailBody } from "@/lib/email-import/parse-body";
@@ -78,6 +84,16 @@ export async function GET(
     signals = p.signals ?? null;
   }
 
+  // A rule matched but the email is still waiting: say which rule, and the
+  // transaction it is held against as a possible duplicate. Best-effort.
+  let heldByRule: MatchedRuleHold | null = null;
+  if (r.action === "needs_review" && r.sourceKind === "body" && r.matchedRuleId != null) {
+    heldByRule = await matchedRuleHold(userId, dek, id).catch((e) => {
+      console.warn("[email-inbox] matched-rule hold lookup failed", e);
+      return null;
+    });
+  }
+
   return NextResponse.json({
     id: r.id,
     fromAddress: decodeInbox(r.encryptionTier, dek, r.fromAddress),
@@ -92,6 +108,7 @@ export async function GET(
     recordedTransactionId: r.recordedTransactionId,
     candidate,
     signals,
+    heldByRule,
   });
 }
 
@@ -120,59 +137,14 @@ const patchSchema = z.union([
     // "Record anyway" — bypass the strict (fuzzy) ledger-duplicate hold-back.
     force: z.boolean().optional(),
   }),
+  // Record with the rule that matched this email, as the sweep would; `force`
+  // books it even when it looks like a ledger duplicate ("Record anyway").
+  z.object({ action: z.literal("record_rule"), force: z.boolean().optional() }),
   z.object({ action: z.literal("discard") }),
 ]);
 
-export async function PATCH(
-  request: NextRequest,
-  { params }: { params: Promise<{ id: string }> },
-) {
-  const auth = await requireEncryption(request);
-  if (!auth.ok) return auth.response;
-  const { userId, dek } = auth;
-  const { id } = await params;
-
-  let body: unknown;
-  try {
-    body = await request.json();
-  } catch {
-    return NextResponse.json({ error: "Invalid JSON body" }, { status: 400 });
-  }
-  const parsed = validateBody(body, patchSchema);
-  if (parsed.error) return parsed.error;
-
-  if (parsed.data.action === "discard") {
-    const ok = await discardEmailInboxRow(userId, id);
-    if (!ok) return NextResponse.json({ error: "Not found" }, { status: 404 });
-    return NextResponse.json({ ok: true, action: "discarded" });
-  }
-
-  // action === 'record'. Transfer mode (FINLYNQ-189) when transferDestAccountId
-  // is set; else category/expense mode, which needs a category.
-  const isTransfer = parsed.data.transferDestAccountId != null;
-  if (!isTransfer && parsed.data.categoryId == null) {
-    return NextResponse.json(
-      { error: "Cannot record this email", code: "no_category" },
-      { status: 400 },
-    );
-  }
-
-  const result = await recordEmailInboxRow(userId, dek, id, {
-    accountId: parsed.data.accountId,
-    categoryId: parsed.data.categoryId ?? null,
-    transferDestAccountId: parsed.data.transferDestAccountId ?? null,
-    currencyOverride: parsed.data.currency,
-    finalAction: "manually_recorded",
-    force: parsed.data.force,
-    transform: {
-      flipSign: parsed.data.flipSign,
-      dateSource: parsed.data.dateSource,
-      payeeOverride: parsed.data.payeeOverride,
-      amountOverride: parsed.data.amount,
-      dateOverride: parsed.data.date,
-      payeeOverridePerEmail: parsed.data.payee,
-    },
-  });
+/** The response for both record actions. */
+function recordResponse(result: RecordEmailResult): NextResponse {
   if (result.status === "not_found") {
     return NextResponse.json({ error: "Not found" }, { status: 404 });
   }
@@ -201,6 +173,65 @@ export async function PATCH(
     // Advisory only: the sign is unusual for the category, recorded anyway.
     ...(result.warning ? { warning: result.warning } : {}),
   });
+}
+
+export async function PATCH(
+  request: NextRequest,
+  { params }: { params: Promise<{ id: string }> },
+) {
+  const auth = await requireEncryption(request);
+  if (!auth.ok) return auth.response;
+  const { userId, dek } = auth;
+  const { id } = await params;
+
+  let body: unknown;
+  try {
+    body = await request.json();
+  } catch {
+    return NextResponse.json({ error: "Invalid JSON body" }, { status: 400 });
+  }
+  const parsed = validateBody(body, patchSchema);
+  if (parsed.error) return parsed.error;
+
+  if (parsed.data.action === "discard") {
+    const ok = await discardEmailInboxRow(userId, id);
+    if (!ok) return NextResponse.json({ error: "Not found" }, { status: 404 });
+    return NextResponse.json({ ok: true, action: "discarded" });
+  }
+
+  if (parsed.data.action === "record_rule") {
+    return recordResponse(
+      await recordWithMatchedRule(userId, dek, id, parsed.data.force ?? false),
+    );
+  }
+
+  // action === 'record'. Transfer mode (FINLYNQ-189) when transferDestAccountId
+  // is set; else category/expense mode, which needs a category.
+  const isTransfer = parsed.data.transferDestAccountId != null;
+  if (!isTransfer && parsed.data.categoryId == null) {
+    return NextResponse.json(
+      { error: "Cannot record this email", code: "no_category" },
+      { status: 400 },
+    );
+  }
+
+  const result = await recordEmailInboxRow(userId, dek, id, {
+    accountId: parsed.data.accountId,
+    categoryId: parsed.data.categoryId ?? null,
+    transferDestAccountId: parsed.data.transferDestAccountId ?? null,
+    currencyOverride: parsed.data.currency,
+    finalAction: "manually_recorded",
+    force: parsed.data.force,
+    transform: {
+      flipSign: parsed.data.flipSign,
+      dateSource: parsed.data.dateSource,
+      payeeOverride: parsed.data.payeeOverride,
+      amountOverride: parsed.data.amount,
+      dateOverride: parsed.data.date,
+      payeeOverridePerEmail: parsed.data.payee,
+    },
+  });
+  return recordResponse(result);
 }
 
 export async function DELETE(

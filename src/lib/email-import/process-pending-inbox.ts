@@ -37,7 +37,11 @@ import { upsertBankTransaction } from "@/lib/bank-ledger";
 import { createTransferPair } from "@/lib/transfer";
 import { validateSignVsCategoryById } from "@/lib/transactions/sign-category-invariant";
 import { invalidateUser } from "@/lib/mcp/user-tx-cache";
-import { loadActiveEmailRules, firstMatchingRule } from "@/lib/email-rules/load";
+import {
+  loadActiveEmailRules,
+  firstMatchingRule,
+  type ActiveEmailRule,
+} from "@/lib/email-rules/load";
 import { applyEmailTransform, type EmailTransform } from "@/lib/email-import/apply-transform";
 import {
   htmlToText,
@@ -210,23 +214,15 @@ export async function processPendingInboxEmails(
           continue;
         }
 
-        const recorded = await recordEmailInboxRow(userId, dek, row.id, {
-          accountId: rule.accountId,
-          categoryId: rule.categoryId,
-          // FINLYNQ-189 — transfer rules record a transfer (category ignored).
-          transferDestAccountId: rule.transferDestAccountId,
-          // NULL ⇒ fall back to the account currency in recordEmailInboxRow.
-          currencyOverride: rule.currency,
-          matchedRuleId: rule.id,
-          finalAction: "auto_recorded",
-          // Auto-record never force-creates over a strict ledger duplicate —
-          // it holds the row at needs_review for the user to resolve.
-          transform: {
-            flipSign: rule.flipSign,
-            dateSource: rule.dateSource,
-            payeeOverride: rule.payeeOverride,
-          },
-        });
+        // Auto-record never force-creates over a strict ledger duplicate — it
+        // holds the row at needs_review; the Email tab shows the hold and
+        // offers "Record anyway" (recordWithMatchedRule).
+        const recorded = await recordEmailInboxRow(
+          userId,
+          dek,
+          row.id,
+          ruleRecordOptions(rule, "auto_recorded"),
+        );
         if (recorded.status === "recorded") result.autoRecorded += 1;
         else if (recorded.status === "duplicate") result.duplicateSkipped += 1;
         else if (recorded.status === "possible_duplicate") result.possibleDuplicates += 1;
@@ -458,6 +454,168 @@ export async function recordEmailInboxRow(
     .where(eq(schema.emailInbox.id, inboxId));
   await markStagedImported(inbox.stagedImportId, cand.id);
   return { status: "recorded", transactionId: txId, ...(signWarning ? { warning: signWarning } : {}) };
+}
+
+type RecordEmailOptions = Parameters<typeof recordEmailInboxRow>[3];
+
+/**
+ * How an email rule records: its account, category or transfer destination,
+ * currency and field mapping. One builder for the sweep's auto-record and the
+ * Email tab's "record with rule", so the two can't drift apart.
+ */
+export function ruleRecordOptions(
+  rule: Pick<
+    ActiveEmailRule,
+    | "id"
+    | "accountId"
+    | "categoryId"
+    | "transferDestAccountId"
+    | "currency"
+    | "flipSign"
+    | "dateSource"
+    | "payeeOverride"
+  >,
+  finalAction: RecordEmailOptions["finalAction"],
+  force = false,
+): RecordEmailOptions {
+  return {
+    accountId: rule.accountId,
+    categoryId: rule.categoryId,
+    // FINLYNQ-189 — transfer rules record a transfer (category ignored).
+    transferDestAccountId: rule.transferDestAccountId,
+    // NULL ⇒ fall back to the account currency in recordEmailInboxRow.
+    currencyOverride: rule.currency,
+    matchedRuleId: rule.id,
+    finalAction,
+    force,
+    transform: {
+      flipSign: rule.flipSign,
+      dateSource: rule.dateSource,
+      payeeOverride: rule.payeeOverride,
+    },
+  };
+}
+
+/** The active rule stamped on a waiting body email, with the email's row. */
+async function loadMatchedRule(userId: string, dek: Buffer, inboxId: string) {
+  const rows = await db
+    .select({
+      matchedRuleId: schema.emailInbox.matchedRuleId,
+      action: schema.emailInbox.action,
+      sourceKind: schema.emailInbox.sourceKind,
+      stagedImportId: schema.emailInbox.stagedImportId,
+      receivedAt: schema.emailInbox.receivedAt,
+    })
+    .from(schema.emailInbox)
+    .where(and(eq(schema.emailInbox.id, inboxId), eq(schema.emailInbox.userId, userId)))
+    .limit(1);
+  const inbox = rows[0];
+  if (!inbox || inbox.matchedRuleId == null) return null;
+  const rule = (await loadActiveEmailRules(userId, dek)).find((r) => r.id === inbox.matchedRuleId);
+  return rule ? { inbox, rule } : null;
+}
+
+/**
+ * Record a waiting email with the rule that matched it, exactly as the sweep
+ * would. `force` books it even when it looks like a ledger duplicate: the hold
+ * compares only account, amount and date, so two real purchases of the same
+ * amount a few days apart (or two merchants charging the same) are held too.
+ */
+export async function recordWithMatchedRule(
+  userId: string,
+  dek: Buffer,
+  inboxId: string,
+  force: boolean,
+): Promise<RecordEmailResult> {
+  const matched = await loadMatchedRule(userId, dek, inboxId);
+  if (!matched) return { status: "invalid", reason: "no_matched_rule" };
+  return recordEmailInboxRow(
+    userId,
+    dek,
+    inboxId,
+    ruleRecordOptions(matched.rule, "manually_recorded", force),
+  );
+}
+
+export interface MatchedRuleHold {
+  ruleId: number;
+  ruleName: string;
+  mode: "auto" | "review";
+  /** The account the rule records into. */
+  accountId: number;
+  /** The rule has a category or transfer destination, so it can record alone. */
+  canRecord: boolean;
+  /** The existing transaction the strict duplicate check holds this email
+   *  against (same account, amount ±$0.01, date ±4 days), or null. */
+  duplicate: { transactionId: number; date: string; amount: number; payee: string | null } | null;
+}
+
+/**
+ * Why a waiting email that a rule matched was not recorded, for the Email tab.
+ * Null when no active rule is stamped on it.
+ */
+export async function matchedRuleHold(
+  userId: string,
+  dek: Buffer,
+  inboxId: string,
+): Promise<MatchedRuleHold | null> {
+  const matched = await loadMatchedRule(userId, dek, inboxId);
+  if (!matched) return null;
+  const { inbox, rule } = matched;
+  const canRecord = rule.transferDestAccountId != null || rule.categoryId != null;
+  const base = {
+    ruleId: rule.id,
+    ruleName: rule.name,
+    mode: rule.mode,
+    accountId: rule.accountId,
+    canRecord,
+  };
+  if (!inbox.stagedImportId) return { ...base, duplicate: null };
+
+  const staged = await db
+    .select({
+      date: schema.stagedTransactions.date,
+      amount: schema.stagedTransactions.amount,
+      payee: schema.stagedTransactions.payee,
+      encryptionTier: schema.stagedTransactions.encryptionTier,
+    })
+    .from(schema.stagedTransactions)
+    .where(eq(schema.stagedTransactions.stagedImportId, inbox.stagedImportId))
+    .limit(1);
+  const cand = staged[0];
+  if (!cand) return { ...base, duplicate: null };
+
+  // The same mapping the record path applies before its duplicate check.
+  const eff = applyEmailTransform(
+    { date: cand.date, amount: cand.amount, payee: decodeStaged(cand.encryptionTier, dek, cand.payee) ?? "" },
+    { flipSign: rule.flipSign, dateSource: rule.dateSource, payeeOverride: rule.payeeOverride },
+    inbox.receivedAt ? inbox.receivedAt.toISOString().slice(0, 10) : null,
+  );
+  const dupId = await findExistingLedgerDuplicate(userId, rule.accountId, eff.date, eff.amount);
+  if (dupId == null) return { ...base, duplicate: null };
+
+  const tx = await db
+    .select({
+      id: schema.transactions.id,
+      date: schema.transactions.date,
+      amount: schema.transactions.amount,
+      payee: schema.transactions.payee,
+    })
+    .from(schema.transactions)
+    .where(and(eq(schema.transactions.id, dupId), eq(schema.transactions.userId, userId)))
+    .limit(1);
+  const t = tx[0];
+  return {
+    ...base,
+    duplicate: t
+      ? {
+          transactionId: t.id,
+          date: t.date,
+          amount: t.amount,
+          payee: tryDecryptField(dek, t.payee, "transactions.payee"),
+        }
+      : null,
+  };
 }
 
 /** Mark an inbox row discarded (user dismissed it) + reject its staged copy. */
