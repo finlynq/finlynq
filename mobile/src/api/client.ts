@@ -984,6 +984,16 @@ export const endpoints = {
   recordEmail: (id: string, body: EmailRecordBody) =>
     api.patch<EmailRecordResult>(`/api/import/email-inbox/${encodeURIComponent(id)}`, body),
 
+  // Record it with the email rule that matched it (the rule's account,
+  // category or transfer, payee rename, sign, date). Same responses as
+  // recordEmail; `force` books it over a possible-duplicate hold. A 400 with
+  // `code` (no_matched_rule, no_category, ...) when the rule can't record it.
+  recordEmailWithRule: (id: string, force = false) =>
+    api.patch<EmailRecordResult>(`/api/import/email-inbox/${encodeURIComponent(id)}`, {
+      action: "record_rule",
+      force,
+    }),
+
   discardEmail: (id: string) =>
     api.patch<{ ok: boolean }>(`/api/import/email-inbox/${encodeURIComponent(id)}`, {
       action: "discard",

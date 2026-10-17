@@ -6,6 +6,7 @@ import type {
   EmailInboxItem,
   EmailParseSignals,
   EmailRecordBody,
+  EmailRuleHold,
   StagedImportSummary,
 } from "../../../shared/types";
 
@@ -82,6 +83,81 @@ export function emailStatusLabel(status: EmailStatus): string {
     default:
       return "Statement file, done";
   }
+}
+
+/**
+ * The note on a "to record" row: an email rule matched it (the web tab's
+ * "rule matched"), and/or the amount was read with low confidence.
+ */
+export function toRecordNote(item: Pick<EmailInboxItem, "action" | "matchedRuleId" | "parseConfidence">): string | null {
+  const parts: string[] = [];
+  if (item.action === "needs_review" && item.matchedRuleId != null) parts.push("Rule matched");
+  if (item.parseConfidence === "low") parts.push(parts.length ? "check the amount" : "Check the amount");
+  return parts.length ? parts.join(" · ") : null;
+}
+
+/**
+ * What to say about the rule that matched a waiting email, in the web tab's
+ * words (pf-app inbox-email-tab.tsx, 2026-10-16), and which one-click action
+ * goes with it:
+ *   duplicate    held as a possible duplicate: "Record anyway" (record_rule
+ *                with force) when the rule can record, and Discard
+ *   matched      the rule can record it: "Record with this rule"
+ *   no_category  the rule has no category or transfer: pick one in the form
+ * Unlike the web, a held email whose rule has no category gets no "Record
+ * anyway": the server would refuse it (no_category).
+ */
+export type RuleHoldNotice =
+  | { kind: "duplicate"; text: string; canForce: boolean }
+  | { kind: "matched"; text: string }
+  | { kind: "no_category"; text: string };
+
+const NO_CATEGORY_TEXT = "It has no category, so it can't record on its own: pick one below.";
+
+export function ruleHoldNotice(
+  hold: EmailRuleHold,
+  opts: {
+    /** The account the rule records into, when the app has it. */
+    account?: { name: string; currency: string } | null;
+    /** The email's own currency, used when the account is unknown. */
+    fallbackCurrency: string;
+    money: (value: number, currency: string) => string;
+  },
+): RuleHoldNotice {
+  const name = `“${hold.ruleName}”`;
+  if (hold.duplicate) {
+    const d = hold.duplicate;
+    const currency = opts.account?.currency ?? opts.fallbackCurrency;
+    const what = d.payee?.trim() || `transaction #${d.transactionId}`;
+    const text =
+      `Rule ${name} matched, but this wasn't recorded: it looks like a duplicate of ` +
+      `${what} ${opts.money(d.amount, currency)} on ${d.date}` +
+      `${opts.account ? ` in ${opts.account.name}` : ""}. ` +
+      "Only the amount and a date within 4 days are compared, so a separate purchase of the same amount is held too." +
+      (hold.canRecord ? "" : ` ${NO_CATEGORY_TEXT}`);
+    return { kind: "duplicate", text, canForce: hold.canRecord };
+  }
+  if (!hold.canRecord) return { kind: "no_category", text: `Rule ${name} matched. ${NO_CATEGORY_TEXT}` };
+  return {
+    kind: "matched",
+    text: `Rule ${name} matched. ${
+      hold.mode === "review" ? "It's set to wait for your click." : "It wasn't recorded automatically."
+    }`,
+  };
+}
+
+// Why the server refused "Record with this rule" (400 `code`), in words.
+const RULE_RECORD_ERRORS: Record<string, string> = {
+  no_matched_rule: "The rule that matched this email is gone or turned off. Record it with the form below.",
+  no_category: "The rule has no category, so pick one below.",
+  account_not_found: "The rule's account no longer exists. Record it with the form below.",
+  category_not_found: "The rule's category no longer exists. Pick one below.",
+  investment_account: "The rule records into an investment account, which an email can't be recorded into. Pick another below.",
+};
+
+export function ruleRecordError(error: string, code?: string): string {
+  if (code && RULE_RECORD_ERRORS[code]) return RULE_RECORD_ERRORS[code];
+  return code ? `${error} (${code})` : error;
 }
 
 // Named entities common in bank emails; anything else is left as written.

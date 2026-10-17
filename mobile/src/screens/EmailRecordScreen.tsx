@@ -6,6 +6,12 @@
 // unusual for the category (a refund in an expense category) is recorded with a
 // warning, never refused. An email already recorded (or one with no amount in
 // it) opens read-only.
+//
+// When an email rule matched the email but it is still waiting (2026-10-16,
+// the web Email tab's notice): say why, and record it with the rule in one tap.
+// The usual reason is the duplicate check, which compares only the amount and a
+// date within 4 days, so a different purchase of the same amount is held too;
+// "Record anyway" books it with the rule regardless.
 
 import React, { useEffect, useMemo, useState } from "react";
 import {
@@ -36,9 +42,11 @@ import {
   emailStatusLabel,
   flipAmountSign,
   reviewReasons,
+  ruleHoldNotice,
+  ruleRecordError,
   type EmailRecordForm,
 } from "../lib/email-imports";
-import type { Category, EmailInboxDetail, InboxAccount } from "../../../shared/types";
+import type { Category, EmailInboxDetail, EmailRecordResult, InboxAccount } from "../../../shared/types";
 import type { MoreStackParamList } from "../navigation/MoreStack";
 
 type Picker = "account" | "category" | "dest" | null;
@@ -66,6 +74,8 @@ export default function EmailRecordScreen() {
   const [error, setError] = useState<string | null>(null);
   // Set when the server held it back as a possible duplicate.
   const [duplicateOf, setDuplicateOf] = useState<number | null | undefined>(undefined);
+  // Why "Record with this rule" / "Record anyway" did not record it.
+  const [ruleError, setRuleError] = useState<string | null>(null);
 
   useEffect(() => {
     let alive = true;
@@ -145,12 +155,7 @@ export default function EmailRecordScreen() {
         setDuplicateOf(r.duplicateOfTransactionId ?? null);
         return;
       }
-      if (r.action === "duplicate_skipped") {
-        Alert.alert("Already recorded", "This transaction is already in the account, so nothing was added.");
-      } else if (r.warning) {
-        Alert.alert("Recorded", r.warning);
-      }
-      navigation.goBack();
+      recorded(r);
     } catch (e) {
       logger.error("email-record", "record threw", { detail: String(e) });
       setError("Cannot connect to server");
@@ -158,6 +163,62 @@ export default function EmailRecordScreen() {
       setSaving(false);
     }
   };
+
+  // Booked (or found already booked): say so when there is something to say, and leave.
+  const recorded = (r: EmailRecordResult) => {
+    if (r.action === "duplicate_skipped") {
+      Alert.alert("Already recorded", "This transaction is already in the account, so nothing was added.");
+    } else if (r.warning) {
+      Alert.alert("Recorded", r.warning);
+    }
+    navigation.goBack();
+  };
+
+  // Record with the rule that matched the email; `force` books it over a
+  // possible-duplicate hold ("Record anyway").
+  const recordWithRule = async (force: boolean) => {
+    if (!recordable || saving) return;
+    setSaving(true);
+    setRuleError(null);
+    try {
+      const res = await endpoints.recordEmailWithRule(item.id, force);
+      if (!res.success) {
+        setRuleError(ruleRecordError(res.error, res.code));
+        return;
+      }
+      const r = res.data;
+      if (r.action === "possible_duplicate") {
+        // Held after all: reload the email so the hold and its Record anyway show.
+        const again = await endpoints.getEmailInboxItem(item.id);
+        if (again.success) setDetail(again.data);
+        if (!again.success || !again.data.heldByRule?.duplicate) {
+          setRuleError(
+            `This looks like a transaction already in the account${
+              r.duplicateOfTransactionId != null ? ` (#${r.duplicateOfTransactionId})` : ""
+            }, so it was not recorded.`,
+          );
+        }
+        return;
+      }
+      recorded(r);
+    } catch (e) {
+      logger.error("email-record", "record with rule threw", { detail: String(e) });
+      setRuleError("Cannot connect to server");
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const hold = recordable ? detail?.heldByRule ?? null : null;
+  const notice = useMemo(() => {
+    if (!hold || !candidate) return null;
+    const acct = accounts.find((a) => a.id === hold.accountId);
+    return ruleHoldNotice(hold, {
+      account: acct ? { name: safeAccountName(acct), currency: acct.currency } : null,
+      fallbackCurrency: candidate.currency,
+      money: (v, c) => formatCurrency(v, c),
+    });
+  }, [hold, accounts, candidate]);
 
   const discard = () => {
     Alert.alert("Discard this email?", "It is removed from the list and nothing is recorded.", [
@@ -286,6 +347,61 @@ export default function EmailRecordScreen() {
                   </View>
                 );
               })()}
+            </View>
+          )}
+
+          {/* A rule matched it: why it is still waiting, and a one-tap record with the rule. */}
+          {notice && (
+            <View
+              style={[
+                styles.card,
+                notice.kind === "duplicate"
+                  ? { backgroundColor: colors.accent, borderColor: colors.primary }
+                  : { backgroundColor: colors.card, borderColor: colors.border },
+              ]}
+            >
+              <Text
+                style={[styles.noticeText, { color: notice.kind === "duplicate" ? colors.accentForeground : colors.foreground }]}
+              >
+                {notice.text}
+              </Text>
+              {notice.kind === "duplicate" ? (
+                <View style={styles.noticeBtns}>
+                  {notice.canForce && (
+                    <TouchableOpacity
+                      onPress={() => recordWithRule(true)}
+                      disabled={saving}
+                      accessibilityRole="button"
+                      accessibilityLabel="Record anyway with this rule"
+                      style={[styles.noticeBtn, { borderColor: colors.primary, opacity: saving ? 0.5 : 1 }]}
+                    >
+                      <Text style={{ color: colors.foreground, fontWeight: "700" }}>Record anyway</Text>
+                    </TouchableOpacity>
+                  )}
+                  <TouchableOpacity
+                    onPress={discard}
+                    disabled={saving}
+                    accessibilityRole="button"
+                    accessibilityLabel="Discard this held email"
+                    style={[styles.noticeBtn, { borderColor: colors.border }]}
+                  >
+                    <Text style={{ color: colors.destructive, fontWeight: "600" }}>Discard</Text>
+                  </TouchableOpacity>
+                </View>
+              ) : notice.kind === "matched" ? (
+                <View style={styles.noticeBtns}>
+                  <TouchableOpacity
+                    onPress={() => recordWithRule(false)}
+                    disabled={saving}
+                    accessibilityRole="button"
+                    accessibilityLabel="Record with this rule"
+                    style={[styles.noticeBtn, { borderColor: colors.primary, opacity: saving ? 0.5 : 1 }]}
+                  >
+                    <Text style={{ color: colors.foreground, fontWeight: "700" }}>Record with this rule</Text>
+                  </TouchableOpacity>
+                </View>
+              ) : null}
+              {ruleError && <Text style={[styles.noticeError, { color: colors.destructive }]}>{ruleError}</Text>}
             </View>
           )}
 
@@ -426,6 +542,10 @@ const styles = StyleSheet.create({
   reasons: { marginTop: 8 },
   reasonHead: { fontSize: 12, fontWeight: "700", marginBottom: 2 },
   reason: { fontSize: 13, lineHeight: 19 },
+  noticeText: { fontSize: 14, lineHeight: 20 },
+  noticeBtns: { flexDirection: "row", gap: 8, marginTop: 12 },
+  noticeBtn: { borderWidth: StyleSheet.hairlineWidth, borderRadius: 8, paddingHorizontal: 14, paddingVertical: 8 },
+  noticeError: { fontSize: 13, lineHeight: 18, marginTop: 10 },
   amountRow: { flexDirection: "row", alignItems: "center", gap: 8 },
   amountInput: { flex: 1 },
   flipBtn: { borderWidth: StyleSheet.hairlineWidth, borderRadius: 8, paddingHorizontal: 14, paddingVertical: 9 },

@@ -27,7 +27,7 @@ import { endpoints } from "../api/client";
 import { logger } from "../lib/logger";
 import { formatCurrency, safeName } from "../lib/format";
 import { Icon } from "../components/icon";
-import { emailStatusLabel, splitEmails, type EmailListEntry } from "../lib/email-imports";
+import { emailStatusLabel, splitEmails, toRecordNote, type EmailListEntry } from "../lib/email-imports";
 import type { EmailInboxItem, StagedImportSummary } from "../../../shared/types";
 import type { MoreStackParamList } from "../navigation/MoreStack";
 
@@ -115,7 +115,14 @@ export default function EmailImportsScreen() {
         : c
           ? `${c.date} · ${safeName(item.subject ?? item.fromAddress, "(no subject)")}`
           : safeName(item.fromAddress, "unknown sender");
-    const note = status === "to_record" ? (item.parseConfidence === "low" ? "Check the amount" : null) : emailStatusLabel(status);
+    const note = status === "to_record" ? toRecordNote(item) : emailStatusLabel(status);
+    // Amber for "a rule matched it" alone (as on the web); red when something needs checking.
+    const noteColor =
+      status === "unreadable" || (status === "to_record" && item.parseConfidence === "low")
+        ? colors.destructive
+        : status === "to_record"
+          ? colors.primary
+          : colors.mutedForeground;
     return (
       <TouchableOpacity
         accessibilityRole="button"
@@ -140,10 +147,7 @@ export default function EmailImportsScreen() {
           {detail}
         </Text>
         {note ? (
-          <Text
-            style={[styles.note, { color: status === "to_record" || status === "unreadable" ? colors.destructive : colors.mutedForeground }]}
-            numberOfLines={1}
-          >
+          <Text style={[styles.note, { color: noteColor }]} numberOfLines={1}>
             {note}
           </Text>
         ) : null}

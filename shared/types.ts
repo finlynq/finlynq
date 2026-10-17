@@ -1643,6 +1643,24 @@ export interface EmailInboxDetail {
   parseConfidence: "high" | "low" | null;
   candidate: (EmailCandidate & { last4?: string | null }) | null;
   signals: EmailParseSignals | null;
+  /** A rule matched this waiting email; why it was not recorded (2026-10-16).
+   *  Absent on servers older than that. */
+  heldByRule?: EmailRuleHold | null;
+}
+
+/** GET /api/import/email-inbox/[id] `heldByRule`: the email rule stamped on a
+ *  waiting body email, and the transaction the duplicate check holds it
+ *  against (same account, amount, date within 4 days; the payee is not
+ *  compared), if any. */
+export interface EmailRuleHold {
+  ruleId: number;
+  ruleName: string;
+  mode: "auto" | "review";
+  /** The account the rule records into. */
+  accountId: number;
+  /** The rule has a category or a transfer destination, so it can record alone. */
+  canRecord: boolean;
+  duplicate: { transactionId: number; date: string; amount: number; payee: string | null } | null;
 }
 
 /** PATCH /api/import/email-inbox/[id] — exactly one of categoryId / transferDestAccountId.

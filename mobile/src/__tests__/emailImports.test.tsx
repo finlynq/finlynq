@@ -18,12 +18,15 @@ import {
   emailStatus,
   flipAmountSign,
   reviewReasons,
+  ruleHoldNotice,
+  ruleRecordError,
   splitEmails,
   parseAmountInput,
   stagedSourceLabel,
   stagedTitle,
+  toRecordNote,
 } from "../lib/email-imports";
-import type { EmailInboxItem, InboxAccount, StagedImportSummary } from "../../../shared/types";
+import type { EmailInboxItem, EmailRuleHold, InboxAccount, StagedImportSummary } from "../../../shared/types";
 
 const mockNavigate = jest.fn();
 const mockGoBack = jest.fn();
@@ -44,6 +47,7 @@ jest.mock("../api/client", () => ({
     getInboxAccounts: jest.fn(),
     getCategories: jest.fn(),
     recordEmail: jest.fn(),
+    recordEmailWithRule: jest.fn(),
     discardEmail: jest.fn(),
     getStagedImport: jest.fn(),
     bindStagedImport: jest.fn(),
@@ -122,22 +126,32 @@ beforeEach(() => {
   mockRouteParams = undefined;
   ep.getInboxAccounts.mockResolvedValue(ok(accounts));
   ep.getCategories.mockResolvedValue(ok(categories));
-  ep.getEmailInboxItem.mockResolvedValue(
-    ok({
-      id: "e1",
-      fromAddress: "alerts@bank.example",
-      subject: "Card purchase",
-      bodyText: "You spent $42.50 at Coffee Shop\non your card ending 1234.",
-      bodyHtml: null,
-      receivedAt: "2026-10-14T10:00:00Z",
-      action: "needs_review",
-      sourceKind: "body",
-      parseConfidence: "high",
-      candidate: { date: "2026-10-14", amount: -42.5, currency: "USD", payee: "Coffee Shop", last4: "1234" },
-      signals: { detectedAmounts: [{ value: 42.5, currency: "USD" }], multipleAmounts: false, dateAmbiguous: false, usedFallbackDate: true, signExplicit: true, last4: "1234" },
-    }),
-  );
+  ep.getEmailInboxItem.mockResolvedValue(ok(emailDetail()));
 });
+
+function emailDetail(heldByRule?: EmailRuleHold | null) {
+  return {
+    id: "e1",
+    fromAddress: "alerts@bank.example",
+    subject: "Card purchase",
+    bodyText: "You spent $42.50 at Coffee Shop\non your card ending 1234.",
+    bodyHtml: null,
+    receivedAt: "2026-10-14T10:00:00Z",
+    action: "needs_review",
+    sourceKind: "body",
+    parseConfidence: "high",
+    candidate: { date: "2026-10-14", amount: -42.5, currency: "USD", payee: "Coffee Shop", last4: "1234" },
+    signals: { detectedAmounts: [{ value: 42.5, currency: "USD" }], multipleAmounts: false, dateAmbiguous: false, usedFallbackDate: true, signExplicit: true, last4: "1234" },
+    ...(heldByRule !== undefined ? { heldByRule } : {}),
+  };
+}
+
+// The rule that matched an email (GET /api/import/email-inbox/[id] `heldByRule`).
+function ruleHold(over: Partial<EmailRuleHold> = {}): EmailRuleHold {
+  return { ruleId: 9, ruleName: "Rogers alerts", mode: "auto", accountId: 4, canRecord: true, duplicate: null, ...over };
+}
+const amazonDup = { transactionId: 77, date: "2026-10-12", amount: -42.5, payee: "AMAZON.CA" };
+const rogers: InboxAccount = { id: 4, name: "Rogers Mastercard", currency: "CAD", mode: "auto" };
 
 describe("email-imports helpers", () => {
   // Owner feedback 2026-10-15: one list of emails with a To record / Recorded switch.
@@ -229,6 +243,79 @@ describe("email-imports helpers", () => {
     expect(parseAmountInput("abc")).toBeNull();
   });
 
+  // Owner report 2026-10-16 (Rogers alerts): a rule matched, the email waited,
+  // and nothing said why. Wording mirrors the web Email tab (PR #381).
+  describe("rule that matched a waiting email", () => {
+    const money = (v: number, c: string) => `${c} ${v}`;
+    const account = { name: "Rogers Mastercard", currency: "CAD" };
+
+    it("explains a duplicate hold in the rule account's currency, and offers Record anyway", () => {
+      expect(ruleHoldNotice(ruleHold({ duplicate: amazonDup }), { account, fallbackCurrency: "USD", money })).toEqual({
+        kind: "duplicate",
+        canForce: true,
+        text:
+          "Rule “Rogers alerts” matched, but this wasn't recorded: it looks like a duplicate of AMAZON.CA CAD -42.5 on 2026-10-12 in Rogers Mastercard. " +
+          "Only the amount and a date within 4 days are compared, so a separate purchase of the same amount is held too.",
+      });
+    });
+
+    it("falls back to the transaction number and the email's currency", () => {
+      const n = ruleHoldNotice(ruleHold({ duplicate: { ...amazonDup, payee: null } }), { account: null, fallbackCurrency: "USD", money });
+      expect(n.text).toContain("a duplicate of transaction #77 USD -42.5 on 2026-10-12. Only the amount");
+    });
+
+    it("offers no Record anyway when the rule has no category, since the server would refuse it", () => {
+      const n = ruleHoldNotice(ruleHold({ duplicate: amazonDup, canRecord: false }), { account, fallbackCurrency: "USD", money });
+      expect(n).toMatchObject({ kind: "duplicate", canForce: false });
+      expect(n.text).toMatch(/It has no category, so it can't record on its own: pick one below\.$/);
+    });
+
+    it("offers Record with this rule when nothing holds it, and says why it waited", () => {
+      expect(ruleHoldNotice(ruleHold({ mode: "review" }), { account, fallbackCurrency: "USD", money })).toEqual({
+        kind: "matched",
+        text: "Rule “Rogers alerts” matched. It's set to wait for your click.",
+      });
+      expect(ruleHoldNotice(ruleHold(), { account, fallbackCurrency: "USD", money }).text).toBe(
+        "Rule “Rogers alerts” matched. It wasn't recorded automatically.",
+      );
+    });
+
+    it("asks for a category when the rule has none", () => {
+      expect(ruleHoldNotice(ruleHold({ canRecord: false }), { account, fallbackCurrency: "USD", money })).toEqual({
+        kind: "no_category",
+        text: "Rule “Rogers alerts” matched. It has no category, so it can't record on its own: pick one below.",
+      });
+    });
+
+    it("puts the server's refusal in words, keeping the code for anything unknown", () => {
+      expect(ruleRecordError("Cannot record this email", "no_matched_rule")).toMatch(/gone or turned off/);
+      expect(ruleRecordError("Cannot record this email", "transfer_same_account")).toBe(
+        "Cannot record this email (transfer_same_account)",
+      );
+      expect(ruleRecordError("Network error: offline")).toBe("Network error: offline");
+    });
+
+    it("marks a waiting email a rule matched", () => {
+      expect(toRecordNote(email({ matchedRuleId: 9 }))).toBe("Rule matched");
+      expect(toRecordNote(email({ matchedRuleId: 9, parseConfidence: "low" }))).toBe("Rule matched · check the amount");
+      expect(toRecordNote(email({ parseConfidence: "low" }))).toBe("Check the amount");
+      expect(toRecordNote(email())).toBeNull();
+      // Only a waiting email: a new one the sweep has not looked at yet is not "matched".
+      expect(toRecordNote(email({ action: "pending", matchedRuleId: 9 }))).toBeNull();
+    });
+
+    it("uses no em dashes in what it says", () => {
+      const texts = [
+        ruleHoldNotice(ruleHold({ duplicate: amazonDup, canRecord: false }), { account, fallbackCurrency: "USD", money }).text,
+        ruleHoldNotice(ruleHold({ mode: "review" }), { account, fallbackCurrency: "USD", money }).text,
+        ...["no_matched_rule", "no_category", "account_not_found", "category_not_found", "investment_account"].map((c) =>
+          ruleRecordError("x", c),
+        ),
+      ];
+      for (const t of texts) expect(t).not.toContain("—");
+    });
+  });
+
   it("names files and describes a send", () => {
     expect(stagedTitle({ subject: "", originalFilename: "oct.csv" })).toBe("oct.csv");
     expect(stagedSourceLabel({ source: "email" })).toBe("Emailed file");
@@ -274,6 +361,15 @@ describe("EmailImportsScreen", () => {
     expect(getByText("Recorded by an email rule")).toBeTruthy();
     fireEvent.press(getByText("Gym"));
     expect(mockNavigate).toHaveBeenCalledWith("EmailRecord", { item: gym });
+  });
+
+  it("marks a waiting email that a rule matched", async () => {
+    ep.getEmailInbox.mockResolvedValue(ok([email({ matchedRuleId: 9 }), email({ id: "e2", candidate: { date: "2026-10-13", amount: -5, currency: "USD", payee: "Bakery" } })]));
+    ep.getStagedImports.mockResolvedValue(ok([]));
+    const { getByText, getAllByText } = render(wrap(<EmailImportsScreen />));
+    await waitFor(() => expect(getByText("Coffee Shop")).toBeTruthy());
+    expect(getAllByText("Rule matched")).toHaveLength(1);
+    expect(getByText("Bakery")).toBeTruthy();
   });
 
   it("says when nothing is waiting", async () => {
@@ -380,6 +476,103 @@ describe("EmailRecordScreen", () => {
     await pressAlert("Discard");
     expect(ep.discardEmail).toHaveBeenCalledWith("e1");
     expect(mockGoBack).toHaveBeenCalled();
+  });
+
+  describe("when an email rule matched it", () => {
+    beforeEach(() => {
+      ep.getInboxAccounts.mockResolvedValue(ok([...accounts, rogers]));
+    });
+
+    it("says it was held as a duplicate, in the rule account's currency, and records it anyway with the rule", async () => {
+      ep.getEmailInboxItem.mockResolvedValue(ok(emailDetail(ruleHold({ duplicate: amazonDup }))));
+      ep.recordEmailWithRule.mockResolvedValue(ok({ ok: true, action: "manually_recorded", transactionId: 8 }));
+      const { findByText, getByLabelText, getByText } = await open(email({ matchedRuleId: 9 }));
+      expect(
+        await findByText(
+          "Rule “Rogers alerts” matched, but this wasn't recorded: it looks like a duplicate of AMAZON.CA -C$42.50 on 2026-10-12 in Rogers Mastercard. " +
+            "Only the amount and a date within 4 days are compared, so a separate purchase of the same amount is held too.",
+        ),
+      ).toBeTruthy();
+      expect(getByText("Record anyway")).toBeTruthy();
+      await act(async () => {
+        fireEvent.press(getByLabelText("Record anyway with this rule"));
+      });
+      expect(ep.recordEmailWithRule).toHaveBeenCalledWith("e1", true);
+      // The manual form's own path is untouched.
+      expect(ep.recordEmail).not.toHaveBeenCalled();
+      expect(mockGoBack).toHaveBeenCalled();
+    });
+
+    it("discards a held email from the notice, after confirming", async () => {
+      ep.getEmailInboxItem.mockResolvedValue(ok(emailDetail(ruleHold({ duplicate: amazonDup }))));
+      ep.discardEmail.mockResolvedValue(ok({ ok: true }));
+      const { findByLabelText } = await open();
+      fireEvent.press(await findByLabelText("Discard this held email"));
+      await pressAlert("Discard");
+      expect(ep.discardEmail).toHaveBeenCalledWith("e1");
+      expect(ep.recordEmailWithRule).not.toHaveBeenCalled();
+    });
+
+    it("records with the rule in one tap, and shows the hold when the server holds it after all", async () => {
+      ep.getEmailInboxItem
+        .mockResolvedValueOnce(ok(emailDetail(ruleHold({ mode: "review" }))))
+        .mockResolvedValue(ok(emailDetail(ruleHold({ mode: "review", duplicate: amazonDup }))));
+      ep.recordEmailWithRule.mockResolvedValue(ok({ ok: false, action: "possible_duplicate", duplicateOfTransactionId: 77 }));
+      const { findByText, getByLabelText, findByLabelText, queryByLabelText } = await open();
+      expect(await findByText("Rule “Rogers alerts” matched. It's set to wait for your click.")).toBeTruthy();
+      expect(queryByLabelText("Record anyway with this rule")).toBeNull();
+      await act(async () => {
+        fireEvent.press(getByLabelText("Record with this rule"));
+      });
+      expect(ep.recordEmailWithRule).toHaveBeenCalledWith("e1", false);
+      expect(ep.getEmailInboxItem).toHaveBeenCalledTimes(2);
+      expect(await findByLabelText("Record anyway with this rule")).toBeTruthy();
+      expect(queryByLabelText("Record with this rule")).toBeNull();
+      expect(mockGoBack).not.toHaveBeenCalled();
+    });
+
+    it("passes on a sign warning after recording with the rule", async () => {
+      ep.getEmailInboxItem.mockResolvedValue(ok(emailDetail(ruleHold())));
+      ep.recordEmailWithRule.mockResolvedValue(
+        ok({ ok: true, action: "manually_recorded", transactionId: 8, warning: "Groceries is an expense category, but this amount is positive." }),
+      );
+      const { findByLabelText } = await open();
+      await act(async () => {
+        fireEvent.press(await findByLabelText("Record with this rule"));
+      });
+      expect(alert).toHaveBeenCalledWith("Recorded", expect.stringContaining("expense category"));
+      expect(mockGoBack).toHaveBeenCalled();
+    });
+
+    it("asks for a category when the rule has none, with no one-tap button", async () => {
+      ep.getEmailInboxItem.mockResolvedValue(ok(emailDetail(ruleHold({ canRecord: false }))));
+      const { findByText, queryByLabelText, getByLabelText } = await open();
+      expect(
+        await findByText("Rule “Rogers alerts” matched. It has no category, so it can't record on its own: pick one below."),
+      ).toBeTruthy();
+      expect(queryByLabelText("Record with this rule")).toBeNull();
+      expect(queryByLabelText("Record anyway with this rule")).toBeNull();
+      // The form is still there to pick one.
+      expect(getByLabelText("CATEGORY: none")).toBeTruthy();
+    });
+
+    it("says why the server refused to record it with the rule", async () => {
+      ep.getEmailInboxItem.mockResolvedValue(ok(emailDetail(ruleHold())));
+      ep.recordEmailWithRule.mockResolvedValue({ success: false, error: "Cannot record this email", code: "no_matched_rule" });
+      const { findByLabelText, findByText } = await open();
+      await act(async () => {
+        fireEvent.press(await findByLabelText("Record with this rule"));
+      });
+      expect(await findByText(/The rule that matched this email is gone or turned off/)).toBeTruthy();
+      expect(mockGoBack).not.toHaveBeenCalled();
+    });
+
+    it("shows nothing about the rule on an email already recorded", async () => {
+      ep.getEmailInboxItem.mockResolvedValue(ok(emailDetail(ruleHold({ duplicate: amazonDup }))));
+      const { findByText, queryByText } = await open(email({ action: "manually_recorded", recordedTransactionId: 8 }));
+      expect(await findByText(/You spent \$42\.50/)).toBeTruthy();
+      expect(queryByText(/Rogers alerts/)).toBeNull();
+    });
   });
 });
 
