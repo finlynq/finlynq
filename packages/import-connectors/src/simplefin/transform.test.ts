@@ -91,6 +91,29 @@ describe("simplefinToRawTransactions", () => {
     expect(result.errors.some((e) => e.includes("out of range"))).toBe(true);
   });
 
+  it("keeps the provider's own messages separate from rejected rows", () => {
+    expect(result.providerErrors).toEqual(["Connection to Bank X is degraded"]);
+    expect(result.errors[0]).toBe("Connection to Bank X is degraded");
+  });
+
+  it("reduces non-string provider errors to text and drops blank ones", () => {
+    const r = simplefinToRawTransactions({
+      errors: [
+        "  needs attention  ",
+        "",
+        { code: "con.auth", msg: "Reauthenticate Bank Y" },
+        { code: 7 },
+      ] as unknown as string[],
+      accounts: [],
+    });
+    expect(r.providerErrors).toEqual([
+      "needs attention",
+      "Reauthenticate Bank Y",
+      '{"code":7}',
+    ]);
+    expect(r.errors).toEqual(r.providerErrors);
+  });
+
   it("maps posted epoch → YYYY-MM-DD, keeps signed amount, sets fitId", () => {
     const tx1 = result.accounts[0].rows.find((r) => r.fitId === "TX-1")!;
     expect(tx1.date).toBe("2024-01-02");

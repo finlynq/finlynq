@@ -96,7 +96,7 @@ export function summarizeSimplefinSyncOutcome(
         partial: true,
         trigger,
         at,
-        message: `${n} problem${n === 1 ? "" : "s"} reported during the sync. Run a sync from this page to see the details.`,
+        message: `${n} problem${n === 1 ? " was" : "s were"} reported during the sync.`,
       },
       retrySooner: false,
     };
@@ -131,6 +131,36 @@ export function parseSyncStatus(raw: string | null | undefined): SimplefinSyncSt
     partial: o.partial === true,
     trigger: o.trigger === "manual" ? "manual" : "auto",
     at: o.at,
-    ...(typeof o.message === "string" ? { message: o.message } : {}),
+    ...(typeof o.message === "string" ? { message: withoutLegacyHint(o.message) } : {}),
   };
+}
+
+/**
+ * Statuses stored before 2026-10-18 end with a sentence promising details the
+ * page never showed. The page now adds its own call to action, so the old
+ * sentence is dropped on read rather than shown twice.
+ */
+const LEGACY_DETAILS_HINT = " Run a sync from this page to see the details.";
+function withoutLegacyHint(message: string): string {
+  return message.endsWith(LEGACY_DETAILS_HINT)
+    ? message.slice(0, -LEGACY_DETAILS_HINT.length)
+    : message;
+}
+
+/** Longest error text shown as-is for one account; longer means internals. */
+const MAX_ACCOUNT_ERROR_LENGTH = 200;
+
+/**
+ * The line shown to the user when one account fails while being staged. This
+ * text goes back to the user's own browser (never into the plaintext status),
+ * so it may name the account, but a raw database error is replaced: Drizzle's
+ * "Failed query: …" carries the SQL and its parameters (ciphertext included).
+ */
+export function accountProblemMessage(accountName: string, err: unknown): string {
+  const raw = err instanceof Error ? err.message.trim() : "";
+  const usable =
+    raw !== "" && raw.length <= MAX_ACCOUNT_ERROR_LENGTH && !/^failed query/i.test(raw);
+  return usable
+    ? `Account "${accountName}": ${raw}`
+    : `Account "${accountName}": could not be imported because of a server error.`;
 }

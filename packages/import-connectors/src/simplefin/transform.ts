@@ -97,6 +97,10 @@ export interface SimplefinTransformResult {
   skippedPending: number;
   /** Provider-reported errors + per-row rejections (bad amount / date). */
   errors: string[];
+  /** The provider-reported subset of `errors` (SimpleFIN's own messages, e.g.
+   *  a bank connection that needs attention), so callers can tell them apart
+   *  from rows this transform rejected. */
+  providerErrors: string[];
 }
 
 export interface SimplefinTransformOptions {
@@ -116,6 +120,25 @@ export function epochToISODate(epochSeconds: number): string {
 function normalizeCurrency(raw: string | undefined, fallback: string): string {
   if (raw && /^[A-Za-z]{3}$/.test(raw)) return raw.toUpperCase();
   return fallback;
+}
+
+/**
+ * The protocol says `errors` holds strings, but this list ends up rendered on
+ * a page, so a non-string entry is reduced to text here rather than trusted.
+ */
+function providerErrorText(raw: unknown): string {
+  if (typeof raw === "string") return raw.trim();
+  if (raw && typeof raw === "object") {
+    const o = raw as Record<string, unknown>;
+    const msg = o.msg ?? o.message;
+    if (typeof msg === "string") return msg.trim();
+  }
+  if (raw == null) return "";
+  try {
+    return JSON.stringify(raw);
+  } catch {
+    return String(raw);
+  }
 }
 
 function parseAmount(raw: string | number): number {
@@ -153,7 +176,10 @@ export function simplefinToRawTransactions(
 ): SimplefinTransformResult {
   const defaultCurrency = opts.defaultCurrency ?? "USD";
   const includePending = opts.includePending ?? false;
-  const errors: string[] = [...(resp.errors ?? [])];
+  const providerErrors: string[] = (resp.errors ?? [])
+    .map(providerErrorText)
+    .filter((e) => e !== "");
+  const errors: string[] = [...providerErrors];
   let skippedPending = 0;
 
   const accounts: SimplefinAccountRows[] = [];
@@ -231,5 +257,5 @@ export function simplefinToRawTransactions(
     });
   }
 
-  return { accounts, skippedPending, errors };
+  return { accounts, skippedPending, errors, providerErrors };
 }
