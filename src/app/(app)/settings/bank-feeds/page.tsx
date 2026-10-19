@@ -92,6 +92,47 @@ interface SyncResult {
   errors: string[];
 }
 
+const SIMPLEFIN_BRIDGE_URL = "https://beta-bridge.simplefin.org/";
+
+/**
+ * The problems a sync reported, as SimpleFIN or the import worded them. The
+ * stored status only keeps a count (it is plaintext and the texts can name a
+ * bank or an account), so these come from the live preview/sync response.
+ */
+function SyncProblems({ problems }: { problems: string[] }) {
+  if (!problems?.length) return null;
+  return (
+    <div
+      role="alert"
+      className="rounded-lg border border-amber-600/30 bg-amber-50 dark:bg-amber-950/30 px-3 py-2 text-xs text-amber-700 dark:text-amber-400 space-y-1.5"
+    >
+      <p className="flex items-center gap-1.5 font-medium">
+        <AlertTriangle className="h-3.5 w-3.5 shrink-0" />
+        {problems.length === 1
+          ? "1 problem was reported during this sync"
+          : `${problems.length} problems were reported during this sync`}
+      </p>
+      <ul className="list-disc pl-5 space-y-0.5 break-words">
+        {problems.map((p, i) => (
+          <li key={i}>{p}</li>
+        ))}
+      </ul>
+      <p>
+        Messages about a bank connection come from SimpleFIN: sign in at{" "}
+        <a
+          href={SIMPLEFIN_BRIDGE_URL}
+          target="_blank"
+          rel="noreferrer noopener"
+          className="underline underline-offset-2 hover:text-amber-900 dark:hover:text-amber-300"
+        >
+          simplefin.org
+        </a>{" "}
+        and check that bank there. Accounts without a problem still synced.
+      </p>
+    </div>
+  );
+}
+
 function formatDateTime(iso: string): string {
   const d = new Date(iso);
   if (Number.isNaN(d.getTime())) return iso;
@@ -265,6 +306,11 @@ export default function BankFeedsSettingsPage() {
   const setChoice = (externalId: string, choice: Choice) =>
     setChoices((prev) => ({ ...prev, [externalId]: choice }));
 
+  const newTotal = stageResult ? stageResult.staged.reduce((n, s) => n + s.newCount, 0) : 0;
+  const duplicateTotal = stageResult
+    ? stageResult.staged.reduce((n, s) => n + s.duplicateCount, 0)
+    : 0;
+
   const totalToStage = preview
     ? preview.accounts.reduce(
         (n, a) => (a.status === "mapped" || choices[a.externalId] ? n + a.txCount : n),
@@ -351,8 +397,10 @@ export default function BankFeedsSettingsPage() {
                 </div>
               </div>
 
-              {/* ── Last sync (automatic or manual) failed or reported problems ── */}
-              {status.lastSync && !status.lastSync.ok && (
+              {/* ── Last sync (automatic or manual) failed or reported problems ──
+                  Hidden while a detect or import result is on screen: that
+                  result lists the problems themselves, which this cannot. */}
+              {status.lastSync && !status.lastSync.ok && !preview && !stageResult && (
                 <div
                   role="status"
                   className="flex items-start gap-2 rounded-lg border border-amber-600/30 bg-amber-50 dark:bg-amber-950/30 px-3 py-2 text-xs text-amber-700 dark:text-amber-400"
@@ -362,27 +410,24 @@ export default function BankFeedsSettingsPage() {
                     {status.lastSync.trigger === "auto" ? "Automatic sync" : "Sync"}{" "}
                     {status.lastSync.partial ? "finished with problems" : "failed"} on{" "}
                     {formatDateTime(status.lastSync.at)}.
-                    {status.lastSync.message ? ` ${status.lastSync.message}` : ""}
-                    {!preview && (
-                      <>
-                        {" "}
-                        <button
-                          type="button"
-                          onClick={handleDetect}
-                          disabled={detecting}
-                          className="underline underline-offset-2 hover:text-amber-900 dark:hover:text-amber-300 disabled:opacity-50"
-                        >
-                          Sync now
-                        </button>{" "}
-                        to try again.
-                      </>
-                    )}
+                    {status.lastSync.message ? ` ${status.lastSync.message}` : ""}{" "}
+                    <button
+                      type="button"
+                      onClick={handleDetect}
+                      disabled={detecting}
+                      className="underline underline-offset-2 hover:text-amber-900 dark:hover:text-amber-300 disabled:opacity-50"
+                    >
+                      Sync now
+                    </button>{" "}
+                    {status.lastSync.partial ? "to see what they were." : "to try again."}
                   </span>
                 </div>
               )}
 
               {detectError && <p className="text-sm text-destructive">{detectError}</p>}
               {stageError && <p className="text-sm text-destructive">{stageError}</p>}
+
+              {preview && <SyncProblems problems={preview.errors} />}
 
               {/* ── Detected accounts: create/link mapping ── */}
               {preview && (
@@ -482,13 +527,16 @@ export default function BankFeedsSettingsPage() {
               )}
 
               {/* ── Result after staging ── */}
+              {stageResult && <SyncProblems problems={stageResult.errors} />}
               {stageResult && (
                 <div className="rounded-xl border bg-muted/30 p-4 space-y-2">
-                  <p className="text-sm font-medium">Ready for review</p>
+                  <p className="text-sm font-medium">
+                    {newTotal > 0 ? "Ready for review" : "Nothing new to import"}
+                  </p>
                   <p className="text-sm text-muted-foreground">
-                    {stageResult.staged.reduce((n, s) => n + s.rowCount, 0)} transaction
-                    {stageResult.staged.reduce((n, s) => n + s.rowCount, 0) === 1 ? "" : "s"} staged
-                    across {stageResult.staged.length} account
+                    {newTotal} new transaction{newTotal === 1 ? "" : "s"}
+                    {duplicateTotal > 0 ? ` · ${duplicateTotal} already in Finlynq` : ""} · from{" "}
+                    {stageResult.staged.length} account
                     {stageResult.staged.length === 1 ? "" : "s"}
                     {stageResult.accountsCreated > 0
                       ? ` · ${stageResult.accountsCreated} account${stageResult.accountsCreated === 1 ? "" : "s"} created`
@@ -535,7 +583,7 @@ export default function BankFeedsSettingsPage() {
               {connectError && <p className="text-sm text-destructive">{connectError}</p>}
               <div className="flex items-center justify-between gap-3">
                 <a
-                  href="https://beta-bridge.simplefin.org/"
+                  href={SIMPLEFIN_BRIDGE_URL}
                   target="_blank"
                   rel="noreferrer noopener"
                   className="inline-flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground hover:underline"

@@ -42,6 +42,7 @@ import { simplefin } from "@finlynq/import-connectors";
 import { normalizeDbRows } from "@/lib/db-utils";
 import {
   AUTO_SYNC_MIN_INTERVAL_MS,
+  accountProblemMessage,
   parseSyncStatus,
   retryStampIso,
   summarizeSimplefinSyncOutcome,
@@ -290,7 +291,13 @@ export async function syncSimpleFin(
   dek: Buffer,
   choices: Record<string, SimplefinAccountChoice> = {},
 ): Promise<SimplefinSyncResult> {
-  const { accounts, skippedPending, errors } = await fetchAndTransform(userId, dek);
+  const { accounts, skippedPending, errors, providerErrors } = await fetchAndTransform(
+    userId,
+    dek,
+  );
+  // Problems found before any account is processed: SimpleFIN's own messages
+  // plus rows the transform rejected. Per-account failures are added below.
+  const fetchProblemCount = errors.length;
   const { byId, byName } = await loadAccountsFull(userId, dek);
   const accountMap =
     (await loadConnectorCredentials<Record<string, string>>(userId, ACCOUNT_MAP_ID, dek)) ?? {};
@@ -442,14 +449,26 @@ export async function syncSimpleFin(
       sweptStaleRows: advance.sweptStaleRows,
     });
    } catch (err) {
-      errors.push(
-        `Account "${acct.name}": ${err instanceof Error ? err.message : "sync failed"}`,
-      );
+      // The full error goes to the server log (no account name: names are
+      // encrypted at rest); the user gets a readable line naming the account.
+      console.warn(`[simplefin] user=${userId} an account failed to stage:`, err);
+      errors.push(accountProblemMessage(acct.name, err));
     }
   }
 
   if (mapDirty) {
     await saveConnectorCredentials(userId, ACCOUNT_MAP_ID, dek, accountMap);
+  }
+
+  if (errors.length > 0) {
+    // Counts only. The texts can name a bank or an account, and the user sees
+    // them on the Bank feeds page; the log only has to say which kind occurred.
+    console.warn(
+      `[simplefin] user=${userId} sync problems=${errors.length}` +
+        ` simplefin=${providerErrors.length}` +
+        ` rows=${fetchProblemCount - providerErrors.length}` +
+        ` accounts=${errors.length - fetchProblemCount}`,
+    );
   }
 
   return { staged, accountsCreated, skippedNoChoice, skippedPending, errors };
