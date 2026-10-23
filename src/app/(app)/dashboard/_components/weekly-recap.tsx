@@ -83,11 +83,14 @@ export function WeeklyRecap() {
         </CardHeader>
 
         <CardContent className="px-5">
-          {/* Summary: Spent / Income / Cash Flow */}
-          <div className="grid grid-cols-3 gap-4 mb-4">
-            <div>
+          {/* Summary: Spent / Income / Net Flow. Each figure stays on one line at
+              its own width; when the three don't fit side by side (a long symbol
+              like HK$ in the mono numerals on a third-width card), the next one
+              wraps to a new row. Fixed thirds made them overlap and cut off. */}
+          <div className="flex flex-wrap gap-x-5 gap-y-3 mb-4">
+            <div className="grow">
               <p className="text-[11px] text-muted-foreground mb-0.5">Spent</p>
-              <p className="text-lg font-bold tracking-tight tabular-nums">
+              <p className="text-lg font-bold tracking-tight tabular-nums whitespace-nowrap">
                 {formatCurrency(recap.spending.total, displayCurrency)}
               </p>
               <span className={`inline-flex items-center gap-0.5 text-[11px] font-semibold ${spendingUp ? "text-rose-500" : "text-emerald-500"}`}>
@@ -95,15 +98,15 @@ export function WeeklyRecap() {
                 {Math.abs(recap.spending.changePercent)}%
               </span>
             </div>
-            <div>
+            <div className="grow">
               <p className="text-[11px] text-muted-foreground mb-0.5">Income</p>
-              <p className="text-lg font-bold tracking-tight text-emerald-600 dark:text-emerald-400 tabular-nums">
+              <p className="text-lg font-bold tracking-tight text-emerald-600 dark:text-emerald-400 tabular-nums whitespace-nowrap">
                 {formatCurrency(recap.income.total, displayCurrency)}
               </p>
             </div>
-            <div>
+            <div className="grow">
               <p className="text-[11px] text-muted-foreground mb-0.5">Net Flow</p>
-              <p className={`text-lg font-bold tracking-tight tabular-nums ${recap.netCashFlow >= 0 ? "text-emerald-600 dark:text-emerald-400" : "text-rose-500"}`}>
+              <p className={`text-lg font-bold tracking-tight tabular-nums whitespace-nowrap ${recap.netCashFlow >= 0 ? "text-emerald-600 dark:text-emerald-400" : "text-rose-500"}`}>
                 {formatCurrency(recap.netCashFlow, displayCurrency)}
               </p>
             </div>
