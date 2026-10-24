@@ -1,4 +1,4 @@
-import React, { useMemo, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import {
   View,
   Text,
@@ -16,8 +16,15 @@ import { useNavigation, useRoute, type RouteProp } from "@react-navigation/nativ
 import { useTheme } from "../theme";
 import { endpoints } from "../api/client";
 import { logger } from "../lib/logger";
-import { ACCOUNT_TYPES, ACCOUNT_GROUPS, COMMON_CURRENCIES } from "../lib/constants";
+import {
+  ACCOUNT_TYPES,
+  ACCOUNT_GROUPS,
+  COMMON_CURRENCIES,
+  CURRENCY_PICKER_OPTIONS,
+  DISPLAY_CURRENCIES,
+} from "../lib/constants";
 import { accountFormFromRow } from "../lib/edit-prefill";
+import { PickerSheet } from "../components/picker-sheet";
 import type { AccountsStackParamList } from "../navigation/AccountsStack";
 
 type AccountType = "A" | "L";
@@ -38,6 +45,50 @@ export default function AddAccountScreen() {
   const [alias, setAlias] = useState(init.alias);
   const [note, setNote] = useState(init.note);
   const [saving, setSaving] = useState(false);
+  const [currencies, setCurrencies] = useState<string[]>([...COMMON_CURRENCIES]);
+  const [currencyPickerOpen, setCurrencyPickerOpen] = useState(false);
+  // Set once the user picks a currency, so a late display-currency response
+  // never overwrites their choice.
+  const currencyTouched = useRef(false);
+  // A new account (or a row saved without a currency) starts in the user's
+  // display currency; `init` holds the USD fallback until it arrives.
+  const needsCurrencyDefault = !editAccount?.currency;
+
+  useEffect(() => {
+    if (!needsCurrencyDefault) return;
+    endpoints
+      .getDisplayCurrency()
+      .then((r) => {
+        if (r.success && r.data?.displayCurrency && !currencyTouched.current) {
+          setCurrency(r.data.displayCurrency);
+        }
+      })
+      .catch(() => {});
+  }, [needsCurrencyDefault]);
+
+  // The currency chips come from the user's own active set (the same list the
+  // web's account form offers), always including the form's current value.
+  // Anything else is one tap away under "More…".
+  useEffect(() => {
+    endpoints
+      .getActiveCurrencies()
+      .then((r) => {
+        if (r.success && Array.isArray(r.data?.active) && r.data.active.length > 0) {
+          setCurrencies(r.data.active);
+        }
+      })
+      .catch(() => {});
+  }, []);
+
+  const currencyOptions = useMemo(
+    () => (currency && !currencies.includes(currency) ? [currency, ...currencies] : currencies),
+    [currencies, currency],
+  );
+  const pickCurrency = (c: string) => {
+    currencyTouched.current = true;
+    setCurrency(c);
+  };
+  const selectedCurrencyId = DISPLAY_CURRENCIES.findIndex((c) => c.code === currency);
 
   // Flipping type swaps the valid group list — reset group to the first option
   // of the new type so we never submit a group that belongs to the other type.
@@ -84,7 +135,8 @@ export default function AddAccountScreen() {
   const renderChips = <T extends string | number>(
     options: { value: T; label: string }[] | readonly T[],
     selected: T,
-    onSelect: (v: T) => void
+    onSelect: (v: T) => void,
+    trailing?: React.ReactNode,
   ) => (
     <ScrollView horizontal showsHorizontalScrollIndicator={false} style={fieldStyles.chipRow}>
       {options.map((opt) => {
@@ -115,6 +167,7 @@ export default function AddAccountScreen() {
           </TouchableOpacity>
         );
       })}
+      {trailing}
     </ScrollView>
   );
 
@@ -170,7 +223,23 @@ export default function AddAccountScreen() {
             {/* Currency */}
             <View style={fieldStyles.container}>
               <Text style={[fieldStyles.label, { color: colors.mutedForeground }]}>CURRENCY</Text>
-              {renderChips(COMMON_CURRENCIES, currency, setCurrency)}
+              {renderChips(
+                currencyOptions,
+                currency,
+                pickCurrency,
+                <TouchableOpacity
+                  onPress={() => setCurrencyPickerOpen(true)}
+                  accessibilityLabel="More currencies"
+                  style={[
+                    fieldStyles.chip,
+                    { backgroundColor: colors.secondary, borderColor: colors.border },
+                  ]}
+                >
+                  <Text style={[fieldStyles.chipText, { color: colors.primary }]} numberOfLines={1}>
+                    More…
+                  </Text>
+                </TouchableOpacity>,
+              )}
             </View>
 
             {/* Alias (optional) */}
@@ -210,6 +279,18 @@ export default function AddAccountScreen() {
           )}
         </ScrollView>
       </KeyboardAvoidingView>
+
+      <PickerSheet
+        visible={currencyPickerOpen}
+        title="Currency"
+        options={CURRENCY_PICKER_OPTIONS}
+        selectedId={selectedCurrencyId >= 0 ? selectedCurrencyId : null}
+        onSelect={(id) => {
+          const code = DISPLAY_CURRENCIES[id]?.code;
+          if (code) pickCurrency(code);
+        }}
+        onClose={() => setCurrencyPickerOpen(false)}
+      />
     </SafeAreaView>
   );
 }

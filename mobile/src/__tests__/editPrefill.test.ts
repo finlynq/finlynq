@@ -16,10 +16,16 @@ describe("accountFormFromRow", () => {
       name: "",
       type: "A",
       group: "Cash",
-      currency: "CAD",
+      currency: "USD",
       alias: "",
       note: "",
     });
+  });
+
+  it("starts a new account (or a row saved without a currency) in the given display currency", () => {
+    expect(accountFormFromRow(null, "CHF").currency).toBe("CHF");
+    const row: AccountDetailRow = { id: 3, type: "A", group: "Cash", name: "Wallet", currency: "", mode: "manual" };
+    expect(accountFormFromRow(row, "CHF").currency).toBe("CHF");
   });
 
   it("maps a row's fields into input strings", () => {

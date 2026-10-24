@@ -5,6 +5,8 @@
 //   - GOAL_TYPES / GOAL_PRIORITIES — goals page (src/app/(app)/goals/page.tsx)
 // Keep these in sync if the web lists change.
 
+import type { PickerOption } from "../components/picker-sheet";
+
 export const ACCOUNT_TYPES: { value: "A" | "L"; label: string }[] = [
   { value: "A", label: "Asset" },
   { value: "L", label: "Liability" },
@@ -37,16 +39,15 @@ export const GOAL_PRIORITIES: { value: number; label: string }[] = [
   { value: 3, label: "Low" },
 ];
 
-// Small currency picker list. Display-currency-aware defaulting is a follow-up;
-// the pickers default to CAD for now.
+// Fallback currency chips, shown only until the user's own list (GET
+// /api/settings/active-currencies) arrives, or if that fetch fails. A record's
+// currency chips come from that list, never from this one.
 export const COMMON_CURRENCIES = ["CAD", "USD", "EUR", "GBP"] as const;
-
-export const DEFAULT_CURRENCY = "CAD";
 
 // Fallback when the user's display currency (GET /api/settings/display-currency)
 // is unknown or the fetch failed. Matches the server's DEFAULT_DISPLAY_CURRENCY
-// (USD, FINLYNQ-183) — never CAD. Goals + budgets default new records to the
-// display currency, not to DEFAULT_CURRENCY.
+// (USD, FINLYNQ-183) — never CAD. Accounts, goals and budgets default new
+// records to the display currency.
 export const DISPLAY_CURRENCY_FALLBACK = "USD";
 
 // Display-currency picker (Settings → GENERAL). Mirrors the web
@@ -88,3 +89,11 @@ export const DISPLAY_CURRENCIES: { code: string; label: string }[] = [
   { code: "COP", label: "Colombian Peso" },
   { code: "CLP", label: "Chilean Peso" },
 ];
+
+// DISPLAY_CURRENCIES as PickerSheet rows (display-currency picker in Settings,
+// "More…" on Add Account). PickerSheet keys on a numeric id, so each row's id is
+// its index in DISPLAY_CURRENCIES; map it back with DISPLAY_CURRENCIES[id].code.
+export const CURRENCY_PICKER_OPTIONS: PickerOption[] = DISPLAY_CURRENCIES.map((c, i) => ({
+  id: i,
+  label: `${c.code} — ${c.label}`,
+}));

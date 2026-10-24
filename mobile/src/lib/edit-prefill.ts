@@ -6,7 +6,6 @@
 
 import {
   ACCOUNT_GROUPS,
-  DEFAULT_CURRENCY,
   DISPLAY_CURRENCY_FALLBACK,
   GOAL_TYPES,
   GOAL_PRIORITIES,
@@ -26,15 +25,21 @@ export interface AccountFormState {
   note: string;
 }
 
+/**
+ * `defaultCurrency` is the user's display currency: a new account (and a row
+ * stored without one) starts in it, never in a hardcoded CAD. Callers that
+ * haven't resolved it yet get the USD fallback and re-seed once it loads.
+ */
 export function accountFormFromRow(
   row: AccountDetailRow | null | undefined,
+  defaultCurrency: string = DISPLAY_CURRENCY_FALLBACK,
 ): AccountFormState {
   if (!row) {
     return {
       name: "",
       type: "A",
       group: ACCOUNT_GROUPS.A[0],
-      currency: DEFAULT_CURRENCY,
+      currency: defaultCurrency,
       alias: "",
       note: "",
     };
@@ -48,7 +53,7 @@ export function accountFormFromRow(
     group: ACCOUNT_GROUPS[type].includes(row.group)
       ? row.group
       : ACCOUNT_GROUPS[type][0],
-    currency: row.currency || DEFAULT_CURRENCY,
+    currency: row.currency || defaultCurrency,
     alias: row.alias ?? "",
     note: row.note ?? "",
   };

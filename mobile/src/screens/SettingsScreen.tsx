@@ -21,18 +21,11 @@ import { useAuth } from "../hooks/useAuth";
 import { getServerUrl, endpoints } from "../api/client";
 import { logger } from "../lib/logger";
 import { getLogs, clearLogs, type LogEntry, type LogLevel } from "../lib/logger";
-import { PickerSheet, type PickerOption } from "../components/picker-sheet";
-import { DISPLAY_CURRENCIES } from "../lib/constants";
+import { PickerSheet } from "../components/picker-sheet";
+import { CURRENCY_PICKER_OPTIONS, DISPLAY_CURRENCIES } from "../lib/constants";
 import type { MoreStackParamList } from "../navigation/MoreStack";
 
 type Nav = NativeStackNavigationProp<MoreStackParamList, "Settings">;
-
-// The PickerSheet keys on a numeric `id`, so each currency's id is its index in
-// DISPLAY_CURRENCIES; onSelect maps the index back to the 3-letter code.
-const CURRENCY_OPTIONS: PickerOption[] = DISPLAY_CURRENCIES.map((c, i) => ({
-  id: i,
-  label: `${c.code} — ${c.label}`,
-}));
 
 const AUTO_LOCK_OPTIONS = [
   { label: "Disabled", value: 0 },
@@ -714,7 +707,7 @@ export default function SettingsScreen() {
       <PickerSheet
         visible={currencyPickerOpen}
         title="Display currency"
-        options={CURRENCY_OPTIONS}
+        options={CURRENCY_PICKER_OPTIONS}
         selectedId={
           displayCurrency
             ? DISPLAY_CURRENCIES.findIndex((c) => c.code === displayCurrency)
