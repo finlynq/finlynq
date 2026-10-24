@@ -197,3 +197,13 @@ npx eas build --platform ios --profile production --auto-submit --non-interactiv
   read** with the web's "why this needs a look" reasons, then the record form. Recorded emails open
   read-only. Uses `GET /api/import/email-inbox/[id]` (on prod already). Upload and bank-feed files
   waiting for review are no longer listed here (they never were before 1.0.26).
+- **1.0.28 / vc37 (Android internal testing only)** (2026-10-24; no iOS build): **Add Account offers
+  your own currencies** (in-app feedback: Swiss francs could be chosen as the display currency but
+  not for an account). The screen used a fixed CAD / USD / EUR / GBP list and started every new
+  account in CAD; it now shows the "Currencies you use" list (`GET /api/settings/active-currencies`,
+  the same list as the web's account form and the app's Add Loan / Goal / Subscription), starts a new
+  account in the display currency, and has a **More…** list for any other currency. Works against
+  any current server; the related web change (a new display currency joins a saved "Currencies you
+  use" list, `5382bb3`) is on dev. Also in this build: a waiting email that a rule matched **says why
+  it is waiting** and can be **recorded with that rule** in one tap (server side is web PR #381,
+  prod since 2026-10-16).
