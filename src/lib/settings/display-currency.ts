@@ -23,6 +23,29 @@ type DbOrTx = DrizzleDb | TxClient;
 export const DEFAULT_DISPLAY_CURRENCY = "USD";
 
 /**
+ * The saved "Currencies you use" list (`settings.active_currencies`, raw JSON)
+ * with `currency` added, or null when nothing needs writing: no saved list (the
+ * derived one already starts from the display currency), a value the
+ * `/api/settings/active-currencies` reader would ignore too, or a list that
+ * already has it. Pure.
+ */
+export function addToSavedActiveCurrencies(
+  savedRaw: string | null | undefined,
+  currency: string,
+): string[] | null {
+  if (!savedRaw) return null;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(savedRaw);
+  } catch {
+    return null;
+  }
+  if (!Array.isArray(parsed) || !parsed.every((x) => typeof x === "string")) return null;
+  if (parsed.some((c) => c.trim().toUpperCase() === currency)) return null;
+  return [...parsed, currency].sort();
+}
+
+/**
  * Persist a user's display currency. Idempotent. Returns whether the value
  * actually changed (drives the fire-and-forget reporting-amount recompute,
  * exactly as the PUT route did). Does NOT validate the currency against the
@@ -55,6 +78,34 @@ export async function setDisplayCurrency(
       target: [schema.settings.key, schema.settings.userId],
       set: { value: currency },
     });
+
+  // A currency the user reports in belongs in their "Currencies you use" list,
+  // which is what every record form (account, transaction, goal, loan…) offers.
+  // A saved list never picked up a new display currency, so someone reporting
+  // in CHF still couldn't open a CHF account (in-app feedback 2026-10-23).
+  // Runs on every call, not just a change, so an older mismatch heals too.
+  const saved = await db
+    .select({ value: schema.settings.value })
+    .from(schema.settings)
+    .where(
+      and(
+        eq(schema.settings.key, "active_currencies"),
+        eq(schema.settings.userId, userId),
+      ),
+    )
+    .limit(1);
+  const nextActive = addToSavedActiveCurrencies(saved[0]?.value, currency);
+  if (nextActive) {
+    await db
+      .update(schema.settings)
+      .set({ value: JSON.stringify(nextActive) })
+      .where(
+        and(
+          eq(schema.settings.key, "active_currencies"),
+          eq(schema.settings.userId, userId),
+        ),
+      );
+  }
 
   // Currency rework Phase 3 — re-derive every transaction's stored reporting
   // amount at historical rates. Fire-and-forget: the persistent Node server
