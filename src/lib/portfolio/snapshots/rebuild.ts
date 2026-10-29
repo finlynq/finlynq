@@ -12,7 +12,7 @@
 
 import { and, eq, isNotNull, sql } from "drizzle-orm";
 import { db, schema } from "@/db";
-import { buildDailySnapshot } from "@/lib/portfolio/snapshots/builder";
+import { buildDailySnapshot, loadInvestmentAccountsActiveSince } from "@/lib/portfolio/snapshots/builder";
 import { rebuildCashSnapshots } from "@/lib/portfolio/snapshots/cash-builder";
 import { withOp } from "@/lib/diagnostics/op-context";
 
@@ -424,9 +424,11 @@ async function rebuildPortfolioSnapshotsImpl(
     // Guard against pathological input (≈30y of days).
     const MAX_DAYS = 30 * 366;
     let guard = 0;
+    // Which accounts get a row each day (zero when empty), loaded once.
+    const activeAccounts = await loadInvestmentAccountsActiveSince(userId);
     while (day <= to && guard < MAX_DAYS) {
       guard++;
-      const result = await buildDailySnapshot({ userId, date: day, dek: dek ?? null });
+      const result = await buildDailySnapshot({ userId, date: day, dek: dek ?? null, activeAccounts });
       if (result.gapsFilled) gapsFilledDays++;
       daysProcessed++;
       // Emit incremental progress (status registry / future stream consumers).
