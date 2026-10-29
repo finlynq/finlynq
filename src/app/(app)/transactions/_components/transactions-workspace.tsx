@@ -311,16 +311,9 @@ export function TransactionsWorkspace({
   // ── CSV export of the current filtered view ──────────────────────────
   // Re-fetches GET /api/transactions with the SAME buildTransactionQuery the
   // table uses (FINLYNQ-115 — never hand-roll params), but with page 0 + a
-  // high limit so a single request returns the whole filtered set. The route
-  // caps the underlying candidate set at 1000 rows whenever a post-decrypt
-  // (search / tag / encrypted-substring) filter is active — surfaced inline.
+  // high limit so a single request returns the whole filtered set, text
+  // searches included (the route matches them across the whole history).
   const [exporting, setExporting] = useState(false);
-  // Mirrors the server's `postDecryptFilter`: text search, tag, or any
-  // text-type per-column filter forces the in-memory 1000-row pass.
-  const hasTextSearchFilter =
-    !!filters.search ||
-    !!filters.tag ||
-    colFilters.some((f) => f.type === "text");
   const exportColumns: CsvColumn<Transaction>[] = [
     { header: "Date", accessor: (t) => t.date },
     { header: "Account", accessor: (t) => t.accountAlias || t.accountName },
@@ -340,8 +333,7 @@ export function TransactionsWorkspace({
     setExporting(true);
     try {
       // Same builder + filter/sort state the table uses; page 0 + high limit
-      // pulls the entire filtered view in one shot (the route honors `limit`
-      // directly when no post-decrypt filter is set, else caps at 1000).
+      // pulls the entire filtered view in one shot.
       const params = buildTransactionQuery(listFilters, sortPref, colFilters, accounts, {
         page: 0,
         limit: 100000,
@@ -913,11 +905,6 @@ export function TransactionsWorkspace({
               {exporting ? "Exporting…" : "Export CSV"}
             </Button>
           </div>
-          {hasTextSearchFilter && (
-            <p className="text-xs text-muted-foreground">
-              Exports of a text-searched view are capped at the first 1,000 matching transactions.
-            </p>
-          )}
           {/* Issue #59 — per-column filter chips. Each chip drops just its
               own filter when clicked; "Clear all" above wipes the lot. */}
           {(colFilters.length > 0 || sortPref.columnId) && (
