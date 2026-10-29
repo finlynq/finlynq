@@ -150,6 +150,10 @@ export type TxSortFilter = {
   // `eq(transactions.userId, userId)`), so `?id=<another user's id>` and
   // `?id=<nonexistent>` both return zero rows — never the full list.
   id?: number;
+  // The page of rows the encrypted-text filters matched
+  // (transactions/search-scan.ts). Owner-scoped like `id`; an EMPTY array
+  // matches nothing.
+  ids?: number[];
   startDate?: string;
   endDate?: string;
   // Audit-trio range filters (issue #59). All ISO timestamps; gte/lte
@@ -171,7 +175,7 @@ export type TxSortFilter = {
   // them; the route decrypts the user's (small) holdings/securities symbol set,
   // substring-matches the needle, and pushes the matching `portfolio_holding_id`
   // set down here. This keeps the ticker filter SQL-side (scales to any ledger
-  // size) instead of an in-memory pass over a capped 1000-row window. An EMPTY
+  // size) instead of a decrypt-and-match pass over every row. An EMPTY
   // array means "the needle matched no holding" → match nothing.
   portfolioHoldingIds?: number[];
   // Numeric range pushdown for amount / quantity columns. Both are signed
@@ -199,6 +203,9 @@ function buildTxFilterConditions(userId: string, filters?: TxSortFilter) {
   // FINLYNQ-177 — single-tx id pushdown. Combined with the user_id predicate
   // above, so another user's id (or a nonexistent one) yields zero rows.
   if (filters?.id != null) conditions.push(eq(transactions.id, filters.id));
+  if (filters?.ids) {
+    conditions.push(filters.ids.length === 0 ? sql`1 = 0` : inArray(transactions.id, filters.ids));
+  }
   if (filters?.startDate) conditions.push(gte(transactions.date, filters.startDate));
   if (filters?.endDate) conditions.push(lte(transactions.date, filters.endDate));
   if (filters?.createdAtFrom) {
@@ -277,15 +284,19 @@ function txSortExpr(id: SortableColumnId): AnyColumn {
   }
 }
 
-export async function getTransactions(userId: string, filters?: TxSortFilter) {
-  const conditions = buildTxFilterConditions(userId, filters);
-
-  // Default = `date DESC`. Add `transactions.id DESC` as a stable tiebreaker
-  // so paginated results don't shuffle when many rows share the same value
-  // (especially common when sorting by `source` or `accountType`).
+/** Default = `date DESC`. `transactions.id DESC` is a stable tiebreaker so
+ * paginated results don't shuffle when many rows share the same value
+ * (especially common when sorting by `source` or `accountType`). The
+ * `accountType` sort needs `accounts` joined. */
+function txOrderClauses(filters?: TxSortFilter) {
   const direction = filters?.sortDirection === "asc" ? asc : desc;
   const sortCol = filters?.sortColumnId ? txSortExpr(filters.sortColumnId) : transactions.date;
-  const orderClauses = [direction(sortCol), desc(transactions.id)];
+  return [direction(sortCol), desc(transactions.id)];
+}
+
+export async function getTransactions(userId: string, filters?: TxSortFilter) {
+  const conditions = buildTxFilterConditions(userId, filters);
+  const orderClauses = txOrderClauses(filters);
 
   const query = db
     .select({
@@ -353,6 +364,30 @@ export async function getTransactions(userId: string, filters?: TxSortFilter) {
     .offset(filters?.offset ?? 0);
 
   return query.all();
+}
+
+/**
+ * EVERY row the SQL filters allow (limit/offset ignored), in list order, with
+ * only what the encrypted-text filters read: payee / note / tags ciphertext
+ * plus the account and holding ids. Feeds the whole-history search in
+ * transactions/search-scan.ts, which then fetches full rows for one page.
+ */
+export async function getTransactionSearchRows(userId: string, filters?: TxSortFilter) {
+  const conditions = buildTxFilterConditions(userId, filters);
+  return db
+    .select({
+      id: transactions.id,
+      accountId: transactions.accountId,
+      portfolioHoldingId: transactions.portfolioHoldingId,
+      payee: transactions.payee,
+      note: transactions.note,
+      tags: transactions.tags,
+    })
+    .from(transactions)
+    .leftJoin(accounts, eq(transactions.accountId, accounts.id))
+    .where(and(...conditions))
+    .orderBy(...txOrderClauses(filters))
+    .all();
 }
 
 export async function getTransactionCount(userId: string, filters?: TxSortFilter): Promise<number> {

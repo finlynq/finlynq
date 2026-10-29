@@ -2,8 +2,9 @@ import { NextRequest, NextResponse } from "next/server";
 import { getTransactions, getTransactionCount, createTransaction, updateTransaction, getAccountById, type TxSortFilter } from "@/lib/queries";
 import { requireAuth } from "@/lib/auth/require-auth";
 import { requireEncryption } from "@/lib/auth/require-encryption";
-import { encryptTxWrite, decryptTxRows, filterDecryptedBySearch, nameLookup, decryptName } from "@/lib/crypto/encrypted-columns";
-import { decryptField } from "@/lib/crypto/envelope";
+import { encryptTxWrite, decryptTxRows, nameLookup, decryptName } from "@/lib/crypto/encrypted-columns";
+import { findMatchingTransactionIds, getTransactionsByIds } from "@/lib/transactions/search-scan";
+import { holdingDisplayName } from "@/lib/transactions/search-match";
 import { invalidateUser as invalidateUserTxCache } from "@/lib/mcp/user-tx-cache";
 import { buildHoldingResolver } from "@/lib/external-import/portfolio-holding-resolver";
 import { convertToAccountCurrency } from "@/lib/currency-conversion";
@@ -192,10 +193,9 @@ export async function GET(request: NextRequest) {
   const filterPortfolioTicker = params.get("filter_portfolioTicker") ?? undefined;
   const filterTags = params.get("filter_tags") ?? undefined;
   // NOTE: `filterPortfolioTicker` is deliberately NOT in this set. Unlike the
-  // other encrypted-substring filters (which scan decrypted text post-fetch),
-  // the ticker filter is resolved to a holding-id set below and pushed into SQL,
-  // so it must NOT trigger the capped 1000-row post-decrypt window — that cap
-  // hid XAU/metal rows older than the 1000 most-recent across "All accounts".
+  // other encrypted-substring filters (matched on decrypted text by
+  // transactions/search-scan.ts), the ticker filter is resolved to a
+  // holding-id set below and pushed into SQL, which needs no decrypt scan.
   const hasEncryptedSubstringFilter = !!(
     filterPayee || filterNote || filterAccountName || filterAccountAlias ||
     filterPortfolio || filterTags
@@ -270,6 +270,8 @@ export async function GET(request: NextRequest) {
 
   // FK filter is SQL-side, so it's NOT a postDecryptFilter — paginate normally.
   const postDecryptFilter = search || tag || hasEncryptedSubstringFilter;
+  const limit = params.get("limit") ? parseInt(params.get("limit")!) : 100;
+  const offset = params.get("offset") ? parseInt(params.get("offset")!) : 0;
   const filters: TxSortFilter = {
     id: idFilter,
     startDate: params.get("startDate") ?? undefined,
@@ -293,15 +295,46 @@ export async function GET(request: NextRequest) {
     sources: parseSourcesList(),
     sortColumnId,
     sortDirection,
-    // Search is applied after decryption, so don't push it into the SQL filter.
-    // Pull a wider page when any post-decrypt filter is set so the in-memory
-    // pass doesn't paginate an empty window. The client still honors the
-    // original limit.
-    limit: postDecryptFilter ? 1000 : (params.get("limit") ? parseInt(params.get("limit")!) : 100),
-    offset: postDecryptFilter ? 0 : (params.get("offset") ? parseInt(params.get("offset")!) : 0),
+    limit,
+    offset,
   };
 
-  const rawRows = await getTransactions(userId, filters);
+  // Securities master read-flip — when on, the displayed holding identity comes
+  // from the centralized `securities` row (single source of truth), so a renamed
+  // security (e.g. a cash sleeve "Cash USD") shows here, not the stale position
+  // name. Off / unlinked → the holding's own name (legacy behavior).
+  const securitiesRead = await securitiesReadEnabledForUser(userId);
+
+  // Search, tag and the encrypted-column substring filters match DECRYPTED
+  // text, so SQL can't apply them. Match them across EVERY row the SQL filters
+  // allow, then fetch full rows for the requested page only. They used to run
+  // over the newest 1000 rows, so older transactions never matched and the
+  // total only counted that window (in-app feedback #28, 2026-10-29).
+  let rawRows: Awaited<ReturnType<typeof getTransactions>>;
+  let total: number;
+  if (postDecryptFilter) {
+    const matchedIds = await findMatchingTransactionIds(
+      userId,
+      dek,
+      filters,
+      {
+        search,
+        tag,
+        payee: filterPayee,
+        note: filterNote,
+        accountName: filterAccountName,
+        accountAlias: filterAccountAlias,
+        portfolio: filterPortfolio,
+        tags: filterTags,
+      },
+      { securitiesRead },
+    );
+    total = matchedIds.length;
+    rawRows = await getTransactionsByIds(userId, filters, matchedIds.slice(offset, offset + limit));
+  } else {
+    rawRows = await getTransactions(userId, filters);
+    total = await getTransactionCount(userId, filters);
+  }
   let decrypted = decryptTxRows(dek, rawRows as Array<Parameters<typeof decryptTxRows>[1][number]>);
 
   // Resolve every Stream-D-encrypted display name and strip the *_ct
@@ -309,11 +342,6 @@ export async function GET(request: NextRequest) {
   // rows + DEK-mismatch users) via decryptName's ladder. Without the
   // category + account decrypts, the /transactions page and the Reports
   // tabs render empty cells for every Phase-3-NULL'd user.
-  // Securities master read-flip — when on, the displayed holding identity comes
-  // from the centralized `securities` row (single source of truth), so a renamed
-  // security (e.g. a cash sleeve "Cash USD") shows here, not the stale position
-  // name. Off / unlinked → the holding's own name (legacy behavior).
-  const securitiesRead = await securitiesReadEnabledForUser(userId);
   decrypted = decrypted.map((r) => {
     const row = r as typeof r & {
       accountName?: string | null;
@@ -334,25 +362,13 @@ export async function GET(request: NextRequest) {
     row.accountAlias = decryptName(row.accountAliasCt, dek, row.accountAlias);
     row.categoryName = decryptName(row.categoryNameCt, dek, row.categoryName);
     // Holding name — prefer the security's name when the read-flip is on.
-    let resolvedHolding: string | null = null;
-    if (securitiesRead && row.securityNameCt && dek) {
-      try {
-        resolvedHolding = decryptField(dek, row.securityNameCt);
-      } catch {
-        resolvedHolding = null;
-      }
-    }
-    if (!resolvedHolding) {
-      resolvedHolding = row.portfolioHoldingName ?? null;
-      if (!resolvedHolding && row.portfolioHoldingNameCt && dek) {
-        try {
-          resolvedHolding = decryptField(dek, row.portfolioHoldingNameCt);
-        } catch {
-          resolvedHolding = null;
-        }
-      }
-    }
-    row.portfolioHolding = resolvedHolding;
+    row.portfolioHolding = holdingDisplayName(
+      row.securityNameCt,
+      row.portfolioHoldingNameCt,
+      dek,
+      securitiesRead,
+      row.portfolioHoldingName ?? null,
+    );
     // Symbol — same preference. The security's symbol equals the holding's for
     // tickered rows; null for cash → falls back to the holding's.
     let resolvedSymbol: string | null = null;
@@ -373,64 +389,6 @@ export async function GET(request: NextRequest) {
     delete row.securitySymbolCt;
     return row;
   });
-
-  if (search) {
-    decrypted = filterDecryptedBySearch(decrypted, search);
-  }
-
-  if (tag) {
-    decrypted = decrypted.filter((r) => {
-      if (!r.tags) return false;
-      return r.tags.split(",").map((t) => t.trim()).includes(tag);
-    });
-  }
-
-  // Issue #59 — per-column substring filters on encrypted fields.
-  // Case-insensitive substring match against the post-decrypt value.
-  // Each filter narrows independently (AND across columns).
-  const matchSubstring = (value: string | null | undefined, needle: string) => {
-    if (!value) return false;
-    return value.toLowerCase().includes(needle.toLowerCase());
-  };
-  if (filterPayee) {
-    decrypted = decrypted.filter((r) => matchSubstring(r.payee, filterPayee));
-  }
-  if (filterNote) {
-    decrypted = decrypted.filter((r) => matchSubstring(r.note, filterNote));
-  }
-  if (filterAccountName) {
-    decrypted = decrypted.filter((r) =>
-      matchSubstring((r as { accountName?: string | null }).accountName, filterAccountName),
-    );
-  }
-  if (filterAccountAlias) {
-    decrypted = decrypted.filter((r) =>
-      matchSubstring((r as { accountAlias?: string | null }).accountAlias, filterAccountAlias),
-    );
-  }
-  if (filterPortfolio) {
-    decrypted = decrypted.filter((r) =>
-      matchSubstring((r as { portfolioHolding?: string | null }).portfolioHolding, filterPortfolio),
-    );
-  }
-  // NOTE: the ticker filter (`filterPortfolioTicker`) is applied SQL-side via
-  // `portfolioHoldingIds` (resolved above), not here — so it scales past the
-  // 1000-row post-decrypt window. No in-memory ticker pass needed.
-  if (filterTags) {
-    decrypted = decrypted.filter((r) => matchSubstring(r.tags, filterTags));
-  }
-
-  // Re-apply client-requested pagination after in-memory filters so the
-  // chip-filtered view doesn't spill into an empty page.
-  let total: number;
-  if (postDecryptFilter) {
-    total = decrypted.length;
-    const clientLimit = params.get("limit") ? parseInt(params.get("limit")!) : 100;
-    const clientOffset = params.get("offset") ? parseInt(params.get("offset")!) : 0;
-    decrypted = decrypted.slice(clientOffset, clientOffset + clientLimit);
-  } else {
-    total = await getTransactionCount(userId, filters);
-  }
 
   return NextResponse.json({ data: decrypted, total });
 }
