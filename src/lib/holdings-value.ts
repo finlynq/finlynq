@@ -96,6 +96,13 @@ export type HoldingsValueOpts = {
    * transaction behind it.
    */
   reportingCurrency?: string;
+  /**
+   * Filled with every account holding a non-zero quantity on `asOfDate`,
+   * priced or not. The snapshot builder writes a zero row only for an account
+   * that holds NOTHING; an account whose holdings simply had no price that day
+   * is left alone rather than recorded as empty.
+   */
+  heldAccountIds?: Set<number>;
 };
 
 /**
@@ -457,6 +464,7 @@ async function valueHoldingsAtDate(
     if (h.accountId == null) continue;
     const qty = qtyByHoldingId.get(h.id) ?? 0;
     if (!isMaterialQty(qty)) continue;
+    opts?.heldAccountIds?.add(h.accountId);
 
     const accountCurrency = h.accountCurrency ?? h.currency;
     let price: number | null = null;

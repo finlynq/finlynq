@@ -2,8 +2,8 @@
  * Daily snapshot builder — Phase 3 of plan/portfolio-lots-and-performance.md.
  *
  * For a given (user, date), persists one portfolio_snapshots row per
- * investment account PLUS one whole-portfolio aggregate (account_id
- * NULL). Reuses the Phase 1 / Phase 2 holdings-value aggregator to
+ * investment account active by that date (zero when it holds nothing) PLUS
+ * one whole-portfolio aggregate (account_id NULL). Reuses the Phase 1 / Phase 2 holdings-value aggregator to
  * stay aligned with the rest of the portfolio UI.
  *
  * Idempotent on the (user_id, snap_date, COALESCE(account_id, -1))
@@ -15,17 +15,54 @@
  * discontinuity via a tooltip.
  */
 
-import { and, eq, gte, sql } from "drizzle-orm";
+import { and, eq, gte, isNotNull, sql } from "drizzle-orm";
 import { db, schema } from "@/db";
 import { getHoldingsValueByAccount } from "@/lib/holdings-value";
 import { resolveReportingCurrency } from "../../../../mcp-server/reporting-currency";
 import { getRate } from "@/lib/fx-service";
 import { isInternalSwapKind } from "../aggregation-predicates";
 
+/** Per investment account: the date of its first holding transaction and the
+ *  account's currency. From that date on it gets a snapshot row every day. */
+export type InvestmentAccountsActiveSince = Map<number, { since: string; currency: string }>;
+
+/**
+ * Every account with a holding transaction, keyed to the first one's date.
+ * One grouped query; the rebuild walk loads it once and passes it to each day.
+ */
+export async function loadInvestmentAccountsActiveSince(
+  userId: string,
+): Promise<InvestmentAccountsActiveSince> {
+  const rows = await db
+    .select({
+      accountId: schema.transactions.accountId,
+      since: sql<string>`MIN(${schema.transactions.date})`,
+      currency: schema.accounts.currency,
+    })
+    .from(schema.transactions)
+    .innerJoin(schema.accounts, eq(schema.transactions.accountId, schema.accounts.id))
+    .where(
+      and(
+        eq(schema.transactions.userId, userId),
+        isNotNull(schema.transactions.portfolioHoldingId),
+      ),
+    )
+    .groupBy(schema.transactions.accountId, schema.accounts.currency);
+  const out: InvestmentAccountsActiveSince = new Map();
+  for (const r of rows) {
+    if (r.accountId == null || !r.since) continue;
+    out.set(Number(r.accountId), { since: String(r.since), currency: r.currency });
+  }
+  return out;
+}
+
 export interface BuildDailySnapshotInput {
   userId: string;
   date: string;       // YYYY-MM-DD
   dek: Buffer | null; // needed for decryptNamedRows inside getHoldingsValueByAccount
+  /** Pre-loaded `loadInvestmentAccountsActiveSince` (a multi-day walk passes
+   *  it so the query runs once); loaded here when omitted. */
+  activeAccounts?: InvestmentAccountsActiveSince;
 }
 
 export interface BuildDailySnapshotResult {
@@ -57,10 +94,12 @@ export async function buildDailySnapshot(
   const reportingCurrency = await resolveReportingCurrency(db, userId, undefined);
 
   // Per-account market value + cost basis (in account currency).
+  const heldAccountIds = new Set<number>();
   const perAccount = await getHoldingsValueByAccount(userId, dek, {
     asOfDate: date,
     // Cost in the reporting currency at each purchase's own rate (below).
     reportingCurrency,
+    heldAccountIds,
   });
 
   // Per-account net contribution for the day, bucketed from the same-day legs
@@ -182,6 +221,32 @@ export async function buildDailySnapshot(
     });
     totalMv += mv;
     totalCb += cb;
+    totalContrib += contribution;
+  }
+
+  // An account that holds nothing today still gets a row, at zero, from its
+  // first holding transaction onward (in-app feedback #27, 2026-10-29). Only
+  // accounts with a holding are in `perAccount`, and the chart carries each
+  // account's LAST row forward, so an account emptied by a full withdrawal
+  // kept its pre-withdrawal value in every later point until the live value
+  // took over on the last day (one report: HK$115k for five years). Before
+  // the first holding transaction there is still no row, so a new account
+  // draws no leading zero line. The cash builder writes its rows the same way.
+  // An account that holds something it could not price that day is NOT empty:
+  // it keeps whatever row it had, as before, instead of a false zero.
+  const activeAccounts = input.activeAccounts ?? (await loadInvestmentAccountsActiveSince(userId));
+  for (const [accountId, account] of activeAccounts) {
+    if (perAccount.has(accountId) || heldAccountIds.has(accountId) || account.since > date) continue;
+    const flow = perAccountContribution.get(accountId) ?? 0;
+    const contribution = flow === 0 ? 0 : flow * (await fx(account.currency, reportingCurrency));
+    accountRows.push({
+      accountId,
+      mv: 0,
+      cb: 0,
+      contribution,
+      nativeMv: 0,
+      nativeCurrency: account.currency,
+    });
     totalContrib += contribution;
   }
 
