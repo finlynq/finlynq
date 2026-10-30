@@ -561,7 +561,16 @@ export async function loadBudgetMonth(
   const groupBudgets = new Map<string, number>();
   for (const [name, byMonth] of budgets.groups) if (byMonth[month] != null) groupBudgets.set(name, byMonth[month]);
 
+  const coveredByLoan = new Set<number>();
+  for (const a of ctx.accounts) {
+    if (a.role !== "debt_payment") continue;
+    for (const l of ctx.loansByAccount.get(a.id) ?? []) {
+      if (l.interestCategoryId != null) coveredByLoan.add(l.interestCategoryId);
+    }
+  }
+
   return buildBudgetMonth({
+    coveredByLoan,
     month,
     currency: ctx.currency,
     today: ctx.today,

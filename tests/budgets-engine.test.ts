@@ -207,6 +207,19 @@ describe("month model", () => {
     expect(treats.lines.every((l) => l.budgeted == null && l.left == null)).toBe(true);
   });
 
+  it("does not list a loan's interest category unless something else is in it", () => {
+    const withInterest: BuildMonthInput = {
+      ...base,
+      categories: [...base.categories, cat(8, "Loan interest", "Financial", "E")],
+      coveredByLoan: new Set([8]),
+    };
+    expect(buildBudgetMonth(withInterest).spending.flatMap((g) => g.lines).some((l) => l.name === "Loan interest")).toBe(false);
+    expect(buildBudgetMonth(withInterest).counts.notBudgeted).toBe(1);
+    // Card interest in the same category still shows, so nothing is hidden.
+    const cardInterest = { ...withInterest, actuals: new Map([...base.actuals, [8, 12]]) };
+    expect(buildBudgetMonth(cardInterest).spending.flatMap((g) => g.lines).find((l) => l.name === "Loan interest")?.actual).toBe(12);
+  });
+
   it("totals a cash-flow summary and counts what needs attention", () => {
     const m = buildBudgetMonth(base);
     // Planned spending: Groceries 500 + Rent 1000 + Treats 80 (Coffee unbudgeted).

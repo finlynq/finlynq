@@ -138,6 +138,12 @@ export interface BuildMonthInput {
   upcoming: ReadonlyMap<number, number>;
   debt: readonly DebtLine[];
   accounts: readonly BudgetAccountInfo[];
+  /**
+   * Interest categories of loans paid as debt-payment lines. Their interest
+   * belongs to the loan's line, so with no budget and nothing spent in them
+   * elsewhere they are not listed (no "not budgeted" nag for interest).
+   */
+  coveredByLoan?: ReadonlySet<number>;
 }
 
 const round2 = (n: number) => Math.round(n * 100) / 100;
@@ -176,6 +182,14 @@ export function buildBudgetMonth(input: BuildMonthInput): BudgetMonth {
         key: categoryKey(c.id), categoryId: c.id, name: c.name, group: c.group, type: c.type,
         by: c.excluded ? "category" : "group",
       });
+      continue;
+    }
+    if (
+      input.coveredByLoan?.has(c.id) &&
+      Math.abs(input.actuals.get(c.id) ?? 0) < 0.005 &&
+      !input.budgets.has(c.id) &&
+      !c.rollover
+    ) {
       continue;
     }
     const target = c.type === "E" ? spendingGroups : incomeGroups;

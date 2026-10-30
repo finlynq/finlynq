@@ -126,7 +126,8 @@ describeDb("budget month loader", () => {
     const m = await loadBudgetMonth(userId, TEST_DEK, M);
     expect(line(m, "Groceries")).toMatchObject({ budgeted: 500, actual: 400, left: 100 });
     expect(line(m, "Coffee").actual).toBe(0); // business account is excluded
-    expect(line(m, "Loan interest").actual).toBe(0); // belongs to the car loan line
+    // Belongs to the car loan line, so the category isn't listed at all.
+    expect(m.spending.flatMap((g) => g.lines).some((l) => l.name === "Loan interest")).toBe(false);
     expect(m.income[0].lines[0]).toMatchObject({ name: "Salary", budgeted: 5000, actual: 5000, status: "received" });
     expect(m.spending.flatMap((g) => g.lines).find((l) => l.name === "Transfer")).toBeUndefined();
 
