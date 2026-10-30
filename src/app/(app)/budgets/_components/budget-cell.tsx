@@ -94,8 +94,8 @@ export function BudgetCell({
         disabled
           ? "cursor-default border-transparent text-muted-foreground"
           : value == null
-            ? "border-dashed border-border text-muted-foreground hover:border-primary"
-            : "border-border hover:border-primary"
+            ? "border-dashed border-border text-muted-foreground hover:border-primary hover:text-foreground"
+            : "border-transparent bg-muted/60 hover:border-primary hover:bg-transparent"
       } ${error ? "border-rose-500" : ""} ${busy ? "opacity-50" : ""}`}
     >
       {value != null

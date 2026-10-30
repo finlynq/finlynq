@@ -8,14 +8,14 @@
  * come from GET /api/budgets/month.
  */
 import { useCallback, useEffect, useState } from "react";
-import { ChevronLeft, ChevronRight, Settings2, Wand2, Clock } from "lucide-react";
+import { ChevronLeft, ChevronRight, Settings2, Wand2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { ConfirmDialog } from "@/components/ui/confirm-dialog";
 import { ErrorState } from "@/components/error-state";
 import { PageSkeleton } from "@/components/page-skeleton";
 import { OnboardingTips } from "@/components/onboarding-tips";
 import { useDisplayCurrency } from "@/components/currency-provider";
-import { formatCurrency, getCurrentMonth, getMonthLabel } from "@/lib/currency";
+import { getCurrentMonth, getMonthLabel } from "@/lib/currency";
 import { shiftMonth } from "@/lib/budgets/lines";
 import type { BudgetMonth } from "@/lib/budgets/month";
 import { budgetApi } from "./_components/budget-api";
@@ -23,6 +23,7 @@ import { DebtSection, IncomeSection, SpendingSection, type BudgetFilter, type Ro
 import { FillDialog, type FillScope } from "./_components/fill-dialog";
 import { BudgetSettingsDialog } from "./_components/budget-settings-dialog";
 import { CarryoverDialog } from "./_components/carryover-dialog";
+import { MonthSummary } from "./_components/month-summary";
 
 const COLLAPSED_KEY = "pf-budget-collapsed";
 
@@ -33,18 +34,6 @@ function readCollapsed(): Set<string> {
   } catch {
     return new Set();
   }
-}
-
-function Tile({ label, value, sub, tone }: { label: string; value: string; sub?: string; tone?: "good" | "bad" }) {
-  return (
-    <div className="rounded-xl border bg-card px-3 py-2.5">
-      <p className="text-xs text-muted-foreground">{label}</p>
-      <p className={`text-lg font-semibold tabular-nums ${tone === "good" ? "text-emerald-600" : tone === "bad" ? "text-rose-600" : ""}`}>
-        {value}
-      </p>
-      {sub && <p className="text-xs text-muted-foreground">{sub}</p>}
-    </div>
-  );
 }
 
 export default function BudgetsPage() {
@@ -174,7 +163,6 @@ export default function BudgetsPage() {
   }
 
   const cur = data.currency;
-  const s = data.summary;
   const chips: Array<{ key: BudgetFilter; label: string; count?: number }> = [
     { key: "all", label: "All" },
     { key: "unbudgeted", label: "Not budgeted", count: data.counts.notBudgeted },
@@ -183,18 +171,14 @@ export default function BudgetsPage() {
   ];
 
   return (
-    <div className="space-y-4">
+    // Capped so names and amounts stay close together on very wide screens.
+    <div className="max-w-6xl space-y-4">
       <OnboardingTips page="budgets" />
       <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
         <div>
           <h1 className="text-2xl font-bold">Budgets</h1>
           <p className="mt-1 text-sm text-muted-foreground">
             Plan the month&apos;s money in and out: income, spending and loan payments.
-            {ageOfMoney != null && (
-              <span className="ml-2 inline-flex items-center gap-1 text-xs">
-                <Clock className="h-3 w-3" /> Age of money {ageOfMoney} days
-              </span>
-            )}
           </p>
         </div>
         <div className="flex flex-wrap items-center gap-2">
@@ -207,54 +191,22 @@ export default function BudgetsPage() {
         </div>
       </div>
 
-      <div className="flex flex-wrap items-center justify-between gap-2">
-        <div className="inline-flex items-center gap-2 rounded-xl bg-muted/50 px-2 py-1.5">
-          <Button variant="ghost" size="icon" className="h-8 w-8" aria-label="Previous month" onClick={() => setMonth(shiftMonth(month, -1))}>
-            <ChevronLeft className="h-4 w-4" />
+      <div className="inline-flex items-center gap-1 rounded-xl border bg-card px-1.5 py-1">
+        <Button variant="ghost" size="icon" className="h-8 w-8" aria-label="Previous month" onClick={() => setMonth(shiftMonth(month, -1))}>
+          <ChevronLeft className="h-4 w-4" />
+        </Button>
+        <h2 className="min-w-28 text-center text-sm font-semibold">{getMonthLabel(month)}</h2>
+        <Button variant="ghost" size="icon" className="h-8 w-8" aria-label="Next month" onClick={() => setMonth(shiftMonth(month, 1))}>
+          <ChevronRight className="h-4 w-4" />
+        </Button>
+        {month !== getCurrentMonth() && (
+          <Button variant="ghost" size="sm" className="h-8" onClick={() => setMonth(getCurrentMonth())}>
+            This month
           </Button>
-          <h2 className="min-w-28 text-center text-sm font-semibold">{getMonthLabel(month)}</h2>
-          <Button variant="ghost" size="icon" className="h-8 w-8" aria-label="Next month" onClick={() => setMonth(shiftMonth(month, 1))}>
-            <ChevronRight className="h-4 w-4" />
-          </Button>
-          {month !== getCurrentMonth() && (
-            <Button variant="ghost" size="sm" className="h-8" onClick={() => setMonth(getCurrentMonth())}>
-              This month
-            </Button>
-          )}
-        </div>
-        <div className="flex flex-wrap gap-1.5">
-          {chips.map((c) => (
-            <button
-              key={c.key}
-              type="button"
-              onClick={() => setFilter(c.key)}
-              className={`rounded-full border px-3 py-1 text-xs transition-colors ${
-                filter === c.key ? "border-primary bg-primary/10 text-primary" : "text-muted-foreground hover:text-foreground"
-              }`}
-            >
-              {c.label}
-              {c.count != null ? ` ${c.count}` : ""}
-            </button>
-          ))}
-        </div>
+        )}
       </div>
 
-      <div className="grid grid-cols-2 gap-2 md:grid-cols-4">
-        <Tile label="Expected income" value={formatCurrency(s.plannedIncome, cur)} sub={`received ${formatCurrency(s.receivedIncome, cur)}`} />
-        <Tile label="Budgeted spending" value={formatCurrency(s.plannedSpending, cur)} sub={`spent ${formatCurrency(s.spent, cur)}`} />
-        <Tile label="Debt payments" value={formatCurrency(s.plannedDebt, cur)} sub={`paid ${formatCurrency(s.paidDebt, cur)}`} />
-        <Tile
-          label="Left to plan"
-          value={formatCurrency(s.leftToPlan, cur)}
-          tone={s.plannedIncome > 0 ? (s.leftToPlan >= 0 ? "good" : "bad") : undefined}
-          sub={`net so far ${formatCurrency(s.netCashFlow, cur)}`}
-        />
-      </div>
-      {s.plannedIncome === 0 && (
-        <p className="text-xs text-muted-foreground">
-          Set expected income in the Income section to see how much of it is left to plan.
-        </p>
-      )}
+      <MonthSummary data={data} ageOfMoney={ageOfMoney} />
 
       {notice && (
         <div className="flex items-start justify-between gap-2 rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-2 text-sm text-emerald-800 dark:border-emerald-900 dark:bg-emerald-950/30 dark:text-emerald-200">
@@ -268,7 +220,39 @@ export default function BudgetsPage() {
 
       <IncomeSection data={data} actions={actions} />
       <DebtSection data={data} actions={actions} />
-      <SpendingSection data={data} filter={filter} collapsed={collapsed} onToggleGroup={toggleGroup} actions={actions} />
+      <SpendingSection
+        data={data}
+        filter={filter}
+        collapsed={collapsed}
+        onToggleGroup={toggleGroup}
+        actions={actions}
+        toolbar={
+          // One row that scrolls sideways on phones instead of wrapping.
+          <div className="flex max-w-full gap-1.5 overflow-x-auto" role="group" aria-label="Show">
+            {chips.map((c) => {
+              const active = filter === c.key;
+              return (
+                <button
+                  key={c.key}
+                  type="button"
+                  onClick={() => setFilter(c.key)}
+                  aria-pressed={active}
+                  className={`shrink-0 whitespace-nowrap rounded-full border px-3 py-1 text-xs transition-colors ${
+                    active
+                      ? "border-primary bg-primary/10 text-primary"
+                      : c.count === 0
+                        ? "text-muted-foreground/60 hover:text-foreground"
+                        : "text-muted-foreground hover:text-foreground"
+                  }`}
+                >
+                  {c.label}
+                  {c.count != null && <span className="ml-1.5 font-mono tabular-nums">{c.count}</span>}
+                </button>
+              );
+            })}
+          </div>
+        }
+      />
 
       {data.excluded.length > 0 && (
         <button type="button" onClick={() => setSettingsOpen(true)} className="text-xs text-muted-foreground hover:underline">

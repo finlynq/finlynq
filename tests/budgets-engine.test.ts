@@ -11,6 +11,7 @@ import { walkCarryover } from "@/lib/budgets/carryover";
 import { debtStatus, scheduledInMonth } from "@/lib/budgets/debt-line";
 import { automaticBudgetRole, monthRange, parseLineKey, resolveBudgetRole } from "@/lib/budgets/lines";
 import { buildBudgetMonth, type BuildMonthInput, type MonthCategoryInput } from "@/lib/budgets/month";
+import { incomeAllocation, monthProgress } from "@/lib/budgets/month-view";
 
 describe("fill", () => {
   const line: FillLine = {
@@ -154,8 +155,39 @@ describe("account roles and keys", () => {
   });
 });
 
+describe("page summary helpers", () => {
+  it("knows how far into the month today is", () => {
+    expect(monthProgress("2026-10", "2026-10-15")).toEqual({ state: "current", day: 15, days: 31, fraction: 15 / 31 });
+    expect(monthProgress("2026-09", "2026-10-15")).toEqual({ state: "past", day: 30, days: 30, fraction: 1 });
+    expect(monthProgress("2026-11", "2026-10-15")).toEqual({ state: "future", day: 0, days: 30, fraction: 0 });
+    expect(monthProgress("2028-02", "2028-02-29").days).toBe(29);
+  });
+
+  it("splits expected income into spending, debt and what is left", () => {
+    const a = incomeAllocation({ plannedIncome: 5000, plannedSpending: 2000, plannedDebt: 500 });
+    expect(a.segments.map((s) => [s.key, s.amount])).toEqual([["spending", 2000], ["debt", 500], ["left", 2500]]);
+    expect(a.segments.reduce((t, s) => t + s.share, 0)).toBeCloseTo(1);
+    expect(a.incomeMark).toBe(1);
+    expect(a.overPlanned).toBe(0);
+  });
+
+  it("shows where income runs out when more is planned than expected", () => {
+    const a = incomeAllocation({ plannedIncome: 3000, plannedSpending: 3500, plannedDebt: 500 });
+    expect(a.segments.map((s) => s.key)).toEqual(["spending", "debt"]);
+    expect(a.incomeMark).toBeCloseTo(0.75);
+    expect(a.overPlanned).toBe(1000);
+  });
+
+  it("draws nothing when nothing is planned or expected", () => {
+    expect(incomeAllocation({ plannedIncome: 0, plannedSpending: 0, plannedDebt: 0 }).segments).toEqual([]);
+    const noIncome = incomeAllocation({ plannedIncome: 0, plannedSpending: 800, plannedDebt: 0 });
+    expect(noIncome.segments.map((s) => s.key)).toEqual(["spending"]);
+    expect(noIncome.incomeMark).toBe(0);
+  });
+});
+
 describe("month model", () => {
-  const cat = (id: number, name: string, group: string, type: "E" | "I", extra: Partial<MonthCategoryInput> = {}): MonthCategoryInput => ({
+  const cat =(id: number, name: string, group: string, type: "E" | "I", extra: Partial<MonthCategoryInput> = {}): MonthCategoryInput => ({
     id, name, group, type, excluded: false, rollover: false, rolloverNegative: "carry", ...extra,
   });
   const base: BuildMonthInput = {

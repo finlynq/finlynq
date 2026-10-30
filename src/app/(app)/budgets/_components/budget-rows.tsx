@@ -32,10 +32,14 @@ export interface RowActions {
   openSettings: () => void;
 }
 
-// Below `sm` the name takes its own line and budget | left | menu sit under it;
-// from `sm` up everything is one row with a Spent/Received/Paid column.
-const GRID = "grid grid-cols-[minmax(0,1fr)_7.5rem_2rem] sm:grid-cols-[minmax(0,1fr)_7rem_6.5rem_8rem_2rem] items-center gap-x-2 gap-y-0.5";
+// Below `sm` the name takes its own line and budget | left | menu sit under it.
+// From `sm` up it is one row with a Spent/Received/Paid column, and from `xl`
+// up the progress bars line up in a column of their own.
+const GRID =
+  "grid grid-cols-[minmax(0,1fr)_7.5rem_2rem] sm:grid-cols-[minmax(0,1fr)_7rem_6.5rem_8rem_2rem] xl:grid-cols-[minmax(0,1fr)_minmax(6rem,13rem)_7rem_6.5rem_8rem_2rem] items-center gap-x-3 gap-y-1";
 const NAME = "col-span-3 sm:col-span-1 min-w-0";
+const ROW = `${GRID} rounded-md px-2 py-2 hover:bg-muted/40`;
+const NUM = "font-mono text-xs tabular-nums";
 
 function pillClass(status: BudgetLine["status"]): string {
   switch (status) {
@@ -51,29 +55,70 @@ function pillClass(status: BudgetLine["status"]): string {
   }
 }
 
-function LeftCell({ line, currency }: { line: Pick<BudgetLine, "left" | "status" | "upcoming" | "budgeted">; currency: string }) {
+type BarTone = "ok" | "warn" | "over" | "muted";
+const BAR_TONE: Record<BarTone, string> = {
+  ok: "bg-emerald-500",
+  warn: "bg-amber-500",
+  over: "bg-rose-500",
+  muted: "bg-muted-foreground/40",
+};
+
+interface BarSpec {
+  value: number;
+  target: number;
+  tone: BarTone;
+}
+
+/** Spent out of what was available (budget + carried in); none when nothing is budgeted. */
+function spendBar(x: Pick<BudgetLine, "budgeted" | "carriedIn" | "left" | "status">): BarSpec | null {
+  if (x.left == null) return null;
+  const target = (x.budgeted ?? 0) + (x.carriedIn ?? 0);
+  if (target <= 0.005) return null;
+  const value = target - x.left;
+  const tone: BarTone = x.status === "over" ? "over" : x.status === "warn" || value / target >= 0.9 ? "warn" : "ok";
+  return { value, target, tone };
+}
+
+function ProgressBar({ bar }: { bar: BarSpec }) {
+  const pct = Math.max(0, Math.min(100, (bar.value / bar.target) * 100));
+  return (
+    <div className="h-1.5 w-full overflow-hidden rounded-full bg-muted">
+      <div className={`h-full rounded-full ${BAR_TONE[bar.tone]}`} style={{ width: `${pct}%` }} />
+    </div>
+  );
+}
+
+/** The bar under the name, below `xl`. */
+function InlineBar({ bar }: { bar: BarSpec | null }) {
+  return bar ? (
+    <div className="mt-1.5 xl:hidden">
+      <ProgressBar bar={bar} />
+    </div>
+  ) : null;
+}
+
+/** The bar's own column from `xl` up. Always rendered so the columns stay aligned. */
+function BarColumn({ bar }: { bar: BarSpec | null }) {
+  return <div className="hidden xl:block">{bar && <ProgressBar bar={bar} />}</div>;
+}
+
+function LeftCell({ line, currency }: { line: Pick<BudgetLine, "left" | "status" | "upcoming" | "actual">; currency: string }) {
   if (line.status === "unbudgeted" || line.left == null) {
-    return <span className="text-xs text-muted-foreground">not budgeted</span>;
+    // Spending with no plan behind it is worth a second look.
+    return (
+      <span className={`text-xs ${line.actual > 0.005 ? "text-amber-600 dark:text-amber-400" : "text-muted-foreground"}`}>
+        not budgeted
+      </span>
+    );
   }
   const after = line.left - line.upcoming;
   return (
     <span
-      className={`inline-block rounded-full px-2 py-0.5 font-mono text-xs tabular-nums ${pillClass(line.status)}`}
+      className={`inline-block rounded-full px-2 py-0.5 ${NUM} ${pillClass(line.status)}`}
       title={line.upcoming > 0 ? `${formatCurrency(line.upcoming, currency)} still due this month; ${formatCurrency(after, currency)} left after it` : undefined}
     >
       {formatCurrency(line.left, currency)}
     </span>
-  );
-}
-
-function Bar({ actual, budget }: { actual: number; budget: number | null }) {
-  if (budget == null || budget <= 0) return null;
-  const pct = Math.min(100, (actual / budget) * 100);
-  const color = actual > budget ? "bg-rose-500" : pct >= 85 ? "bg-amber-500" : "bg-primary";
-  return (
-    <div className="mt-1 h-1 w-full overflow-hidden rounded-full bg-muted">
-      <div className={`h-full ${color}`} style={{ width: `${pct}%` }} />
-    </div>
   );
 }
 
@@ -127,8 +172,27 @@ function MenuButton({ label }: { label: string }) {
   );
 }
 
-function SubText({ line, currency }: { line: Pick<BudgetLine, "carriedIn" | "upcoming" | "rollover">; currency: string }) {
+/**
+ * The small line under a name. On phones the Spent column is hidden, so the
+ * amount spent rides here instead.
+ */
+function SubText({
+  line,
+  currency,
+  showSpent,
+}: {
+  line: Pick<BudgetLine, "carriedIn" | "upcoming" | "rollover" | "actual">;
+  currency: string;
+  showSpent: boolean;
+}) {
   const bits: React.ReactNode[] = [];
+  if (showSpent && line.actual !== 0) {
+    bits.push(
+      <span key="s" className="sm:hidden">
+        spent {formatCurrency(line.actual, currency)}
+      </span>,
+    );
+  }
   if (line.rollover && line.carriedIn != null && line.carriedIn !== 0) {
     bits.push(<span key="c">carried in {formatCurrency(line.carriedIn, currency)}</span>);
   }
@@ -152,8 +216,9 @@ function SpendingLineRow({
   const drill = line.categoryId
     ? buildTxDrillUrl({ categoryId: String(line.categoryId), startDate: monthStartDate(data.month), endDate: monthEndDate(data.month) })
     : null;
+  const bar = inGroupBudget ? null : spendBar(line);
   return (
-    <div className={`${GRID} rounded-md px-2 py-1.5 hover:bg-muted/40`}>
+    <div className={`${ROW} pl-6`}>
       <div className={NAME}>
         <div className="flex items-center gap-1.5 min-w-0">
           {line.categoryId ? (
@@ -166,9 +231,10 @@ function SpendingLineRow({
           {line.rollover && <Repeat2 className="h-3 w-3 shrink-0 text-muted-foreground" aria-label="Rolls over" />}
           {line.upcoming > 0 && <CalendarClock className="h-3 w-3 shrink-0 text-muted-foreground" aria-label="Payments due later this month" />}
         </div>
-        <SubText line={line} currency={cur} />
-        {!inGroupBudget && <Bar actual={line.actual} budget={line.budgeted != null ? line.budgeted + (line.carriedIn ?? 0) : null} />}
+        <SubText line={line} currency={cur} showSpent={!inGroupBudget} />
+        <InlineBar bar={bar} />
       </div>
+      <BarColumn bar={bar} />
       <div>
         {inGroupBudget ? (
           <span className="block text-right text-xs text-muted-foreground">in group</span>
@@ -182,7 +248,7 @@ function SpendingLineRow({
           />
         )}
       </div>
-      <div className="hidden sm:block text-right font-mono text-xs tabular-nums">
+      <div className={`hidden sm:block text-right ${NUM}`}>
         {drill ? (
           <Link href={drill} className="hover:underline">
             {formatCurrency(line.actual, cur)}
@@ -193,7 +259,7 @@ function SpendingLineRow({
       </div>
       <div className="text-right">
         {inGroupBudget ? (
-          <span className="font-mono text-xs tabular-nums text-muted-foreground sm:hidden">{formatCurrency(line.actual, cur)}</span>
+          <span className={`${NUM} text-muted-foreground sm:hidden`}>{formatCurrency(line.actual, cur)}</span>
         ) : (
           <LeftCell line={line} currency={cur} />
         )}
@@ -246,6 +312,19 @@ function SpendingLineRow({
   );
 }
 
+/**
+ * The lines a filter shows from one group, or null when it hides the group.
+ * A group budgeted as one line is matched as a whole.
+ */
+function visibleLinesFor(group: BudgetGroup, filter: BudgetFilter): BudgetLine[] | null {
+  if (filter === "all") return group.lines;
+  const match = (x: Pick<BudgetLine, "status" | "upcoming">) =>
+    filter === "unbudgeted" ? x.status === "unbudgeted" : filter === "over" ? x.status === "over" : x.upcoming > 0;
+  if (group.byGroup) return match(group) ? group.lines : null;
+  const lines = group.lines.filter(match);
+  return lines.length ? lines : null;
+}
+
 function SpendingGroupBlock({
   group,
   data,
@@ -263,26 +342,29 @@ function SpendingGroupBlock({
 }) {
   const cur = data.currency;
   const rawName = group.key.slice(2);
-  const visibleLines = group.byGroup
-    ? group.lines
-    : group.lines.filter((l) =>
-        filter === "all" ? true : filter === "unbudgeted" ? l.status === "unbudgeted" : filter === "over" ? l.status === "over" : l.upcoming > 0,
-      );
-  if (!group.byGroup && filter !== "all" && visibleLines.length === 0) return null;
-  if (group.byGroup && filter !== "all") {
-    const match = filter === "unbudgeted" ? group.status === "unbudgeted" : filter === "over" ? group.status === "over" : group.upcoming > 0;
-    if (!match) return null;
-  }
+  const visibleLines = visibleLinesFor(group, filter);
+  if (!visibleLines) return null;
+  const bar = spendBar(group);
+  const count = group.lines.length;
   return (
     <div className="border-t first:border-t-0">
-      <div className={`${GRID} bg-muted/40 px-2 py-1.5`}>
-        <button type="button" onClick={onToggle} className={`${NAME} flex items-center gap-1.5 text-left text-sm font-medium`}>
-          {collapsed ? <ChevronRight className="h-3.5 w-3.5 shrink-0" /> : <ChevronDown className="h-3.5 w-3.5 shrink-0" />}
-          <span className="truncate">{group.name}</span>
-          {group.byGroup && <span className="shrink-0 rounded bg-primary/10 px-1.5 text-[10px] font-medium text-primary">one budget</span>}
-          {group.rollover && <Repeat2 className="h-3 w-3 shrink-0 text-muted-foreground" aria-label="Rolls over" />}
-          <span className="shrink-0 text-xs font-normal text-muted-foreground">{group.lines.length}</span>
-        </button>
+      <div className={`${GRID} px-2 py-2`}>
+        <div className={NAME}>
+          <button type="button" onClick={onToggle} aria-expanded={!collapsed} className="flex w-full min-w-0 items-center gap-1.5 text-left">
+            {collapsed ? <ChevronRight className="h-3.5 w-3.5 shrink-0 text-muted-foreground" /> : <ChevronDown className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />}
+            <span className="truncate text-sm font-semibold">{group.name}</span>
+            {group.byGroup && <span className="shrink-0 rounded bg-primary/10 px-1.5 text-[10px] font-medium text-primary">one budget</span>}
+            {group.rollover && <Repeat2 className="h-3 w-3 shrink-0 text-muted-foreground" aria-label="Rolls over" />}
+            {collapsed && (
+              <span className="shrink-0 text-xs text-muted-foreground">
+                {count} categor{count === 1 ? "y" : "ies"}
+              </span>
+            )}
+          </button>
+          {group.byGroup && <SubText line={group} currency={cur} showSpent />}
+          <InlineBar bar={bar} />
+        </div>
+        <BarColumn bar={bar} />
         <div>
           {group.byGroup ? (
             <BudgetCell
@@ -293,20 +375,20 @@ function SpendingGroupBlock({
               onSave={(v) => actions.setLine(group.key, v)}
             />
           ) : (
-            <span className="block text-right font-mono text-xs tabular-nums text-muted-foreground">
-              {group.budgeted != null ? formatCurrency(group.budgeted, cur) : "—"}
+            <span className={`block pr-2 text-right font-medium ${NUM}`}>
+              {group.budgeted != null ? formatCurrency(group.budgeted, cur) : <span className="text-muted-foreground">—</span>}
             </span>
           )}
         </div>
-        <div className="hidden sm:block text-right font-mono text-xs tabular-nums">{formatCurrency(group.actual, cur)}</div>
+        <div className={`hidden sm:block text-right font-medium ${NUM}`}>{formatCurrency(group.actual, cur)}</div>
         <div className="text-right">
           {group.byGroup ? (
             <LeftCell line={group} currency={cur} />
-          ) : (
-            <span className="font-mono text-xs tabular-nums text-muted-foreground">
-              {group.left != null ? formatCurrency(group.left, cur) : ""}
+          ) : group.left != null ? (
+            <span className={`pr-2 font-medium ${NUM} ${group.left < -0.005 ? "text-rose-600 dark:text-rose-400" : ""}`}>
+              {formatCurrency(group.left, cur)}
             </span>
-          )}
+          ) : null}
         </div>
         <DropdownMenu>
           <MenuButton label={`Options for the ${group.name} group`} />
@@ -352,23 +434,53 @@ function SpendingGroupBlock({
           </DropdownMenuContent>
         </DropdownMenu>
       </div>
-      {!collapsed &&
-        visibleLines.map((l) => (
-          <SpendingLineRow key={l.key} line={l} data={data} inGroupBudget={group.byGroup} actions={actions} />
-        ))}
+      {!collapsed && (
+        <div className="pb-1">
+          {visibleLines.map((l) => (
+            <SpendingLineRow key={l.key} line={l} data={data} inGroupBudget={group.byGroup} actions={actions} />
+          ))}
+        </div>
+      )}
     </div>
   );
 }
 
-function SectionHeader({ title, budgetLabel, actualLabel, leftLabel }: { title: string; budgetLabel: string; actualLabel: string; leftLabel: string }) {
+/**
+ * The section's title and column labels in one row. With a toolbar the title
+ * shares its own row with the toolbar and the labels sit underneath.
+ */
+function SectionHeader({
+  title,
+  budgetLabel,
+  actualLabel,
+  leftLabel,
+  toolbar,
+}: {
+  title: string;
+  budgetLabel: string;
+  actualLabel: string;
+  leftLabel: string;
+  toolbar?: React.ReactNode;
+}) {
+  const label = "text-right text-[11px] uppercase tracking-wide text-muted-foreground";
+  const heading = <h3 className="text-sm font-semibold">{title}</h3>;
   return (
-    <div className={`${GRID} px-2 pb-1 text-[11px] uppercase tracking-wide text-muted-foreground`}>
-      <span className={NAME}>{title}</span>
-      <span className="text-right">{budgetLabel}</span>
-      <span className="hidden sm:block text-right">{actualLabel}</span>
-      <span className="text-right">{leftLabel}</span>
-      <span />
-    </div>
+    <>
+      {toolbar && (
+        <div className="flex flex-wrap items-center justify-between gap-2 px-2 pb-2 pt-1">
+          {heading}
+          {toolbar}
+        </div>
+      )}
+      <div className={`${GRID} border-b px-2 pb-2 ${toolbar ? "" : "pt-1"}`}>
+        {toolbar ? <span className="hidden sm:block" /> : <div className={NAME}>{heading}</div>}
+        <span className="hidden xl:block" />
+        <span className={`pr-2 ${label}`}>{budgetLabel}</span>
+        <span className={`hidden sm:block ${label}`}>{actualLabel}</span>
+        <span className={`pr-2 ${label}`}>{leftLabel}</span>
+        <span />
+      </div>
+    </>
   );
 }
 
@@ -380,38 +492,45 @@ export function IncomeSection({ data, actions }: { data: BudgetMonth; actions: R
       <SectionHeader title="Income" budgetLabel="Expected" actualLabel="Received" leftLabel="Status" />
       {data.income.map((g) => (
         <div key={g.key} className="border-t first:border-t-0">
-          {data.income.length > 1 && <div className="px-2 pt-1.5 text-xs font-medium text-muted-foreground">{g.name}</div>}
-          {g.lines.map((l) => (
-            <div key={l.key} className={`${GRID} rounded-md px-2 py-1.5 hover:bg-muted/40`}>
-              <span className={`${NAME} truncate text-sm`}>{l.name}</span>
-              <BudgetCell value={l.budgeted} currency={cur} label={`Expected income from ${l.name}`} onSave={(v) => actions.setLine(l.key, v)} />
-              <span className="hidden sm:block text-right font-mono text-xs tabular-nums">{formatCurrency(l.actual, cur)}</span>
-              <span className="text-right">
-                {l.budgeted == null ? (
-                  <span className="text-xs text-muted-foreground sm:hidden">{formatCurrency(l.actual, cur)}</span>
-                ) : (
-                  <span className={`inline-block rounded-full px-2 py-0.5 text-xs ${pillClass(l.status)}`}>
-                    {l.status === "received" ? "received" : `${formatCurrency(Math.max(0, l.left ?? 0), cur)} to come`}
-                  </span>
-                )}
-              </span>
-              <DropdownMenu>
-                <MenuButton label={`Options for ${l.name}`} />
-                <DropdownMenuContent align="end" className="min-w-56">
-                  <DropdownMenuGroup>
-                    <DropdownMenuItem onClick={() => actions.openFill({ kind: "keys", keys: [l.key], label: l.name }, "income")}>
-                      Fill this and later months…
-                    </DropdownMenuItem>
-                    {l.categoryId && (
-                      <DropdownMenuItem onClick={() => actions.categorySettings(l.categoryId!, { excluded: true })}>
-                        Leave out of the budget
+          {data.income.length > 1 && <div className="px-2 pt-2 text-xs font-medium text-muted-foreground">{g.name}</div>}
+          {g.lines.map((l) => {
+            const bar: BarSpec | null = l.budgeted != null && l.budgeted > 0 ? { value: l.actual, target: l.budgeted, tone: "ok" } : null;
+            return (
+              <div key={l.key} className={ROW}>
+                <div className={NAME}>
+                  <span className="block truncate text-sm">{l.name}</span>
+                  <InlineBar bar={bar} />
+                </div>
+                <BarColumn bar={bar} />
+                <BudgetCell value={l.budgeted} currency={cur} label={`Expected income from ${l.name}`} onSave={(v) => actions.setLine(l.key, v)} />
+                <span className={`hidden sm:block text-right ${NUM}`}>{formatCurrency(l.actual, cur)}</span>
+                <span className="text-right">
+                  {l.budgeted == null ? (
+                    <span className={`${NUM} text-muted-foreground sm:hidden`}>{formatCurrency(l.actual, cur)}</span>
+                  ) : (
+                    <span className={`inline-block rounded-full px-2 py-0.5 text-xs ${pillClass(l.status)}`}>
+                      {l.status === "received" ? "received" : `${formatCurrency(Math.max(0, l.left ?? 0), cur)} to come`}
+                    </span>
+                  )}
+                </span>
+                <DropdownMenu>
+                  <MenuButton label={`Options for ${l.name}`} />
+                  <DropdownMenuContent align="end" className="min-w-56">
+                    <DropdownMenuGroup>
+                      <DropdownMenuItem onClick={() => actions.openFill({ kind: "keys", keys: [l.key], label: l.name }, "income")}>
+                        Fill this and later months…
                       </DropdownMenuItem>
-                    )}
-                  </DropdownMenuGroup>
-                </DropdownMenuContent>
-              </DropdownMenu>
-            </div>
-          ))}
+                      {l.categoryId && (
+                        <DropdownMenuItem onClick={() => actions.categorySettings(l.categoryId!, { excluded: true })}>
+                          Leave out of the budget
+                        </DropdownMenuItem>
+                      )}
+                    </DropdownMenuGroup>
+                  </DropdownMenuContent>
+                </DropdownMenu>
+              </div>
+            );
+          })}
         </div>
       ))}
     </section>
@@ -419,6 +538,12 @@ export function IncomeSection({ data, actions }: { data: BudgetMonth; actions: R
 }
 
 const STATUS_TEXT: Record<DebtLine["status"], string> = { paid: "paid", due: "due", late: "late", none: "nothing due" };
+const DEBT_TONE: Record<DebtLine["status"], { pill: BudgetLine["status"]; bar: BarTone }> = {
+  paid: { pill: "ok", bar: "ok" },
+  late: { pill: "over", bar: "over" },
+  due: { pill: "warn", bar: "warn" },
+  none: { pill: "unbudgeted", bar: "muted" },
+};
 
 export function DebtSection({ data, actions }: { data: BudgetMonth; actions: RowActions }) {
   if (!data.debt.length) return null;
@@ -429,33 +554,33 @@ export function DebtSection({ data, actions }: { data: BudgetMonth; actions: Row
       {data.debt.map((d) => {
         const due = d.dueDates.find((x) => x >= data.today) ?? d.dueDates[d.dueDates.length - 1];
         const statusText = d.status === "due" && due ? `due ${due.slice(5)}` : STATUS_TEXT[d.status];
-        const pill =
-          d.status === "paid" ? pillClass("ok") : d.status === "late" ? pillClass("over") : d.status === "due" ? pillClass("warn") : pillClass("unbudgeted");
+        const tone = DEBT_TONE[d.status];
+        const bar: BarSpec | null = d.planned > 0 ? { value: d.paid, target: d.planned, tone: tone.bar } : null;
         return (
-          <div key={d.accountId} className={`${GRID} rounded-md px-2 py-1.5 hover:bg-muted/40`}>
+          <div key={d.accountId} className={ROW}>
             <div className={NAME}>
-              {d.loanIds.length === 1 ? (
-                <Link href={loanHref(d.loanIds[0])} className="block truncate text-sm hover:underline">
-                  {d.name}
-                </Link>
-              ) : (
-                <Link href={`/accounts/${d.accountId}`} className="block truncate text-sm hover:underline">
-                  {d.name}
-                </Link>
-              )}
+              <Link
+                href={d.loanIds.length === 1 ? loanHref(d.loanIds[0]) : `/accounts/${d.accountId}`}
+                className="block truncate text-sm hover:underline"
+              >
+                {d.name}
+              </Link>
               {d.source === "schedule" && d.planned > 0 && (
                 <div className="text-[11px] text-muted-foreground">
                   {formatCurrency(d.principal, cur)} principal + {formatCurrency(d.interest, cur)} interest
+                  <span className="sm:hidden"> · paid {formatCurrency(d.paid, cur)}</span>
                 </div>
               )}
               {d.source === "none" && d.planned === 0 && (
                 <div className="text-[11px] text-muted-foreground">No payment scheduled this month</div>
               )}
+              <InlineBar bar={bar} />
             </div>
-            <span className="text-right font-mono text-xs tabular-nums">{formatCurrency(d.planned, cur)}</span>
-            <span className="hidden sm:block text-right font-mono text-xs tabular-nums">{formatCurrency(d.paid, cur)}</span>
+            <BarColumn bar={bar} />
+            <span className={`pr-2 text-right ${NUM}`}>{formatCurrency(d.planned, cur)}</span>
+            <span className={`hidden sm:block text-right ${NUM}`}>{formatCurrency(d.paid, cur)}</span>
             <span className="text-right">
-              <span className={`inline-block rounded-full px-2 py-0.5 text-xs ${pill}`}>{statusText}</span>
+              <span className={`inline-block rounded-full px-2 py-0.5 text-xs ${pillClass(tone.pill)}`}>{statusText}</span>
             </span>
             <DropdownMenu>
               <MenuButton label={`Options for ${d.name}`} />
@@ -468,7 +593,7 @@ export function DebtSection({ data, actions }: { data: BudgetMonth; actions: Row
           </div>
         );
       })}
-      <p className="px-2 pt-1 text-[11px] text-muted-foreground">
+      <p className="px-2 pb-1 pt-2 text-[11px] text-muted-foreground">
         A payment&apos;s interest is part of its line here, not counted again under its expense category.
       </p>
     </section>
@@ -481,16 +606,18 @@ export function SpendingSection({
   collapsed,
   onToggleGroup,
   actions,
+  toolbar,
 }: {
   data: BudgetMonth;
   filter: BudgetFilter;
   collapsed: ReadonlySet<string>;
   onToggleGroup: (key: string) => void;
   actions: RowActions;
+  toolbar?: React.ReactNode;
 }) {
   return (
     <section className="rounded-xl border bg-card p-2">
-      <SectionHeader title="Spending" budgetLabel="Budgeted" actualLabel="Spent" leftLabel="Left" />
+      <SectionHeader title="Spending" budgetLabel="Budgeted" actualLabel="Spent" leftLabel="Left" toolbar={toolbar} />
       {data.spending.map((g) => (
         <SpendingGroupBlock
           key={g.key}
@@ -502,8 +629,12 @@ export function SpendingSection({
           actions={actions}
         />
       ))}
-      {data.spending.length === 0 && (
+      {data.spending.length === 0 ? (
         <p className="px-2 py-6 text-center text-sm text-muted-foreground">No expense categories yet.</p>
+      ) : (
+        !data.spending.some((g) => visibleLinesFor(g, filter)) && (
+          <p className="px-2 py-6 text-center text-sm text-muted-foreground">Nothing to show for this filter this month.</p>
+        )
       )}
     </section>
   );
