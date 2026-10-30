@@ -188,7 +188,8 @@ export async function generateWeeklyRecap(userId: string, endDate?: string, dek?
     .from(budgets)
     .leftJoin(categories, eq(budgets.categoryId, categories.id))
     .leftJoin(transactions, eq(transactions.categoryId, budgets.categoryId))
-    .where(and(eq(budgets.month, month), eq(budgets.userId, userId)))
+    // Spending budgets only (income can be budgeted since Budget v2).
+    .where(and(eq(budgets.month, month), eq(budgets.userId, userId), eq(categories.type, "E")))
     .groupBy(budgets.id, categories.id, categories.nameCt, budgets.amount, transactions.currency, transactions.reportingCurrency)
     .all();
 

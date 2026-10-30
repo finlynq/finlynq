@@ -87,7 +87,9 @@ async function getOverspentBudgets(
     .from(budgets)
     .leftJoin(categories, eq(budgets.categoryId, categories.id))
     .leftJoin(transactions, eq(transactions.categoryId, budgets.categoryId))
-    .where(and(eq(budgets.month, month), eq(budgets.userId, userId)))
+    // Budget v2: income categories can have budgets (expected income); only
+    // spending budgets can be overspent.
+    .where(and(eq(budgets.month, month), eq(budgets.userId, userId), eq(categories.type, "E")))
     .groupBy(
       budgets.id,
       categories.nameCt,

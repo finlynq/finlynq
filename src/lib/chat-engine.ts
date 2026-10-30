@@ -256,7 +256,8 @@ async function budgetStatuses(ctx: IntentCtx, month: string, money: Money): Prom
     })
     .from(schema.budgets)
     .leftJoin(schema.categories, eq(schema.budgets.categoryId, schema.categories.id))
-    .where(and(eq(schema.budgets.userId, ctx.userId), eq(schema.budgets.month, month)))
+    // Spending budgets only (income can be budgeted since Budget v2).
+    .where(and(eq(schema.budgets.userId, ctx.userId), eq(schema.budgets.month, month), eq(schema.categories.type, "E")))
     .all();
   if (rows.length === 0) return [];
 

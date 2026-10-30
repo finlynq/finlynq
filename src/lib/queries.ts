@@ -743,6 +743,7 @@ export async function getBudgets(userId: string, month?: string) {
       // decrypts `categoryNameCt` with session DEK; sorts in memory.
       categoryNameCt: categories.nameCt,
       categoryGroup: categories.group,
+      categoryType: categories.type,
       month: budgets.month,
       amount: budgets.amount,
       currency: budgets.currency,
