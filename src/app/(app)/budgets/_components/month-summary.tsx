@@ -17,6 +17,7 @@ function StatRow({
   target,
   currency,
   pace,
+  note,
   overIsBad,
 }: {
   label: string;
@@ -25,6 +26,8 @@ function StatRow({
   currency: string;
   /** Share of the month gone, drawn as a tick on the bar. */
   pace?: number;
+  /** A caption under the bar. */
+  note?: string;
   overIsBad?: boolean;
 }) {
   const pct = target > 0 ? Math.min(100, (value / target) * 100) : 0;
@@ -54,6 +57,7 @@ function StatRow({
           />
         )}
       </div>
+      {note && <p className="mt-1 text-[11px] text-muted-foreground">{note}</p>}
     </div>
   );
 }
@@ -78,8 +82,12 @@ export function MonthSummary({ data, ageOfMoney }: { data: BudgetMonth; ageOfMon
   else if (s.leftToPlan > 0) sentence = `of the ${fmt(s.plannedIncome)} you expect isn't planned yet.`;
   else sentence = <span className="text-rose-600 dark:text-rose-400">more planned than the {fmt(s.plannedIncome)} you expect.</span>;
 
-  const spentLabel =
-    progress.state === "current" ? `Spent · day ${progress.day} of ${progress.days}` : progress.state === "future" ? "Spent · not started" : "Spent";
+  const spentNote =
+    progress.state === "current"
+      ? `Day ${progress.day} of ${progress.days}; the mark is today`
+      : progress.state === "future"
+        ? "This month hasn't started"
+        : undefined;
   const showDebt = data.debt.length > 0 || s.plannedDebt > 0;
 
   return (
@@ -132,7 +140,15 @@ export function MonthSummary({ data, ageOfMoney }: { data: BudgetMonth; ageOfMon
 
         <div className="min-w-0 space-y-3 md:border-l md:pl-8">
           <StatRow label="Income received" value={s.receivedIncome} target={s.plannedIncome} currency={cur} />
-          <StatRow label={spentLabel} value={s.spent} target={s.plannedSpending} currency={cur} pace={progress.fraction} overIsBad />
+          <StatRow
+            label="Spent"
+            value={s.spent}
+            target={s.plannedSpending}
+            currency={cur}
+            pace={progress.fraction}
+            note={spentNote}
+            overIsBad
+          />
           {showDebt && <StatRow label="Debt paid" value={s.paidDebt} target={s.plannedDebt} currency={cur} />}
           <div className="flex flex-wrap gap-x-4 gap-y-1 pt-0.5 text-xs text-muted-foreground">
             <span>
