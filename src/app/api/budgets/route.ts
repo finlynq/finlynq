@@ -23,7 +23,9 @@ export async function GET(request: NextRequest) {
   const includeRollover = request.nextUrl.searchParams.get("rollover") === "1";
   const includeSpending = request.nextUrl.searchParams.get("spending") === "1";
 
-  const data = await getBudgets(userId, month);
+  // Spending budgets only: this is the per-category list the phone app reads.
+  // Expected-income budgets (Budget v2) live on /api/budgets/month.
+  const data = (await getBudgets(userId, month)).filter((b) => b.categoryType !== "I");
   const rateMap = await getRateMap(displayCurrency, userId);
 
   // Convert budget amounts to display currency

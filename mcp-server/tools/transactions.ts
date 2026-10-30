@@ -7,9 +7,21 @@
  */
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import {
+  BudgetWriteError,
+  runBudgetFill,
+  setAccountBudgetRole,
+  setBudgetCell,
+  setCarryover,
+  updateLineSettings,
+} from "../../src/lib/budgets/write";
+import { fillBodySchema } from "../../src/lib/budgets/schemas";
+import type { BudgetRole } from "../../src/lib/budgets/lines";
+import { getDisplayCurrency } from "../../src/lib/fx-service";
+import {
   q,
   text,
   err,
+  dataResponse,
   suggestionList,
   resolveAccountStrict,
   resolveCategoryStrict,
@@ -114,26 +126,131 @@ export function registerTransactionsTools(server: McpServer, ctx: PgToolContext)
 
   type ToolResult = { content: Array<{ type: "text"; text: string }> };
 
-  // ── manage_budgets op handlers (lifted VERBATIM) ───────────────────────────
-  async function opBudgetSet(args: { category?: string; category_id?: number; month: string; amount: number }): Promise<ToolResult> {
-    const { category, category_id, month, amount } = args;
+  // ── manage_budgets op handlers ─────────────────────────────────────────────
+  // Budget v2 (2026-10-30): writes go through src/lib/budgets/write.ts, shared
+  // with the REST routes, so a budget is always stored in the display currency
+  // (the old INSERT named no currency and the column default stamped CAD).
+
+  /** Resolve `category_id` / `category` to an id, or a ready error result. */
+  async function resolveBudgetCategory(args: { category?: string; category_id?: number }): Promise<{ id: number } | { report: ToolResult }> {
     // FINLYNQ-267: `category_id` FK fast-path wins; a name resolves via the
     // shared envelope (mistyped → refuse, 2+ → ambiguous). Requires a DEK for
     // the name path (categories are encrypted post Stream D Phase 4).
-    if (category_id == null && !dek) return err("Cannot resolve category name without an unlocked DEK (Stream D Phase 4). Pass `category_id`.");
+    if (args.category_id == null && !dek) {
+      return { report: err("Cannot resolve category name without an unlocked DEK (Stream D Phase 4). Pass `category_id`.") };
+    }
     const rawCats = await q(db, sql`SELECT id, name_ct FROM categories WHERE user_id = ${userId}`);
     const allCats = decryptNameish(rawCats, dek);
-    const out = resolveOrReport("category", resolveEntity({ entity: "category", id: category_id, name: category, options: allCats }));
-    if ("report" in out) return out.report;
-    const cat = { id: out.id };
+    const out = resolveOrReport("category", resolveEntity({ entity: "category", id: args.category_id, name: args.category, options: allCats }));
+    if ("report" in out) return { report: out.report };
+    return { id: out.id };
+  }
 
-    const existing = await q(db, sql`SELECT id FROM budgets WHERE user_id = ${userId} AND category_id = ${cat.id} AND month = ${month}`);
-    if (existing.length) {
-      await db.execute(sql`UPDATE budgets SET amount = ${amount} WHERE id = ${existing[0].id}`);
-    } else {
-      await db.execute(sql`INSERT INTO budgets (user_id, category_id, month, amount) VALUES (${userId}, ${cat.id}, ${month}, ${amount})`);
+  /** An expense category group the user has, or an error result. */
+  async function checkExpenseGroup(group: string): Promise<ToolResult | null> {
+    const rows = await q(db, sql`SELECT 1 FROM categories WHERE user_id = ${userId} AND type = 'E' AND "group" = ${group} LIMIT 1`);
+    return rows.length ? null : err(`No expense category group named "${group}".`);
+  }
+
+  /** The line key for `group` or a category argument. */
+  async function budgetLineKey(args: { category?: string; category_id?: number; group?: string }): Promise<{ key: string; label: string } | { report: ToolResult }> {
+    if (args.group != null) {
+      const bad = await checkExpenseGroup(args.group);
+      if (bad) return { report: bad };
+      return { key: `g:${args.group}`, label: `group "${args.group}"` };
     }
-    return text({ success: true, data: { message: `Budget set: ${category ?? `category #${cat.id}`} = $${amount} for ${month}` } });
+    const cat = await resolveBudgetCategory(args);
+    if ("report" in cat) return cat;
+    return { key: `c:${cat.id}`, label: args.category ?? `category #${cat.id}` };
+  }
+
+  function budgetWriteFailure(e: unknown): ToolResult {
+    if (e instanceof BudgetWriteError) return err(e.message);
+    throw e;
+  }
+
+  async function opBudgetSet(args: { category?: string; category_id?: number; group?: string; month: string; amount: number }): Promise<ToolResult> {
+    const line = await budgetLineKey(args);
+    if ("report" in line) return line.report;
+    const currency = await getDisplayCurrency(userId);
+    try {
+      await setBudgetCell(userId, currency, line.key, args.month, args.amount);
+    } catch (e) {
+      return budgetWriteFailure(e);
+    }
+    return text({ success: true, data: { message: `Budget set: ${line.label} = ${args.amount} ${currency} for ${args.month}`, key: line.key, currency } });
+  }
+
+  async function opBudgetFill(args: z.infer<typeof fillBodySchema>): Promise<ToolResult> {
+    try {
+      const res = await runBudgetFill(userId, dek, args);
+      return dataResponse({
+        preview: !res.applied,
+        saved: res.applied ? res.rows.length : 0,
+        total: res.total,
+        currency: res.currency,
+        rows: res.rows.slice(0, 200),
+        truncated: res.rows.length > 200,
+        next: res.applied ? undefined : res.rows.length ? "Call again with preview: false to save these budgets." : "Nothing to fill.",
+      });
+    } catch (e) {
+      return budgetWriteFailure(e);
+    }
+  }
+
+  async function opBudgetSettings(args: {
+    category?: string; category_id?: number; group?: string; account_id?: number; month?: string;
+    excluded?: boolean; rollover?: boolean; rollover_negative?: "carry" | "reset"; by_group?: boolean;
+    account_role?: "categories" | "debt_payment" | "excluded" | "automatic"; payment_amount?: number | null;
+  }): Promise<ToolResult> {
+    try {
+      if (args.account_id != null) {
+        if (args.account_role === undefined && args.payment_amount === undefined) return err("Pass `account_role` and/or `payment_amount`.");
+        const role = args.account_role === undefined ? undefined : args.account_role === "automatic" ? null : args.account_role;
+        if (role === undefined) {
+          const cur = await q(db, sql`SELECT budget_role FROM accounts WHERE id = ${args.account_id} AND user_id = ${userId}`);
+          if (!cur.length) return err("Account not found.");
+          await setAccountBudgetRole(userId, args.account_id, (cur[0].budget_role ?? null) as BudgetRole | null, args.payment_amount);
+        } else {
+          await setAccountBudgetRole(userId, args.account_id, role, args.payment_amount);
+        }
+        return dataResponse({ account_id: args.account_id, account_role: args.account_role ?? "unchanged" });
+      }
+      const month = args.month ?? new Date().toISOString().slice(0, 7);
+      const currency = await getDisplayCurrency(userId);
+      let target: { categoryId: number } | { group: string };
+      if (args.group != null) {
+        const bad = await checkExpenseGroup(args.group);
+        if (bad) return bad;
+        target = { group: args.group };
+      } else {
+        const cat = await resolveBudgetCategory(args);
+        if ("report" in cat) return cat.report;
+        target = { categoryId: cat.id };
+      }
+      const res = await updateLineSettings(
+        userId,
+        currency,
+        target,
+        { excluded: args.excluded, rollover: args.rollover, rolloverNegative: args.rollover_negative, byGroup: args.by_group },
+        month,
+      );
+      return dataResponse({ ...res, month });
+    } catch (e) {
+      return budgetWriteFailure(e);
+    }
+  }
+
+  async function opBudgetCarryover(args: { category?: string; category_id?: number; group?: string; month: string; amount: number | null }): Promise<ToolResult> {
+    const line = await budgetLineKey(args);
+    if ("report" in line) return line.report;
+    try {
+      const currency = await getDisplayCurrency(userId);
+      await setCarryover(userId, currency, line.key, args.month, args.amount);
+      return dataResponse({ key: line.key, month: args.month, carriedIn: args.amount, currency });
+    } catch (e) {
+      return budgetWriteFailure(e);
+    }
   }
 
   async function opBudgetDelete(args: { category?: string; category_id?: number; month: string }): Promise<ToolResult> {
@@ -162,14 +279,41 @@ export function registerTransactionsTools(server: McpServer, ctx: PgToolContext)
   registerManageTool(
     server,
     "manage_budgets",
-    "Manage per-category monthly budgets: `op` selects set / delete. set: create or update a budget (`category`, `month` YYYY-MM, `amount` > 0). delete: remove a budget for a category/month. Use get_budget_summary to READ budget vs actuals.",
+    "Manage the monthly cash-flow budget: `op` selects set / delete / fill / settings / carryover. set: one month's budget for a category (expense, or income = expected income) or an expense `group` budgeted as one line. fill: fill months from last month's budget or spending, an average, the same month last year or a fixed amount, with an optional % or amount increase once / every month / every year; previews unless preview:false. settings: leave a category or group out, budget a group as one line (by_group), roll leftover over, or set how an account counts (account_role). carryover: pin what a rollover line carries into a month (0 resets). Amounts are in the display currency. Read with get_budget_summary.",
     z.discriminatedUnion("op", [
       z.object({
         op: z.literal("set"),
-        category: z.string().optional().describe("Category name (mistyped/unmatched is REFUSED; 2+ match → ambiguous). Pass this OR `category_id`."),
+        category: z.string().optional().describe("Category name (mistyped/unmatched is REFUSED; 2+ match → ambiguous). Pass this, `category_id` or `group`."),
         category_id: z.number().int().positive().optional().describe("Category FK fast-path — wins over the fuzzy `category` name."),
+        group: z.string().optional().describe("An expense category group budgeted as one line (see settings by_group)."),
         month: ymPeriod.describe("Month (YYYY-MM)"),
-        amount: z.number().positive().describe("Budget amount (must be > 0)"),
+        amount: z.number().nonnegative().describe("Budget amount in the display currency"),
+      }),
+      fillBodySchema.extend({
+        op: z.literal("fill"),
+        preview: z.boolean().default(true).describe("true (default) returns the rows without saving."),
+      }),
+      z.object({
+        op: z.literal("settings"),
+        category: z.string().optional().describe("Category name. Pass this, `category_id`, `group` or `account_id`."),
+        category_id: z.number().int().positive().optional(),
+        group: z.string().optional().describe("Expense category group name."),
+        account_id: z.number().int().positive().optional().describe("Set how this account counts in the budget."),
+        month: ymPeriod.optional().describe("Month the change starts (rollover start; budgets moved into a group). Default: this month."),
+        excluded: z.boolean().optional().describe("Leave the category/group out of the budget."),
+        rollover: z.boolean().optional().describe("Roll leftover into the next month (spending only)."),
+        rollover_negative: z.enum(["carry", "reset"]).optional().describe("Whether overspending carries as a negative or resets to 0."),
+        by_group: z.boolean().optional().describe("Budget the group as one line; its categories' budgets from `month` on are added into it."),
+        account_role: z.enum(["categories", "debt_payment", "excluded", "automatic"]).optional().describe("categories: count purchases by category. debt_payment: payments into it are one debt line (interest included). excluded: not counted. automatic: debt_payment for accounts linked to a mortgage/lease/loan/student loan, else categories."),
+        payment_amount: z.number().nonnegative().nullable().optional().describe("Planned monthly payment for a debt_payment account with no loan schedule."),
+      }),
+      z.object({
+        op: z.literal("carryover"),
+        category: z.string().optional(),
+        category_id: z.number().int().positive().optional(),
+        group: z.string().optional(),
+        month: ymPeriod.describe("Month whose carried-in amount to pin"),
+        amount: z.number().nullable().describe("Amount carried in; 0 resets; null removes the pin."),
       }),
       z.object({
         op: z.literal("delete"),
@@ -184,6 +328,14 @@ export function registerTransactionsTools(server: McpServer, ctx: PgToolContext)
           return opBudgetSet(input);
         case "delete":
           return opBudgetDelete(input);
+        case "fill": {
+          const { op: _op, ...fill } = input;
+          return opBudgetFill(fill);
+        }
+        case "settings":
+          return opBudgetSettings(input);
+        case "carryover":
+          return opBudgetCarryover(input);
       }
     },
   );

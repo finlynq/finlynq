@@ -6,6 +6,8 @@
  * Do not reformat or re-logic the handlers.
  */
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { loadBudgetMonth } from "../../src/lib/budgets/load-month";
+import type { BudgetLine } from "../../src/lib/budgets/month";
 import {
   q,
   err,
@@ -312,38 +314,58 @@ export function registerReadsTools(server: McpServer, ctx: PgToolContext) {
   // ── get_budget_summary ─────────────────────────────────────────────────────
   server.tool(
     "get_budget_summary",
-    "Get budget vs actual spending for a specific month. Amounts are in the user's display currency (default reporting); pass reportingCurrency to override.",
+    "Get the month's cash-flow budget: income, spending per category or group, debt payments and left to plan. Each line has budget vs actual and left (incl. carryover). Amounts are in the user's display currency; pass reportingCurrency to override.",
     {
       month: ymPeriod.describe("Month in YYYY-MM format"),
       reportingCurrency: z.string().optional().describe("ISO code for unified totals; defaults to user's display currency."),
     },
     async ({ month, reportingCurrency }) => {
-      const reporting = await resolveReportingCurrency(db, userId, reportingCurrency);
-      const [y, m] = month.split("-").map(Number);
-      const startDate = `${month}-01`;
-      const endDate = `${month}-${new Date(y, m, 0).getDate()}`;
-      // Stream D: GROUP BY c.id so encrypted rows don't bucket together.
-      const rawRows = await q(db, sql`
-        SELECT b.id, c.name_ct AS category_ct, c."group" AS category_group,
-               b.amount AS budget,
-               COALESCE(ABS(SUM(CASE WHEN t.date >= ${startDate} AND t.date <= ${endDate} THEN t.amount ELSE 0 END)), 0) AS spent
-        FROM budgets b
-        JOIN categories c ON b.category_id = c.id AND c.user_id = ${userId}
-        LEFT JOIN transactions t ON t.category_id = c.id AND t.user_id = ${userId}
-        WHERE b.month = ${month} AND b.user_id = ${userId}
-        GROUP BY b.id, c.id, c.name_ct, c."group", b.amount
-        ORDER BY c."group"
-      `);
-      const rows = rawRows.map((r) => {
-        const { category_ct, ...rest } = r;
-        return {
-          ...rest,
-          category: category_ct && dek ? decryptField(dek, category_ct) : null,
-        };
+      // Budget v2 (2026-10-30): the same month model the Budgets page shows
+      // (src/lib/budgets/load-month.ts). Spending excludes accounts set to
+      // count as debt payments or not at all, so loan interest is not counted
+      // twice; flows use stored reporting amounts (FINLYNQ-123).
+      const b = await loadBudgetMonth(userId, dek, month, reportingCurrency ?? null);
+      const line = (l: BudgetLine) => ({
+        category: l.name,
+        category_id: l.categoryId,
+        budgeted: l.budgeted,
+        actual: l.actual,
+        left: l.left,
+        carried_in: l.carriedIn,
+        rollover: l.rollover,
+        upcoming: l.upcoming || undefined,
+        status: l.status,
       });
-      // FINLYNQ-268 (phase 4, flow axis): budget figures are cash-flow totals
-      // (SUM(transactions.amount) vs budget), not portfolio valuation.
-      return dataResponse({ rows, reportingCurrency: reporting, basis: "cash_flow" });
+      return dataResponse({
+        month: b.month,
+        reportingCurrency: b.currency,
+        basis: "cash_flow",
+        summary: b.summary,
+        counts: b.counts,
+        income: b.income.flatMap((g) => g.lines.map(line)),
+        spending: b.spending.map((g) => ({
+          group: g.name,
+          by_group: g.byGroup,
+          budgeted: g.budgeted,
+          spent: g.actual,
+          left: g.left,
+          carried_in: g.carriedIn,
+          rollover: g.rollover,
+          lines: g.lines.map(line),
+        })),
+        debt_payments: b.debt.map((d) => ({
+          name: d.name,
+          account_id: d.accountId,
+          planned: d.planned,
+          paid: d.paid,
+          principal: d.principal,
+          interest: d.interest,
+          booked_interest: d.bookedInterest,
+          status: d.status,
+          due_dates: d.dueDates,
+        })),
+        excluded: b.excluded.map((e) => e.name),
+      });
     }
   );
 
@@ -1025,7 +1047,7 @@ export function registerReadsTools(server: McpServer, ctx: PgToolContext) {
                COALESCE(ABS(SUM(CASE WHEN t.date >= ${monthStart} AND t.date <= ${monthEnd} THEN t.amount ELSE 0 END)), 0) AS spent
         FROM budgets b LEFT JOIN categories c ON b.category_id = c.id AND c.user_id = ${userId}
         LEFT JOIN transactions t ON t.category_id = b.category_id AND t.user_id = ${userId}
-        WHERE b.month = ${month} AND b.user_id = ${userId}
+        WHERE b.month = ${month} AND b.user_id = ${userId} AND c.type = 'E'
         GROUP BY c.id, c.name_ct, b.amount
       `) as { cat_id: number; cat_ct: string | null; budget: number; spent: number }[];
       const budgetRows: { cat: string; budget: number; spent: number }[] = budgetRawRows.map((r) => ({

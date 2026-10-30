@@ -622,7 +622,7 @@ export async function calculateFinancialHealth(
     FROM budgets b
     JOIN categories c ON b.category_id = c.id AND c.user_id = ${userId}
     LEFT JOIN transactions t ON t.category_id = c.id AND t.user_id = ${userId}
-    WHERE b.month = ${currentMonth} AND b.user_id = ${userId}
+    WHERE b.month = ${currentMonth} AND b.user_id = ${userId} AND c.type = 'E'
     GROUP BY b.id, b.amount
   `)) as Array<{ budget: number | string; spent: number | string }>;
 

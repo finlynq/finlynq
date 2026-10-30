@@ -73,7 +73,8 @@ export const POST = apiHandler(
         .from(schema.budgets)
         .leftJoin(schema.categories, eq(schema.budgets.categoryId, schema.categories.id))
         .leftJoin(schema.transactions, eq(schema.transactions.categoryId, schema.categories.id))
-        .where(and(eq(schema.budgets.month, month), eq(schema.budgets.userId, userId)))
+        // Spending budgets only: an income budget (Budget v2) is never "over".
+        .where(and(eq(schema.budgets.month, month), eq(schema.budgets.userId, userId), eq(schema.categories.type, "E")))
         .groupBy(schema.budgets.id, schema.categories.nameCt)
         .all();
       const { decryptName } = await import("@/lib/crypto/encrypted-columns");

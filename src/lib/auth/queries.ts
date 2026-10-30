@@ -841,6 +841,11 @@ async function deleteAllUserDataTx(tx: TxClient, userId: string) {
   await tx.delete(s.loans).where(eq(s.loans.userId, userId));
   await tx.delete(s.budgets).where(eq(s.budgets.userId, userId));
   await tx.delete(s.budgetTemplates).where(eq(s.budgetTemplates.userId, userId));
+  // Budget v2 — before categories (their category_id cascades, but a group
+  // row has none and must go by user_id anyway).
+  await tx.delete(s.budgetLineSettings).where(eq(s.budgetLineSettings.userId, userId));
+  await tx.delete(s.budgetGroupAmounts).where(eq(s.budgetGroupAmounts.userId, userId));
+  await tx.delete(s.budgetCarryoverSets).where(eq(s.budgetCarryoverSets.userId, userId));
   await tx.delete(s.transactionRules).where(eq(s.transactionRules.userId, userId));
   await tx.delete(s.importTemplates).where(eq(s.importTemplates.userId, userId));
   await tx.delete(s.transactions).where(eq(s.transactions.userId, userId));

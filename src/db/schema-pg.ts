@@ -74,12 +74,19 @@ export const accounts = pgTable("accounts", {
   nameLookup: text("name_lookup"),
   aliasCt: text("alias_ct"),
   aliasLookup: text("alias_lookup"),
+  // Budget v2 (2026-10-30) — how the account counts in the budget. NULL =
+  // automatic (src/lib/budgets/account-roles.ts): a liability linked to a
+  // non-revolving loan is a debt payment, everything else counts by category.
+  budgetRole: text("budget_role").$type<"categories" | "debt_payment" | "excluded" | null>(),
+  // Monthly payment planned for a debt-payment account with no loan schedule.
+  budgetPaymentAmount: doublePrecision("budget_payment_amount"),
 }, (t) => [
   uniqueIndex("accounts_user_name_lookup_uniq").on(t.userId, t.nameLookup),
   index("idx_accounts_user_id").on(t.userId),
   // ─── CHECK constraints — mirror of the migration chain ───
   // Adding one in a migration means declaring it here in the SAME commit;
   // tests/schema-check-parity.test.ts fails the build otherwise.
+  check("accounts_budget_role_check", sql`${t.budgetRole} IN ('categories','debt_payment','excluded')`),
   check("accounts_csv_mapping_mode_check", sql`${t.csvMappingMode} IN ('confirm','auto')`),
   check("accounts_mode_check", sql`${t.mode} IN ('auto','approve','manual')`),
   check("accounts_ofx_payee_source_check", sql`${t.ofxPayeeSource} IN ('name','memo')`),
@@ -437,10 +444,58 @@ export const budgets = pgTable("budgets", {
     .notNull(),
   month: text("month").notNull(),
   amount: doublePrecision("amount").notNull().default(0),
-  currency: text("currency").notNull().default("CAD"),
+  currency: text("currency").notNull().default("USD"),
 }, (t) => [
   uniqueIndex("budgets_user_category_month_unique").on(t.userId, t.categoryId, t.month),
   index("idx_budgets_user_id").on(t.userId),
+]);
+
+// ─── Budget v2 (2026-10-30, plan/budget-v2.md) ──────────────────────────────
+// Per category OR per category group (exactly one of the two): left out of the
+// budget, budgeted as one group line, leftover rolls over, overspending carries.
+export const budgetLineSettings = pgTable("budget_line_settings", {
+  id: serial("id").primaryKey(),
+  userId: text("user_id").notNull(),
+  categoryId: integer("category_id").references(() => categories.id, { onDelete: "cascade" }),
+  groupName: text("group_name"),
+  excluded: boolean("excluded").notNull().default(false),
+  byGroup: boolean("by_group").notNull().default(false),
+  rollover: boolean("rollover").notNull().default(false),
+  rolloverNegative: text("rollover_negative").notNull().default("carry").$type<"carry" | "reset">(),
+}, (t) => [
+  index("idx_budget_line_settings_user_id").on(t.userId),
+  uniqueIndex("budget_line_settings_category_unique").on(t.userId, t.categoryId).where(sql`(category_id IS NOT NULL)`),
+  uniqueIndex("budget_line_settings_group_unique").on(t.userId, t.groupName).where(sql`(group_name IS NOT NULL)`),
+  check("budget_line_settings_target_check", sql`(${t.categoryId} IS NULL) <> (${t.groupName} IS NULL)`),
+  check("budget_line_settings_rollover_negative_check", sql`${t.rolloverNegative} IN ('carry','reset')`),
+]);
+
+// The monthly amount of a category group budgeted as one line.
+export const budgetGroupAmounts = pgTable("budget_group_amounts", {
+  id: serial("id").primaryKey(),
+  userId: text("user_id").notNull(),
+  groupName: text("group_name").notNull(),
+  month: text("month").notNull(),
+  amount: doublePrecision("amount").notNull().default(0),
+  currency: text("currency").notNull().default("USD"),
+}, (t) => [
+  uniqueIndex("budget_group_amounts_user_group_month_unique").on(t.userId, t.groupName, t.month),
+]);
+
+// A user's own reset (0) or edit of what a rollover line carries into a month.
+export const budgetCarryoverSets = pgTable("budget_carryover_sets", {
+  id: serial("id").primaryKey(),
+  userId: text("user_id").notNull(),
+  categoryId: integer("category_id").references(() => categories.id, { onDelete: "cascade" }),
+  groupName: text("group_name"),
+  month: text("month").notNull(),
+  amount: doublePrecision("amount").notNull().default(0),
+  currency: text("currency").notNull().default("USD"),
+}, (t) => [
+  index("idx_budget_carryover_sets_user_id").on(t.userId),
+  uniqueIndex("budget_carryover_sets_category_unique").on(t.userId, t.categoryId, t.month).where(sql`(category_id IS NOT NULL)`),
+  uniqueIndex("budget_carryover_sets_group_unique").on(t.userId, t.groupName, t.month).where(sql`(group_name IS NOT NULL)`),
+  check("budget_carryover_sets_target_check", sql`(${t.categoryId} IS NULL) <> (${t.groupName} IS NULL)`),
 ]);
 
 export const loans = pgTable("loans", {
