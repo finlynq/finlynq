@@ -91,8 +91,8 @@ export function MonthSummary({ data, ageOfMoney }: { data: BudgetMonth; ageOfMon
   const showDebt = data.debt.length > 0 || s.plannedDebt > 0;
 
   return (
-    <section className="rounded-xl border bg-card p-4" aria-label="Month summary">
-      <div className="grid gap-5 md:grid-cols-[minmax(0,1.2fr)_minmax(0,1fr)] md:gap-8">
+    <section className="rounded-xl border bg-card p-3.5" aria-label="Month summary">
+      <div className="grid gap-4 md:grid-cols-[minmax(0,1.2fr)_minmax(0,1fr)] md:gap-8">
         <div className="min-w-0">
           <p className="text-xs text-muted-foreground">{hasIncome && s.leftToPlan < -0.005 ? "Over-planned" : "Left to plan"}</p>
           <p className={`hero-number text-3xl font-semibold ${tone}`}>
@@ -138,7 +138,7 @@ export function MonthSummary({ data, ageOfMoney }: { data: BudgetMonth; ageOfMon
           )}
         </div>
 
-        <div className="min-w-0 space-y-3 md:border-l md:pl-8">
+        <div className="min-w-0 space-y-2.5 md:border-l md:pl-8">
           <StatRow label="Income received" value={s.receivedIncome} target={s.plannedIncome} currency={cur} />
           <StatRow
             label="Spent"

@@ -36,9 +36,9 @@ export interface RowActions {
 // From `sm` up it is one row with a Spent/Received/Paid column, and from `xl`
 // up the progress bars line up in a column of their own.
 const GRID =
-  "grid grid-cols-[minmax(0,1fr)_7.5rem_2rem] sm:grid-cols-[minmax(0,1fr)_7rem_6.5rem_8rem_2rem] xl:grid-cols-[minmax(0,1fr)_minmax(6rem,13rem)_7rem_6.5rem_8rem_2rem] items-center gap-x-3 gap-y-1";
+  "grid grid-cols-[minmax(0,1fr)_7.5rem_2rem] sm:grid-cols-[minmax(0,1fr)_7rem_6.5rem_8rem_2rem] xl:grid-cols-[minmax(0,1fr)_minmax(6rem,13rem)_7rem_6.5rem_8rem_2rem] items-center gap-x-3 gap-y-0.5";
 const NAME = "col-span-3 sm:col-span-1 min-w-0";
-const ROW = `${GRID} rounded-md px-2 py-2 hover:bg-muted/40`;
+const ROW = `${GRID} rounded-md px-2 py-1 hover:bg-muted/40`;
 const NUM = "font-mono text-xs tabular-nums";
 
 function pillClass(status: BudgetLine["status"]): string {
@@ -91,7 +91,7 @@ function ProgressBar({ bar }: { bar: BarSpec }) {
 /** The bar under the name, below `xl`. */
 function InlineBar({ bar }: { bar: BarSpec | null }) {
   return bar ? (
-    <div className="mt-1.5 xl:hidden">
+    <div className="mt-1 xl:hidden">
       <ProgressBar bar={bar} />
     </div>
   ) : null;
@@ -164,7 +164,7 @@ function MenuButton({ label }: { label: string }) {
   return (
     <DropdownMenuTrigger
       render={
-        <Button variant="ghost" size="icon" className="h-7 w-7 text-muted-foreground" aria-label={label}>
+        <Button variant="ghost" size="icon" className="h-6 w-6 text-muted-foreground" aria-label={label}>
           <MoreHorizontal className="h-4 w-4" />
         </Button>
       }
@@ -348,7 +348,7 @@ function SpendingGroupBlock({
   const count = group.lines.length;
   return (
     <div className="border-t first:border-t-0">
-      <div className={`${GRID} px-2 py-2`}>
+      <div className={`${GRID} px-2 py-1.5`}>
         <div className={NAME}>
           <button type="button" onClick={onToggle} aria-expanded={!collapsed} className="flex w-full min-w-0 items-center gap-1.5 text-left">
             {collapsed ? <ChevronRight className="h-3.5 w-3.5 shrink-0 text-muted-foreground" /> : <ChevronDown className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />}
@@ -435,7 +435,7 @@ function SpendingGroupBlock({
         </DropdownMenu>
       </div>
       {!collapsed && (
-        <div className="pb-1">
+        <div>
           {visibleLines.map((l) => (
             <SpendingLineRow key={l.key} line={l} data={data} inGroupBudget={group.byGroup} actions={actions} />
           ))}
@@ -467,12 +467,12 @@ function SectionHeader({
   return (
     <>
       {toolbar && (
-        <div className="flex flex-wrap items-center justify-between gap-2 px-2 pb-2 pt-1">
+        <div className="flex flex-wrap items-center justify-between gap-2 px-2 pb-1.5 pt-0.5">
           {heading}
           {toolbar}
         </div>
       )}
-      <div className={`${GRID} border-b px-2 pb-2 ${toolbar ? "" : "pt-1"}`}>
+      <div className={`${GRID} border-b px-2 pb-1.5 ${toolbar ? "" : "pt-0.5"}`}>
         {toolbar ? <span className="hidden sm:block" /> : <div className={NAME}>{heading}</div>}
         <span className="hidden xl:block" />
         <span className={`pr-2 ${label}`}>{budgetLabel}</span>
@@ -492,7 +492,7 @@ export function IncomeSection({ data, actions }: { data: BudgetMonth; actions: R
       <SectionHeader title="Income" budgetLabel="Expected" actualLabel="Received" leftLabel="Status" />
       {data.income.map((g) => (
         <div key={g.key} className="border-t first:border-t-0">
-          {data.income.length > 1 && <div className="px-2 pt-2 text-xs font-medium text-muted-foreground">{g.name}</div>}
+          {data.income.length > 1 && <div className="px-2 pt-1.5 text-xs font-medium text-muted-foreground">{g.name}</div>}
           {g.lines.map((l) => {
             const bar: BarSpec | null = l.budgeted != null && l.budgeted > 0 ? { value: l.actual, target: l.budgeted, tone: "ok" } : null;
             return (
@@ -593,7 +593,7 @@ export function DebtSection({ data, actions }: { data: BudgetMonth; actions: Row
           </div>
         );
       })}
-      <p className="px-2 pb-1 pt-2 text-[11px] text-muted-foreground">
+      <p className="px-2 pb-0.5 pt-1 text-[11px] text-muted-foreground">
         A payment&apos;s interest is part of its line here, not counted again under its expense category.
       </p>
     </section>

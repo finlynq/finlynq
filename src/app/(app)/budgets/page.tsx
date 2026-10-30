@@ -172,7 +172,7 @@ export default function BudgetsPage() {
 
   return (
     // Capped so names and amounts stay close together on very wide screens.
-    <div className="max-w-6xl space-y-4">
+    <div className="max-w-6xl space-y-3">
       <OnboardingTips page="budgets" />
       <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
         <div>

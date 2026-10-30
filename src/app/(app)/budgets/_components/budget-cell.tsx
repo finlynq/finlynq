@@ -66,7 +66,7 @@ export function BudgetCell({
         ref={inputRef}
         aria-label={label}
         inputMode="decimal"
-        className="h-7 w-full rounded-md border border-primary bg-background px-2 text-right font-mono text-xs tabular-nums outline-none"
+        className="h-6 w-full rounded-md border border-primary bg-background px-2 text-right font-mono text-xs tabular-nums outline-none"
         value={text}
         onChange={(e) => setText(e.target.value)}
         onBlur={commit}
@@ -90,7 +90,7 @@ export function BudgetCell({
       disabled={disabled}
       aria-label={label}
       title={error || (disabled ? undefined : "Click to edit")}
-      className={`h-7 w-full rounded-md border px-2 text-right font-mono text-xs tabular-nums transition-colors ${
+      className={`h-6 w-full rounded-md border px-2 text-right font-mono text-xs tabular-nums transition-colors ${
         disabled
           ? "cursor-default border-transparent text-muted-foreground"
           : value == null
