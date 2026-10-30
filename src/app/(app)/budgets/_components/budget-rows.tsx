@@ -32,7 +32,10 @@ export interface RowActions {
   openSettings: () => void;
 }
 
-const GRID = "grid grid-cols-[minmax(0,1fr)_6.5rem_7.5rem_2rem] sm:grid-cols-[minmax(0,1fr)_7rem_6.5rem_8rem_2rem] items-center gap-x-2";
+// Below `sm` the name takes its own line and budget | left | menu sit under it;
+// from `sm` up everything is one row with a Spent/Received/Paid column.
+const GRID = "grid grid-cols-[minmax(0,1fr)_7.5rem_2rem] sm:grid-cols-[minmax(0,1fr)_7rem_6.5rem_8rem_2rem] items-center gap-x-2 gap-y-0.5";
+const NAME = "col-span-3 sm:col-span-1 min-w-0";
 
 function pillClass(status: BudgetLine["status"]): string {
   switch (status) {
@@ -151,7 +154,7 @@ function SpendingLineRow({
     : null;
   return (
     <div className={`${GRID} rounded-md px-2 py-1.5 hover:bg-muted/40`}>
-      <div className="min-w-0">
+      <div className={NAME}>
         <div className="flex items-center gap-1.5 min-w-0">
           {line.categoryId ? (
             <Link href={`/categories/${line.categoryId}`} className="truncate text-sm hover:underline">
@@ -273,7 +276,7 @@ function SpendingGroupBlock({
   return (
     <div className="border-t first:border-t-0">
       <div className={`${GRID} bg-muted/40 px-2 py-1.5`}>
-        <button type="button" onClick={onToggle} className="flex min-w-0 items-center gap-1.5 text-left text-sm font-medium">
+        <button type="button" onClick={onToggle} className={`${NAME} flex items-center gap-1.5 text-left text-sm font-medium`}>
           {collapsed ? <ChevronRight className="h-3.5 w-3.5 shrink-0" /> : <ChevronDown className="h-3.5 w-3.5 shrink-0" />}
           <span className="truncate">{group.name}</span>
           {group.byGroup && <span className="shrink-0 rounded bg-primary/10 px-1.5 text-[10px] font-medium text-primary">one budget</span>}
@@ -360,7 +363,7 @@ function SpendingGroupBlock({
 function SectionHeader({ title, budgetLabel, actualLabel, leftLabel }: { title: string; budgetLabel: string; actualLabel: string; leftLabel: string }) {
   return (
     <div className={`${GRID} px-2 pb-1 text-[11px] uppercase tracking-wide text-muted-foreground`}>
-      <span>{title}</span>
+      <span className={NAME}>{title}</span>
       <span className="text-right">{budgetLabel}</span>
       <span className="hidden sm:block text-right">{actualLabel}</span>
       <span className="text-right">{leftLabel}</span>
@@ -380,7 +383,7 @@ export function IncomeSection({ data, actions }: { data: BudgetMonth; actions: R
           {data.income.length > 1 && <div className="px-2 pt-1.5 text-xs font-medium text-muted-foreground">{g.name}</div>}
           {g.lines.map((l) => (
             <div key={l.key} className={`${GRID} rounded-md px-2 py-1.5 hover:bg-muted/40`}>
-              <span className="truncate text-sm">{l.name}</span>
+              <span className={`${NAME} truncate text-sm`}>{l.name}</span>
               <BudgetCell value={l.budgeted} currency={cur} label={`Expected income from ${l.name}`} onSave={(v) => actions.setLine(l.key, v)} />
               <span className="hidden sm:block text-right font-mono text-xs tabular-nums">{formatCurrency(l.actual, cur)}</span>
               <span className="text-right">
@@ -430,7 +433,7 @@ export function DebtSection({ data, actions }: { data: BudgetMonth; actions: Row
           d.status === "paid" ? pillClass("ok") : d.status === "late" ? pillClass("over") : d.status === "due" ? pillClass("warn") : pillClass("unbudgeted");
         return (
           <div key={d.accountId} className={`${GRID} rounded-md px-2 py-1.5 hover:bg-muted/40`}>
-            <div className="min-w-0">
+            <div className={NAME}>
               {d.loanIds.length === 1 ? (
                 <Link href={loanHref(d.loanIds[0])} className="block truncate text-sm hover:underline">
                   {d.name}

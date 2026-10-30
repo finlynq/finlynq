@@ -66,9 +66,9 @@ const TIPS_BY_PAGE: Record<string, OnboardingTip[]> = {
   budgets: [
     {
       id: "budget-start",
-      title: "Set monthly spending limits",
+      title: "Plan your month",
       description:
-        "Create budgets per category to track your spending. You'll see progress bars showing how much you've used each month.",
+        "Click a category's budget to type an amount, or use Fill budgets to copy or average months. Loan payments appear on their own, and a line's menu lets it roll over or join its group.",
     },
   ],
   accounts: [

@@ -42,7 +42,7 @@ describe("OnboardingTips", () => {
 
   it("renders budget tips", () => {
     const { getByText } = render(<OnboardingTips page="budgets" />);
-    expect(getByText("Set monthly spending limits")).toBeTruthy();
+    expect(getByText("Plan your month")).toBeTruthy();
   });
 
   it("renders import tips", () => {
