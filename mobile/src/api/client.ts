@@ -390,6 +390,8 @@ import type {
   StagedImportSummary,
   StagedImportDetail,
   StagedApproveResult,
+  SimplefinStatus,
+  SimplefinSyncResult,
   Goal,
   GoalEditData,
   CategoryEditData,
@@ -1033,6 +1035,18 @@ export const endpoints = {
   // Throw the file away (its rows go with it).
   rejectStagedImport: (id: string) =>
     api.delete<{ ok: boolean }>(`/api/import/staged/${encodeURIComponent(id)}`),
+
+  // ─── Bank feed (SimpleFIN, 2026-10-30) ──────────────────────────────────
+  // Same routes as the web's Settings → Bank feeds page, bare JSON. Status
+  // needs no DEK; sync does (423 → recovery).
+
+  // Connected?, when rows were last staged, and the last sync's outcome.
+  getBankFeedStatus: () => api.get<SimplefinStatus>("/api/settings/bank-feeds/simplefin/status"),
+
+  // Pull the last ~90 days for the accounts already linked on the web. No
+  // choices are sent, so a bank account that is not linked yet is skipped and
+  // listed in `skippedNoChoice`. A 400 means the feed is not connected.
+  syncBankFeed: () => api.post<SimplefinSyncResult>("/api/settings/bank-feeds/simplefin/sync", {}),
 
   // ─── Settings (P4 expansion) ───────────────────────────────────────────
   // Display currency — bare `{ displayCurrency }` (request() wraps → res.data).

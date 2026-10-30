@@ -1733,3 +1733,58 @@ export interface StagedApproveResult {
   skippedDuplicates: number;
   rowErrors: { rowIndex: number; message: string }[];
 }
+
+// ─── Bank feed (SimpleFIN, 2026-10-30) ──────────────────────────────────────
+// The same routes as the web's Settings → Bank feeds page, all bare JSON:
+// GET /api/settings/bank-feeds/simplefin/status and POST .../sync. Mobile syncs
+// only accounts already linked on the web; connecting the feed and linking a
+// new bank account stay on the web.
+
+/** Outcome of the most recent sync, automatic (at sign-in) or manual. Stored
+ *  by the server as codes and counts only, so `message` never names an
+ *  account; the problems themselves come back in a sync's `errors`. */
+export interface SimplefinSyncStatus {
+  ok: boolean;
+  /** The sync ran, but one or more accounts reported problems. */
+  partial: boolean;
+  trigger: "auto" | "manual";
+  at: string;
+  message?: string;
+}
+
+export interface SimplefinStatus {
+  connected: boolean;
+  /** When rows were last staged from the feed (a sync that found nothing
+   *  does not move it). */
+  lastSyncAt: string | null;
+  lastSync?: SimplefinSyncStatus | null;
+}
+
+/** One account's share of a sync: its rows were staged, then moved along by
+ *  the account's mode (manual: wait for review; approve: bank ledger; auto:
+ *  rules record what they match). */
+export interface SimplefinStagedResult {
+  stagedImportId: string;
+  accountId: number;
+  accountName: string;
+  rowCount: number;
+  newCount: number;
+  duplicateCount: number;
+  mode: AccountMode;
+  stage: "pending" | "loaded" | "recorded";
+  /** Rows the account's rules recorded as transactions (auto only). */
+  recorded: number;
+  /** Older unmatched rows on the account that the rules recorded this time. */
+  sweptStaleRows?: number;
+}
+
+export interface SimplefinSyncResult {
+  staged: SimplefinStagedResult[];
+  accountsCreated: number;
+  /** Bank accounts not linked to a Finlynq account yet: nothing was imported. */
+  skippedNoChoice: { externalId: string; name: string }[];
+  /** Not-yet-posted charges, left out until they post. */
+  skippedPending: number;
+  /** What went wrong, as SimpleFIN or the import worded it. */
+  errors: string[];
+}
