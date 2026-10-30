@@ -228,7 +228,11 @@ export default function BudgetsPage() {
         actions={actions}
         toolbar={
           // One row that scrolls sideways on phones instead of wrapping.
-          <div className="flex max-w-full gap-1.5 overflow-x-auto" role="group" aria-label="Show">
+          <div
+            className="flex max-w-full gap-1.5 overflow-x-auto [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
+            role="group"
+            aria-label="Show"
+          >
             {chips.map((c) => {
               const active = filter === c.key;
               return (

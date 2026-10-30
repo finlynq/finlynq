@@ -38,13 +38,20 @@ function StatRow({
           {target > 0 && <span className="text-muted-foreground"> of {formatCurrency(target, currency)}</span>}
         </span>
       </div>
-      <div className="relative mt-1 h-1.5 overflow-hidden rounded-full bg-muted">
-        <div
-          className={`h-full rounded-full ${over && overIsBad ? "bg-rose-500" : "bg-emerald-500"}`}
-          style={{ width: `${pct}%` }}
-        />
+      <div className="relative mt-1.5 h-1.5">
+        <div className="h-full overflow-hidden rounded-full bg-muted">
+          <div
+            className={`h-full rounded-full ${over && overIsBad ? "bg-rose-500" : "bg-emerald-500"}`}
+            style={{ width: `${pct}%` }}
+          />
+        </div>
+        {/* Sticks out above and below the bar so it reads against either colour. */}
         {pace != null && pace > 0 && pace < 1 && (
-          <div className="absolute inset-y-0 w-0.5 bg-foreground/70" style={{ left: `${pace * 100}%` }} title="Today" />
+          <div
+            className="absolute -inset-y-1 w-0.5 -translate-x-1/2 rounded-full bg-foreground"
+            style={{ left: `${pace * 100}%` }}
+            title="Today"
+          />
         )}
       </div>
     </div>
