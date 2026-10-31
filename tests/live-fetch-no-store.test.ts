@@ -31,7 +31,9 @@ function functionBody(src: string, signature: RegExp): string {
 }
 
 const LIVE_SITES: Array<[string, RegExp]> = [
-  ["src/lib/price-service.ts", /export async function fetchQuoteLive\(/],
+  // `fetchQuoteLive` is a one-line wrapper since 2026-10-31; the fetch (and the
+  // option that matters here) lives in `fetchQuoteLiveOutcome`.
+  ["src/lib/price-service.ts", /async function fetchQuoteLiveOutcome\(/],
   ["src/lib/crypto-service.ts", /async function coinGeckoFetch\(/],
   ["src/lib/fx-service.ts", /async function fetchYahooChartRateToUsd\(/],
 ];
