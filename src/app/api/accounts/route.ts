@@ -6,12 +6,30 @@ import { z } from "zod";
 import { validateBody, safeErrorMessage, logApiError } from "@/lib/validate";
 import { buildNameFields, decryptNamedRows } from "@/lib/crypto/encrypted-columns";
 import { backfillInvestmentAccount } from "@/lib/investment-account";
-import { isPgErrorCode } from "@/lib/db-utils";
+import { isPgErrorCode, pgErrorConstraint } from "@/lib/db-utils";
 import { db } from "@/db";
 import {
   getAccountDeleteBlockers,
   accountDeleteBlockedMessage,
 } from "@/lib/accounts/delete-blockers";
+
+/**
+ * Account names are unique per user via the `accounts_user_name_lookup_uniq`
+ * index over the name_lookup HMAC. Creating or renaming onto an existing name
+ * is ordinary user behaviour, not a server fault — without this it escaped as a
+ * raw 23505 ("Failed query: insert into \"accounts\" …") and the user got an
+ * opaque 500 (prod `diagnostics_log` 2026-10-28 20:13, a EUR investment
+ * account). Same shape as the categories route's `duplicateNameResponse`.
+ */
+function duplicateNameResponse(error: unknown): NextResponse | null {
+  if (!isPgErrorCode(error, "23505")) return null;
+  const constraint = pgErrorConstraint(error);
+  if (constraint && constraint !== "accounts_user_name_lookup_uniq") return null;
+  return NextResponse.json(
+    { error: "An account with this name already exists. Pick a different name." },
+    { status: 409 },
+  );
+}
 
 const postSchema = z.object({
   name: z.string(),
@@ -82,6 +100,8 @@ export async function POST(request: NextRequest) {
     }
     return NextResponse.json(account, { status: 201 });
   } catch (error: unknown) {
+    const duplicate = duplicateNameResponse(error);
+    if (duplicate) return duplicate;
     await logApiError("POST", "/api/accounts", error, userId);
     return NextResponse.json({ error: safeErrorMessage(error, "Failed to create account") }, { status: 500 });
   }
@@ -133,6 +153,8 @@ export async function PUT(request: NextRequest) {
     }
     return NextResponse.json(account);
   } catch (error: unknown) {
+    const duplicate = duplicateNameResponse(error);
+    if (duplicate) return duplicate;
     await logApiError("PUT", "/api/accounts", error, userId);
     return NextResponse.json({ error: safeErrorMessage(error, "Failed to update account") }, { status: 500 });
   }

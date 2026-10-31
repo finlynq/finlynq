@@ -45,6 +45,22 @@ import {
   getAccountDeleteBlockers,
   accountDeleteBlockedMessage,
 } from "../../src/lib/accounts/delete-blockers";
+import { isPgErrorCode, pgErrorConstraint } from "../../src/lib/db-utils";
+
+/**
+ * Account names are unique per user (`accounts_user_name_lookup_uniq` over the
+ * name_lookup HMAC). The add/update ops pre-check the lookup, but a concurrent
+ * add or a rename that races past the pre-check still trips the index, and the
+ * SDK would surface Drizzle's raw "Failed query: insert into \"accounts\" …" as
+ * the tool error. Mirrors the REST route's `duplicateNameResponse`. Returns
+ * null for anything else so the caller rethrows.
+ */
+function duplicateAccountNameError(error: unknown, name: string): string | null {
+  if (!isPgErrorCode(error, "23505")) return null;
+  const constraint = pgErrorConstraint(error);
+  if (constraint && constraint !== "accounts_user_name_lookup_uniq") return null;
+  return `Account "${name}" already exists. Pick a different name.`;
+}
 
 type ToolResult = { content: Array<{ type: "text"; text: string }> };
 
@@ -84,17 +100,25 @@ export function registerAccountsTools(server: McpServer, ctx: PgToolContext) {
     // (USD terminal fallback) — never a hardcoded "CAD". explicit param wins.
     const resolvedCurrency = await resolveReportingCurrency(db, userId, currency);
     // Stream D Phase 4 — plaintext name/alias columns dropped.
-    const result = await q(db, sql`
-      INSERT INTO accounts (
-        user_id, type, "group", currency, note,
-        name_ct, name_lookup, alias_ct, alias_lookup
-      )
-      VALUES (
-        ${userId}, ${type}, ${resolvedGroup}, ${resolvedCurrency}, ${encNote(note)},
-        ${nameEnc.ct}, ${nameEnc.lookup}, ${aliasEnc.ct}, ${aliasEnc.lookup}
-      )
-      RETURNING id
-    `);
+    let result: Row[];
+    try {
+      result = await q(db, sql`
+        INSERT INTO accounts (
+          user_id, type, "group", currency, note,
+          name_ct, name_lookup, alias_ct, alias_lookup
+        )
+        VALUES (
+          ${userId}, ${type}, ${resolvedGroup}, ${resolvedCurrency}, ${encNote(note)},
+          ${nameEnc.ct}, ${nameEnc.lookup}, ${aliasEnc.ct}, ${aliasEnc.lookup}
+        )
+        RETURNING id
+      `);
+    } catch (e) {
+      // Race backstop for the pre-check above (two concurrent adds of one name).
+      const duplicate = duplicateAccountNameError(e, name);
+      if (duplicate) return err(duplicate);
+      throw e;
+    }
 
     return text({ success: true, data: { accountId: result[0]?.id, message: `Account "${name}" created (${type === "A" ? "asset" : "liability"}, ${resolvedCurrency})${aliasValue ? `, alias "${aliasValue}"` : ""}` } });
   }
@@ -169,6 +193,13 @@ export function registerAccountsTools(server: McpServer, ctx: PgToolContext) {
     const updates: ReturnType<typeof sql>[] = [];
     if (name !== undefined) {
       if (!dek) return err("Cannot rename account without an unlocked DEK (Stream D Phase 4).");
+      // Unique-name clash check via the name_lookup HMAC (mirrors opAdd and
+      // manage_categories op:rename). Without it a rename onto an existing name
+      // escaped as a raw 23505 from the UPDATE below.
+      const clash = await q(db, sql`
+        SELECT id FROM accounts WHERE user_id = ${userId} AND name_lookup = ${nameLookup(dek, name)} AND id <> ${acct.id}
+      `);
+      if (clash.length) return err(`Account "${name}" already exists (id: ${Number(clash[0].id)}). Pick a different name.`);
       const n = encryptName(dek, name);
       updates.push(sql`name_ct = ${n.ct}`, sql`name_lookup = ${n.lookup}`);
     }
@@ -185,9 +216,17 @@ export function registerAccountsTools(server: McpServer, ctx: PgToolContext) {
     }
     if (!updates.length) return err("No fields to update");
 
-    const result = await db.execute(
-      sql`UPDATE accounts SET ${sql.join(updates, sql`, `)} WHERE id = ${acct.id} AND user_id = ${userId}`
-    );
+    let result: unknown;
+    try {
+      result = await db.execute(
+        sql`UPDATE accounts SET ${sql.join(updates, sql`, `)} WHERE id = ${acct.id} AND user_id = ${userId}`
+      );
+    } catch (e) {
+      // Race backstop for the clash check above.
+      const duplicate = name !== undefined ? duplicateAccountNameError(e, name) : null;
+      if (duplicate) return err(duplicate);
+      throw e;
+    }
     // pg returns { rowCount }; some drivers expose it differently. If the update
     // touched 0 rows the ownership check in WHERE failed (e.g. race with delete).
     const affected =
