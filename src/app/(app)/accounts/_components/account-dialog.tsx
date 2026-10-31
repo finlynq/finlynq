@@ -14,6 +14,7 @@ import { useActiveCurrencies } from "@/lib/hooks/useActiveCurrencies";
 import { useDropdownOrder } from "@/components/dropdown-order-provider";
 import { ACCOUNT_GROUP_DEFAULTS } from "@/lib/accounts/groups";
 import { todayISO } from "@/lib/utils/date";
+import { parseSaveError } from "@/lib/save-error";
 import {
   loadOpeningBalance,
   saveOpeningBalance,
@@ -216,8 +217,9 @@ export function AccountDialog({
           body: JSON.stringify({ id: account.id, ...payload }),
         });
         if (!res.ok) {
-          const d = await res.json().catch(() => ({}));
-          setSaveError(d.error ?? "Failed to update account");
+          // 409 (duplicate name) / 423 (locked) / 500: show the server's message
+          // and keep the dialog open with the input intact.
+          setSaveError(await parseSaveError(res, "Failed to update account"));
           return;
         }
         saved = await res.json();
@@ -233,8 +235,7 @@ export function AccountDialog({
           body: JSON.stringify(payload),
         });
         if (!res.ok) {
-          const d = await res.json().catch(() => ({}));
-          setSaveError(d.error ?? "Failed to create account");
+          setSaveError(await parseSaveError(res, "Failed to create account"));
           return;
         }
         saved = await res.json();
@@ -321,8 +322,7 @@ export function AccountDialog({
         body: JSON.stringify({ id: account.id, archived: false }),
       });
       if (!res.ok) {
-        const d = await res.json().catch(() => ({}));
-        setSaveError(d.error ?? "Failed to unarchive account");
+        setSaveError(await parseSaveError(res, "Failed to unarchive account"));
         return;
       }
       const saved = await res.json();
