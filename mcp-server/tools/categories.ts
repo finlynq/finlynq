@@ -206,14 +206,24 @@ export function registerCategoriesTools(server: McpServer, ctx: PgToolContext) {
   }
 
   // ── shared: count every dependent of a category, per type ───────────────────
-  // FINLYNQ-275. The `delete` guard counts transactions/rules/subscriptions;
-  // merge must repoint EVERY table with a category_id FK, so this enumerates the
-  // full set (grep'd from src/db/schema-pg.ts): transactions, transaction_splits
-  // (owned via transaction_id → transactions; NO user_id column), subscriptions,
-  // budgets, budget_templates, recurring_transactions, email_import_rules, plus
-  // the FINLYNQ-84 transaction_rules JSONB `set_category` action. backfill_proposals
-  // (chosen_category_id) is ephemeral review state and deliberately NOT repointed.
-  async function countCategoryDependents(catId: number): Promise<{
+  // FINLYNQ-275 (+ the 2026-10-31 Budget v2 follow-up). The `delete` guard
+  // counts transactions/rules/subscriptions; merge must repoint EVERY table
+  // with a category FK, so this enumerates the full set (grep'd from
+  // src/db/schema-pg.ts): transactions, transaction_splits (owned via
+  // transaction_id → transactions; NO user_id column), subscriptions, budgets,
+  // budget_templates, recurring_transactions, email_import_rules, the
+  // FINLYNQ-84 transaction_rules JSONB `set_category` action — PLUS the four
+  // columns the first version left to the DB on the source DELETE, each of
+  // which then lost data silently:
+  //   loans.interest_category_id            ON DELETE SET NULL → the loan forgot
+  //                                         where its interest is booked;
+  //   budget_line_settings.category_id      ON DELETE CASCADE → the source's
+  //                                         excluded / rollover setting vanished;
+  //   budget_carryover_sets.category_id     ON DELETE CASCADE → a hand-set
+  //                                         carried-in amount vanished;
+  //   backfill_proposals.chosen_category_id ON DELETE SET NULL → a pending
+  //                                         proposal forgot the user's pick.
+  type DependentCounts = {
     transactions: number;
     splits: number;
     subscriptions: number;
@@ -222,29 +232,110 @@ export function registerCategoriesTools(server: McpServer, ctx: PgToolContext) {
     recurringTransactions: number;
     emailRules: number;
     rules: number;
-  }> {
+    loans: number;
+    budgetLineSettings: number;
+    budgetCarryoverSets: number;
+    backfillProposals: number;
+  };
+  async function countCategoryDependents(catId: number): Promise<DependentCounts> {
     const one = async (query: ReturnType<typeof sql>) =>
       Number(((await q(db, query)) as { cnt: string | number }[])[0]?.cnt ?? 0);
-    const [transactions, splits, subscriptions, budgets, budgetTemplates, recurringTransactions, emailRules, rules] =
-      await Promise.all([
-        one(sql`SELECT COUNT(*) AS cnt FROM transactions WHERE user_id = ${userId} AND category_id = ${catId}`),
-        one(sql`
-          SELECT COUNT(*) AS cnt FROM transaction_splits ts
-          JOIN transactions t ON t.id = ts.transaction_id
-          WHERE t.user_id = ${userId} AND ts.category_id = ${catId}
-        `),
-        one(sql`SELECT COUNT(*) AS cnt FROM subscriptions WHERE user_id = ${userId} AND category_id = ${catId}`),
-        one(sql`SELECT COUNT(*) AS cnt FROM budgets WHERE user_id = ${userId} AND category_id = ${catId}`),
-        one(sql`SELECT COUNT(*) AS cnt FROM budget_templates WHERE user_id = ${userId} AND category_id = ${catId}`),
-        one(sql`SELECT COUNT(*) AS cnt FROM recurring_transactions WHERE user_id = ${userId} AND category_id = ${catId}`),
-        one(sql`SELECT COUNT(*) AS cnt FROM email_import_rules WHERE user_id = ${userId} AND category_id = ${catId}`),
-        one(sql`
-          SELECT COUNT(*) AS cnt FROM transaction_rules
-          WHERE user_id = ${userId}
-            AND actions @> ${JSON.stringify([{ kind: "set_category", categoryId: catId }])}::jsonb
-        `),
-      ]);
-    return { transactions, splits, subscriptions, budgets, budgetTemplates, recurringTransactions, emailRules, rules };
+    const [
+      transactions, splits, subscriptions, budgets, budgetTemplates, recurringTransactions, emailRules, rules,
+      loans, budgetLineSettings, budgetCarryoverSets, backfillProposals,
+    ] = await Promise.all([
+      one(sql`SELECT COUNT(*) AS cnt FROM transactions WHERE user_id = ${userId} AND category_id = ${catId}`),
+      one(sql`
+        SELECT COUNT(*) AS cnt FROM transaction_splits ts
+        JOIN transactions t ON t.id = ts.transaction_id
+        WHERE t.user_id = ${userId} AND ts.category_id = ${catId}
+      `),
+      one(sql`SELECT COUNT(*) AS cnt FROM subscriptions WHERE user_id = ${userId} AND category_id = ${catId}`),
+      one(sql`SELECT COUNT(*) AS cnt FROM budgets WHERE user_id = ${userId} AND category_id = ${catId}`),
+      one(sql`SELECT COUNT(*) AS cnt FROM budget_templates WHERE user_id = ${userId} AND category_id = ${catId}`),
+      one(sql`SELECT COUNT(*) AS cnt FROM recurring_transactions WHERE user_id = ${userId} AND category_id = ${catId}`),
+      one(sql`SELECT COUNT(*) AS cnt FROM email_import_rules WHERE user_id = ${userId} AND category_id = ${catId}`),
+      one(sql`
+        SELECT COUNT(*) AS cnt FROM transaction_rules
+        WHERE user_id = ${userId}
+          AND actions @> ${JSON.stringify([{ kind: "set_category", categoryId: catId }])}::jsonb
+      `),
+      one(sql`SELECT COUNT(*) AS cnt FROM loans WHERE user_id = ${userId} AND interest_category_id = ${catId}`),
+      one(sql`SELECT COUNT(*) AS cnt FROM budget_line_settings WHERE user_id = ${userId} AND category_id = ${catId}`),
+      one(sql`SELECT COUNT(*) AS cnt FROM budget_carryover_sets WHERE user_id = ${userId} AND category_id = ${catId}`),
+      one(sql`SELECT COUNT(*) AS cnt FROM backfill_proposals WHERE user_id = ${userId} AND chosen_category_id = ${catId}`),
+    ]);
+    return {
+      transactions, splits, subscriptions, budgets, budgetTemplates, recurringTransactions, emailRules, rules,
+      loans, budgetLineSettings, budgetCarryoverSets, backfillProposals,
+    };
+  }
+  function sumDependents(d: DependentCounts): number {
+    return Object.values(d).reduce((acc, n) => acc + n, 0);
+  }
+
+  // ── shared: the keys the TARGET already holds — what a merge must FOLD ──────
+  // Three budget tables carry a per-category unique index, so a blind
+  // `UPDATE … SET category_id = target WHERE category_id = source` trips 23505
+  // the moment the target already has a row for the same key — the WHOLE merge
+  // transaction rolled back and the assistant got the raw
+  // "budgets_user_category_month_unique" message. With Budget v2 ("Fill
+  // budgets" writes a row for EVERY income and expense category) that is the
+  // common case, not an edge case. The rule: the TARGET's row is the surviving
+  // plan and WINS; the source's row for that key is dropped ("folded") and
+  // reported; every other key is repointed as before. This is deliberately the
+  // ONLY place budget rows are written outside src/lib/budgets/write.ts — it
+  // never creates or edits a plan, it only decides which of two existing rows
+  // survives a merge.
+  //   budgets               (user_id, category_id, month)
+  //   budget_line_settings  (user_id, category_id)         WHERE category_id IS NOT NULL
+  //   budget_carryover_sets (user_id, category_id, month)  WHERE category_id IS NOT NULL
+  type MergeFold = {
+    budgets: { count: number; months: string[] };
+    budgetLineSettings: boolean;
+    budgetCarryoverSets: { count: number; months: string[] };
+  };
+  const monthsOf = (rows: Row[]) => rows.map((r) => String(r.month)).sort();
+  async function previewMergeFold(srcId: number, tgtId: number): Promise<MergeFold> {
+    const [budgetRows, lineRows, carryRows] = await Promise.all([
+      q(db, sql`
+        SELECT s.month FROM budgets s
+        JOIN budgets t ON t.user_id = s.user_id AND t.month = s.month AND t.category_id = ${tgtId}
+        WHERE s.user_id = ${userId} AND s.category_id = ${srcId}
+      `),
+      q(db, sql`
+        SELECT s.id FROM budget_line_settings s
+        JOIN budget_line_settings t ON t.user_id = s.user_id AND t.category_id = ${tgtId}
+        WHERE s.user_id = ${userId} AND s.category_id = ${srcId}
+      `),
+      q(db, sql`
+        SELECT s.month FROM budget_carryover_sets s
+        JOIN budget_carryover_sets t ON t.user_id = s.user_id AND t.month = s.month AND t.category_id = ${tgtId}
+        WHERE s.user_id = ${userId} AND s.category_id = ${srcId}
+      `),
+    ]);
+    const budgetMonths = monthsOf(budgetRows);
+    const carryMonths = monthsOf(carryRows);
+    return {
+      budgets: { count: budgetMonths.length, months: budgetMonths },
+      budgetLineSettings: lineRows.length > 0,
+      budgetCarryoverSets: { count: carryMonths.length, months: carryMonths },
+    };
+  }
+  // Human-readable fold notes for the preview `action` and the commit message,
+  // so the confirmation names exactly what the target keeps and the source loses.
+  function describeFold(fold: MergeFold, srcName: string, tgtName: string): string[] {
+    const notes: string[] = [];
+    if (fold.budgets.count > 0) {
+      notes.push(`Both have a budget for ${fold.budgets.count} month(s) (${fold.budgets.months.join(", ")}): "${tgtName}"'s amount is kept and "${srcName}"'s is dropped.`);
+    }
+    if (fold.budgetLineSettings) {
+      notes.push(`Both have budget line settings (excluded / rollover): "${tgtName}"'s are kept.`);
+    }
+    if (fold.budgetCarryoverSets.count > 0) {
+      notes.push(`Both have a carried-in amount set for ${fold.budgetCarryoverSets.count} month(s) (${fold.budgetCarryoverSets.months.join(", ")}): "${tgtName}"'s is kept.`);
+    }
+    return notes;
   }
 
   // ── op: rename — pure metadata write (FINLYNQ-275) ──────────────────────────
@@ -284,9 +375,10 @@ export function registerCategoriesTools(server: McpServer, ctx: PgToolContext) {
 
   // ── op: merge — token-gated atomic repoint of ALL dependents (FINLYNQ-275) ──
   // TWO-STEP via the shared withConfirmation middleware: a bare call previews
-  // per-type dependent counts + a token (writes NOTHING); a valid token commits
-  // — one db.transaction repoints every dependent source→target, then DELETEs
-  // the source. The token payload BINDS the resolved {source,target} ids.
+  // per-type dependent counts + what will be folded + a token (writes NOTHING);
+  // a valid token commits — one db.transaction repoints every dependent
+  // source→target (folding the budget keys the target already holds), then
+  // DELETEs the source. The token payload BINDS the resolved {source,target} ids.
   type MergeArgs = {
     source?: number | string;
     target?: number | string;
@@ -321,20 +413,32 @@ export function registerCategoriesTools(server: McpServer, ctx: PgToolContext) {
     preview: async (a) => {
       const { src, tgt } = await resolveMerge(a);
       const srcId = Number(src.id);
-      const deps = await countCategoryDependents(srcId);
-      const total = deps.transactions + deps.splits + deps.subscriptions + deps.budgets + deps.budgetTemplates + deps.recurringTransactions + deps.emailRules + deps.rules;
+      const tgtId = Number(tgt.id);
+      const srcName = String(src.name ?? `#${srcId}`);
+      const tgtName = String(tgt.name ?? `#${tgtId}`);
+      const [deps, willFold] = await Promise.all([countCategoryDependents(srcId), previewMergeFold(srcId, tgtId)]);
+      const total = sumDependents(deps);
+      const action = [
+        `Repoint ${total} dependent row(s) to "${tgtName}" then delete "${srcName}".`,
+        ...describeFold(willFold, srcName, tgtName),
+      ].join(" ");
       return {
-        source: { id: srcId, name: String(src.name ?? `#${srcId}`) },
-        target: { id: Number(tgt.id), name: String(tgt.name ?? `#${Number(tgt.id)}`) },
+        source: { id: srcId, name: srcName },
+        target: { id: tgtId, name: tgtName },
         dependents: deps,
         totalDependents: total,
-        action: `Repoint ${total} dependent row(s) to "${String(tgt.name ?? `#${Number(tgt.id)}`)}" then delete "${String(src.name ?? `#${srcId}`)}".`,
+        // The keys BOTH categories hold: the target's row survives, the source's
+        // is dropped on commit. Empty when nothing collides.
+        willFold,
+        action,
       };
     },
     commit: async (a) => {
       const { src, tgt } = await resolveMerge(a);
       const srcId = Number(src.id);
       const tgtId = Number(tgt.id);
+      const srcName = String(src.name ?? `#${srcId}`);
+      const tgtName = String(tgt.name ?? `#${tgtId}`);
       // Re-count under the atomic transaction so the response reflects what was
       // actually moved (a row could have changed between preview and commit).
       const before = await countCategoryDependents(srcId);
@@ -342,9 +446,9 @@ export function registerCategoriesTools(server: McpServer, ctx: PgToolContext) {
       // from @/db); `DbLike` only advertises `execute`, so narrow-cast to reach
       // `.transaction` for the atomic multi-table repoint + source delete.
       const txdb = db as unknown as {
-        transaction: (fn: (tx: { execute: DbLike["execute"] }) => Promise<unknown>) => Promise<unknown>;
+        transaction: <T>(fn: (tx: DbLike) => Promise<T>) => Promise<T>;
       };
-      await txdb.transaction(async (tx) => {
+      const outcome = await txdb.transaction(async (tx) => {
         // audit-trio: the transactions repoint bumps updated_at (every UPDATE
         // site appends it). The other tables have no audit-trio contract.
         await tx.execute(sql`UPDATE transactions SET category_id = ${tgtId}, updated_at = NOW() WHERE user_id = ${userId} AND category_id = ${srcId}`);
@@ -354,7 +458,23 @@ export function registerCategoriesTools(server: McpServer, ctx: PgToolContext) {
             AND transaction_id IN (SELECT id FROM transactions WHERE user_id = ${userId})
         `);
         await tx.execute(sql`UPDATE subscriptions SET category_id = ${tgtId} WHERE user_id = ${userId} AND category_id = ${srcId}`);
-        await tx.execute(sql`UPDATE budgets SET category_id = ${tgtId} WHERE user_id = ${userId} AND category_id = ${srcId}`);
+        // Budgets — unique per (user, category, month). FOLD first: drop the
+        // source's row for every month the target already plans (the target's
+        // amount is the surviving plan), THEN repoint the remaining months. In
+        // the other order the UPDATE trips `budgets_user_category_month_unique`
+        // and rolls the whole merge back. RETURNING so the response reports
+        // what actually happened, not the pre-transaction count.
+        const budgetsFolded = await q(tx, sql`
+          DELETE FROM budgets s USING budgets t
+          WHERE s.user_id = ${userId} AND s.category_id = ${srcId}
+            AND t.user_id = s.user_id AND t.category_id = ${tgtId} AND t.month = s.month
+          RETURNING s.month
+        `);
+        const budgetsMoved = await q(tx, sql`
+          UPDATE budgets SET category_id = ${tgtId}
+          WHERE user_id = ${userId} AND category_id = ${srcId}
+          RETURNING id
+        `);
         await tx.execute(sql`UPDATE budget_templates SET category_id = ${tgtId} WHERE user_id = ${userId} AND category_id = ${srcId}`);
         await tx.execute(sql`UPDATE recurring_transactions SET category_id = ${tgtId} WHERE user_id = ${userId} AND category_id = ${srcId}`);
         await tx.execute(sql`UPDATE email_import_rules SET category_id = ${tgtId} WHERE user_id = ${userId} AND category_id = ${srcId}`);
@@ -378,11 +498,72 @@ export function registerCategoriesTools(server: McpServer, ctx: PgToolContext) {
           WHERE user_id = ${userId}
             AND actions @> ${JSON.stringify([{ kind: "set_category", categoryId: srcId }])}::jsonb
         `);
+        // loans.interest_category_id is ON DELETE SET NULL — repoint it BEFORE
+        // the source delete or the loan silently forgets where its interest is
+        // booked (and the Interest entries tab reads "nothing booked").
+        const loansMoved = await q(tx, sql`
+          UPDATE loans SET interest_category_id = ${tgtId}
+          WHERE user_id = ${userId} AND interest_category_id = ${srcId}
+          RETURNING id
+        `);
+        // budget_line_settings — ON DELETE CASCADE + unique per (user, category).
+        // Target has a row → its settings win, the source's row is dropped;
+        // otherwise the source's row is carried over to the target.
+        const lineFolded = await q(tx, sql`
+          DELETE FROM budget_line_settings s USING budget_line_settings t
+          WHERE s.user_id = ${userId} AND s.category_id = ${srcId}
+            AND t.user_id = s.user_id AND t.category_id = ${tgtId}
+          RETURNING s.id
+        `);
+        const lineMoved = await q(tx, sql`
+          UPDATE budget_line_settings SET category_id = ${tgtId}
+          WHERE user_id = ${userId} AND category_id = ${srcId}
+          RETURNING id
+        `);
+        // budget_carryover_sets — ON DELETE CASCADE + unique per (user,
+        // category, month). Same fold-then-repoint as budgets.
+        const carryFolded = await q(tx, sql`
+          DELETE FROM budget_carryover_sets s USING budget_carryover_sets t
+          WHERE s.user_id = ${userId} AND s.category_id = ${srcId}
+            AND t.user_id = s.user_id AND t.category_id = ${tgtId} AND t.month = s.month
+          RETURNING s.month
+        `);
+        const carryMoved = await q(tx, sql`
+          UPDATE budget_carryover_sets SET category_id = ${tgtId}
+          WHERE user_id = ${userId} AND category_id = ${srcId}
+          RETURNING id
+        `);
+        // backfill_proposals.chosen_category_id is ON DELETE SET NULL — a
+        // pending proposal would forget the user's pick; keep it on the target.
+        const proposalsMoved = await q(tx, sql`
+          UPDATE backfill_proposals SET chosen_category_id = ${tgtId}
+          WHERE user_id = ${userId} AND chosen_category_id = ${srcId}
+          RETURNING id
+        `);
         // Source now has no dependents → delete it.
         await tx.execute(sql`DELETE FROM categories WHERE id = ${srcId} AND user_id = ${userId}`);
+        const folded: MergeFold = {
+          budgets: { count: budgetsFolded.length, months: monthsOf(budgetsFolded) },
+          budgetLineSettings: lineFolded.length > 0,
+          budgetCarryoverSets: { count: carryFolded.length, months: monthsOf(carryFolded) },
+        };
+        return {
+          folded,
+          moved: {
+            budgets: budgetsMoved.length,
+            loans: loansMoved.length,
+            budgetLineSettings: lineMoved.length,
+            budgetCarryoverSets: carryMoved.length,
+            backfillProposals: proposalsMoved.length,
+          },
+        };
       });
       // Transactions moved category → drop the per-user tx cache.
       invalidateUserTxCache(userId);
+      const message = [
+        `Merged category #${srcId} into #${tgtId} and deleted the source.`,
+        ...describeFold(outcome.folded, srcName, tgtName),
+      ].join(" ");
       return text({
         success: true,
         data: {
@@ -393,13 +574,20 @@ export function registerCategoriesTools(server: McpServer, ctx: PgToolContext) {
             transactions: before.transactions,
             splits: before.splits,
             subscriptions: before.subscriptions,
-            budgets: before.budgets,
+            budgets: outcome.moved.budgets,
             budgetTemplates: before.budgetTemplates,
             recurringTransactions: before.recurringTransactions,
             emailRules: before.emailRules,
             rules: before.rules,
+            loans: outcome.moved.loans,
+            budgetLineSettings: outcome.moved.budgetLineSettings,
+            budgetCarryoverSets: outcome.moved.budgetCarryoverSets,
+            backfillProposals: outcome.moved.backfillProposals,
           },
-          message: `Merged category #${srcId} into #${tgtId} and deleted the source.`,
+          // Rows the TARGET already had for the same key: the target's were
+          // kept, the source's dropped (not counted under `repointed`).
+          folded: outcome.folded,
+          message,
         },
       });
     },
@@ -413,7 +601,7 @@ export function registerCategoriesTools(server: McpServer, ctx: PgToolContext) {
   registerManageTool(
     server,
     "manage_categories",
-    "Manage transaction categories: `op` selects create / rename / merge / delete. create: a new category (name + type E/I/R). rename: change a category's name (`id`/`name` + `new_name`); a duplicate name is refused. merge: TWO-STEP — call with `source`+`target` and NO `confirmation_token` to preview per-type dependent counts + get a token, then call again with the same source/target + that `confirmation_token` to atomically repoint EVERY dependent (transactions/splits/rules/subscriptions/budgets/…) into the target and delete the source. delete: TWO-STEP — preview FK counts + token, then commit; delete refuses while any dependent still references the category (use merge to fold it into another).",
+    "Manage transaction categories: `op` selects create / rename / merge / delete. create: a new category (name + type E/I/R). rename: change a category's name (`id`/`name` + `new_name`); a duplicate name is refused. merge: TWO-STEP — call with `source`+`target` and NO `confirmation_token` to preview per-type dependent counts + get a token, then call again with the same source/target + that `confirmation_token` to atomically repoint EVERY dependent (transactions/splits/rules/subscriptions/budgets/loan interest/…) into the target and delete the source; a budget month, line setting or carried-in amount BOTH categories have keeps the target's (the preview lists them under `willFold`). delete: TWO-STEP — preview FK counts + token, then commit; delete refuses while any dependent still references the category (use merge to fold it into another).",
     z.discriminatedUnion("op", [
       z.object({
         op: z.literal("create"),

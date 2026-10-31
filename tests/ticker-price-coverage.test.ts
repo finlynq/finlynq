@@ -18,6 +18,7 @@ import {
   type PriceCoverageCandidate,
 } from "@/lib/securities/price-coverage";
 import {
+  curatedAdvisorySymbols,
   getTickerAdvisory,
   resolveTickerAdvisory,
   unpricedTickerAdvisory,
@@ -143,5 +144,76 @@ describe("curated registry", () => {
 
   it("builds a detected advisory naming the offending symbol", () => {
     expect(unpricedTickerAdvisory(" FOO ").symbol).toBe("FOO");
+  });
+});
+
+// ── 2026-10-31 batch: the tickers prod re-asked Yahoo for every 10 minutes ───
+// Each replacement below was checked LIVE against Yahoo's chart API the day it
+// was added; the asserted successor is what Yahoo priced, which is not always
+// the obvious one (PARA now belongs to a different company; CTRA 404s).
+describe("curated registry — renamed and re-notated tickers", () => {
+  it.each([
+    ["SQ", "XYZ"], // Block, Jan 2025
+    ["VIAC", "PSKY"], // ViacomCBS → Paramount Global → Paramount Skydance
+    ["HCP", "DOC"], // Healthpeak: HCP → PEAK → DOC
+    ["03690", "3690.HK"], // Meituan: HK code needs .HK, no leading zero
+    ["9633", "9633.HK"], // Nongfu Spring
+  ])("%s → %s offers a one-click change", (from, to) => {
+    const a = getTickerAdvisory(from);
+    expect(a?.kind).toBe("curated");
+    expect(a?.symbol).toBe(from);
+    expect(a?.suggestedSymbol).toBe(to);
+    expect(a?.message).toContain(to);
+  });
+
+  it("VIAC does NOT point at PARA — Yahoo now serves PARA as another company", () => {
+    expect(getTickerAdvisory("VIAC")?.suggestedSymbol).not.toBe("PARA");
+    // …and PARA itself is not curated: it prices (as Parabolic Technologies),
+    // so a detected `unpriced` advisory would never fire for it either. A user
+    // holding Paramount as PARA is silently mispriced — a follow-up, not this.
+    expect(getTickerAdvisory("PARA")).toBeNull();
+  });
+
+  it("SWN names the successor and ratio but offers NO one-click swap (0.0867 EXE per share)", () => {
+    const a = getTickerAdvisory("SWN");
+    expect(a?.kind).toBe("curated");
+    expect(a?.suggestedSymbol).toBeUndefined();
+    expect(a?.message).toContain("EXE");
+    expect(a?.message).toContain("0.0867");
+    // Still wins over the detected advisory — it says exactly what to do.
+    expect(resolveTickerAdvisory("swn", { neverPriced: true })?.kind).toBe("curated");
+  });
+
+  it("COG stays on the detected advisory — its successor CTRA 404'd on Yahoo when checked", () => {
+    expect(getTickerAdvisory("COG")).toBeNull();
+    expect(resolveTickerAdvisory("COG", { neverPriced: true })?.kind).toBe("unpriced");
+  });
+
+  it("delisted names with no successor stay on the detected advisory", () => {
+    for (const sym of ["WE", "MULN", "AMRS", "IRNT", "HIL", "CPE"]) {
+      expect(getTickerAdvisory(sym)).toBeNull();
+      expect(resolveTickerAdvisory(sym, { neverPriced: true })?.kind).toBe("unpriced");
+    }
+  });
+
+  it("curated beats detected for the whole batch, case-insensitively", () => {
+    expect(resolveTickerAdvisory("sq", { neverPriced: true })?.suggestedSymbol).toBe("XYZ");
+    expect(resolveTickerAdvisory(" viac ", { neverPriced: true })?.suggestedSymbol).toBe("PSKY");
+    expect(resolveTickerAdvisory("03690")?.suggestedSymbol).toBe("3690.HK");
+  });
+
+  it("every entry is keyed by its own uppercased symbol and never suggests itself", () => {
+    const keys = curatedAdvisorySymbols();
+    expect(keys.length).toBeGreaterThanOrEqual(7);
+    for (const key of keys) {
+      const a = getTickerAdvisory(key)!;
+      expect(key).toBe(key.toUpperCase());
+      expect(a.symbol).toBe(key);
+      expect(a.message.length).toBeGreaterThan(20);
+      if (a.suggestedSymbol) {
+        expect(a.suggestedSymbol).not.toBe(key);
+        expect(a.suggestedSymbol).toBe(a.suggestedSymbol.trim().toUpperCase());
+      }
+    }
   });
 });
