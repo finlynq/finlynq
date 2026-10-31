@@ -21,6 +21,7 @@ import { and, eq, gte, inArray, lte } from "drizzle-orm";
 import { todayISO } from "@/lib/utils/date";
 import { marketFetch } from "@/lib/market-fetch";
 import { toYahooSymbol } from "@/lib/securities/yahoo-symbol";
+import { NegativeQuoteCache } from "@/lib/securities/negative-quote-cache";
 
 // FINLYNQ-201: the ETF-vs-stock classification no longer relies on a hardcoded
 // ETF registry. The badge is driven by Yahoo's `quoteType`/`instrumentType`
@@ -72,9 +73,12 @@ export function isEtfQuoteType(quoteType: string | null | undefined): boolean {
 //   2. An in-memory negative cache (per process) skips a known-bad symbol for a
 //      while so it can't re-stall every request. Entries expire so a transient
 //      Yahoo outage self-heals. Misses are logged so bad holding tickers surface.
+//      A timeout / 5xx / 429 is cached for 10 min; a run of CONSECUTIVE HTTP
+//      404s (Yahoo: "symbol may be delisted") doubles per strike up to 24 h,
+//      because prod was re-asking for ~21 delisted tickers every 10 min for
+//      days (2026-10-31). Mechanics + rationale: securities/negative-quote-cache.ts.
 const QUOTE_FETCH_TIMEOUT_MS = 4000;
-const NEGATIVE_QUOTE_TTL_MS = 10 * 60 * 1000; // 10 min
-const negativeQuoteCache = new Map<string, number>(); // symbol -> expiry epoch ms
+const negativeQuoteCache = new NegativeQuoteCache();
 
 // ── Intraday TTL for "today's" cache row (FINLYNQ-204) ──────────────────────
 // A price_cache row dated todayISO() is reused as a cache hit only for this long;
@@ -107,21 +111,36 @@ export function isPriceCacheRowStale(
 }
 
 function isQuoteNegativelyCached(symbol: string): boolean {
-  const exp = negativeQuoteCache.get(symbol);
-  if (exp == null) return false;
-  if (Date.now() > exp) {
-    negativeQuoteCache.delete(symbol);
-    return false;
-  }
-  return true;
+  return negativeQuoteCache.isCached(symbol);
 }
 
-function markQuoteMiss(symbol: string, reason: string): void {
-  negativeQuoteCache.set(symbol, Date.now() + NEGATIVE_QUOTE_TTL_MS);
-
+/**
+ * Record a miss. `status` is the HTTP status when Yahoo answered (404 is the
+ * only one that lengthens the back-off); null for a timeout / network error.
+ */
+function markQuoteMiss(symbol: string, reason: string, status: number | null = null): void {
+  const { ttlMs, notFoundStrikes } = negativeQuoteCache.markMiss(symbol, status);
+  // Keep `no live quote for "<symbol>"` verbatim — the ops runbook greps it.
   console.warn(
-    `[price-service] no live quote for "${symbol}" (${reason}) — negative-cached for ${NEGATIVE_QUOTE_TTL_MS / 60000}m`,
+    `[price-service] no live quote for "${symbol}" (${reason}) — negative-cached for ${Math.round(ttlMs / 60000)}m${
+      notFoundStrikes > 1 ? ` (404 x${notFoundStrikes})` : ""
+    }`,
   );
+}
+
+/** A successful fetch ends a 404 run — the next miss starts over at 10 min. */
+function clearQuoteMiss(symbol: string): void {
+  negativeQuoteCache.clear(symbol);
+}
+
+/** Outcome of one live chart call: the quote, or WHY there is none. */
+type LiveQuoteOutcome =
+  | { ok: true; quote: QuoteResult }
+  | { ok: false; quote: null; status: number | null; reason: string };
+
+/** `AbortSignal.timeout` rejects with a DOMException named TimeoutError. */
+function isTimeoutError(e: unknown): boolean {
+  return typeof e === "object" && e !== null && (e as { name?: unknown }).name === "TimeoutError";
 }
 
 // ── Per-symbol earliest-available-date memo (snapshot-rebuild storm fix) ─────
@@ -281,6 +300,17 @@ async function writePriceCache(
  * (e.g. the Add-security lookup) must call this LIVE path instead.
  */
 export async function fetchQuoteLive(symbol: string): Promise<QuoteResult | null> {
+  return (await fetchQuoteLiveOutcome(symbol)).quote;
+}
+
+/**
+ * The live fetch itself. Returns the miss REASON next to a null quote so the
+ * negative cache can tell a 404 (unknown symbol → longer back-off) from a
+ * timeout / 5xx (transient → 10 min). Does NOT touch the negative cache —
+ * `fetchQuote` / `fetchMultipleQuotes` own that, so the Add-security lookup
+ * and crypto-service can call `fetchQuoteLive` without side effects.
+ */
+async function fetchQuoteLiveOutcome(symbol: string): Promise<LiveQuoteOutcome> {
   try {
     const res = await marketFetch(
       `${YAHOO_BASE}/chart/${encodeURIComponent(toYahooSymbol(symbol))}?interval=1d&range=1d`,
@@ -303,15 +333,15 @@ export async function fetchQuoteLive(symbol: string): Promise<QuoteResult | null
         signal: AbortSignal.timeout(QUOTE_FETCH_TIMEOUT_MS),
       }
     );
-    if (!res.ok) return null;
+    if (!res.ok) return { ok: false, quote: null, status: res.status, reason: `http ${res.status}` };
     const data = await res.json();
     const meta = data.chart?.result?.[0]?.meta;
-    if (!meta) return null;
+    if (!meta) return { ok: false, quote: null, status: res.status, reason: "no data" };
 
     const price = meta.regularMarketPrice ?? 0;
     const previousClose: number | null = resolvePreviousClose(meta);
     const { change, changePct } = deriveDayChange(price, previousClose);
-    return {
+    const quote: QuoteResult = {
       symbol,
       price,
       currency: meta.currency ?? "USD",
@@ -324,8 +354,9 @@ export async function fetchQuoteLive(symbol: string): Promise<QuoteResult | null
       // durable `securities.asset_type`.
       quoteType: (meta.instrumentType as string | undefined) ?? null,
     };
-  } catch {
-    return null;
+    return { ok: true, quote };
+  } catch (e) {
+    return { ok: false, quote: null, status: null, reason: isTimeoutError(e) ? "timeout" : "network error" };
   }
 }
 
@@ -344,16 +375,18 @@ export async function fetchQuote(symbol: string): Promise<QuoteResult | null> {
   // A stale today-row is negatively-cached too → keep serving the stale value
   // (retain-on-failure) rather than re-stalling on a known-bad symbol.
   if (isQuoteNegativelyCached(symbol)) return cached ? cached.quote : null;
-  const live = await fetchQuoteLive(symbol);
-  if (!live) {
-    markQuoteMiss(symbol, "no data / timeout");
+  const live = await fetchQuoteLiveOutcome(symbol);
+  if (!live.ok) {
+    markQuoteMiss(symbol, live.reason, live.status);
     // FINLYNQ-204: a failed re-fetch of a stale today-row RETAINS the stale value
     // (its fetched_at is left untouched, so it re-tries on the next read) — never
     // blank a previously-priced holding. A true miss still returns null.
     return cached ? cached.quote : null;
   }
-  await writePriceCache(symbol, today, live.price, live.currency, live.previousClose ?? null);
-  return live;
+  clearQuoteMiss(symbol);
+  const q = live.quote;
+  await writePriceCache(symbol, today, q.price, q.currency, q.previousClose ?? null);
+  return q;
 }
 
 /**
@@ -387,15 +420,17 @@ export async function fetchMultipleQuotes(symbols: string[]): Promise<Map<string
   // Fetch in batches of 5 to avoid rate limiting.
   for (let i = 0; i < refetch.length; i += 5) {
     const batch = refetch.slice(i, i + 5);
-    const quotes = await Promise.all(batch.map((s) => fetchQuoteLive(s)));
+    const outcomes = await Promise.all(batch.map((s) => fetchQuoteLiveOutcome(s)));
     for (let j = 0; j < batch.length; j++) {
-      const q = quotes[j];
-      if (!q) {
-        markQuoteMiss(batch[j], "no data / timeout");
+      const outcome = outcomes[j];
+      if (!outcome.ok) {
+        markQuoteMiss(batch[j], outcome.reason, outcome.status);
         // Stale today-row: leave the seeded last-known value in `results` and its
         // fetched_at untouched so it re-tries next read. True miss: stays absent.
         continue;
       }
+      clearQuoteMiss(batch[j]);
+      const q = outcome.quote;
       results.set(q.symbol, q);
       await writePriceCache(q.symbol, today, q.price, q.currency, q.previousClose ?? null);
     }
@@ -504,8 +539,9 @@ async function cacheHistoricalWindow(
  * caller decides how/where to persist (e.g. crypto writes under "CRYPTO:<SYM>").
  *
  * Negative-cache aware: a symbol Yahoo can't serve (delisted/unknown ticker, or
- * a timeout) is skipped on subsequent calls for NEGATIVE_QUOTE_TTL_MS so a
- * multi-year crypto rebuild doesn't re-hit a hopeless ticker once per old date.
+ * a timeout) is skipped on subsequent calls for the negative-cache TTL (10 min,
+ * longer for repeat 404s) so a multi-year crypto rebuild doesn't re-hit a
+ * hopeless ticker once per old date.
  * Returns [] on miss/empty (never throws). Closes are in the ticker's quote
  * currency (callers use `<SYM>-USD` tickers → USD).
  */
@@ -531,10 +567,12 @@ export async function fetchYahooDailyCloses(
       signal: AbortSignal.timeout(QUOTE_FETCH_TIMEOUT_MS),
     });
     if (!res.ok) {
-      markQuoteMiss(symbol, `chart http ${res.status}`);
+      markQuoteMiss(symbol, `chart http ${res.status}`, res.status);
       return [];
     }
     const data = await res.json();
+    // A 200 means Yahoo KNOWS the symbol — end any 404 run before judging the bars.
+    clearQuoteMiss(symbol);
     const result = data.chart?.result?.[0];
     const timestamps: number[] = result?.timestamp ?? [];
     const closes: (number | null)[] = result?.indicators?.quote?.[0]?.close ?? [];
@@ -604,10 +642,12 @@ export async function fetchQuoteAtDate(symbol: string, date: string): Promise<Qu
       // 400 "Data doesn't exist" (a window entirely before the listing date) or
       // any HTTP error: negative-cache so the rebuild walk doesn't re-hit this
       // symbol every pre-inception day (the V3AA.L 400-per-day case).
-      markQuoteMiss(symbol, `chart http ${res.status}`);
+      markQuoteMiss(symbol, `chart http ${res.status}`, res.status);
       return null;
     }
     const data = await res.json();
+    // A 200 means Yahoo KNOWS the symbol — end any 404 run before judging the bars.
+    clearQuoteMiss(symbol);
     const result = data.chart?.result?.[0];
     if (!result) return null;
     const meta = result.meta ?? {};
