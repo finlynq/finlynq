@@ -7,6 +7,8 @@ name: Mobile R8 Check
 #   check        R8 on, plus two things the shipped app must not have: the debug
 #                source set's widget preview, and cleartext so it can reach the
 #                stub server. It draws every widget and signs in against the stub.
+#   check-no-r8  the same with R8 off, signed in and then updated to check, since an
+#                in-place update is how every existing user gets R8.
 # See mobile/scripts/r8-check.sh for what fails the run.
 #
 # HOW IT RUNS: push a tag like `mobile-r8-check-1`. It builds and publishes nothing
@@ -82,12 +84,14 @@ jobs:
           ./gradlew :app:assembleRelease --no-daemon --stacktrace -PreactNativeArchitectures=x86_64 -Pandroid.enableMinifyInReleaseBuilds=false
           cp app/build/outputs/apk/release/app-release.apk ../r8-check/no-r8.apk
 
-      - name: Build the check APK (R8 on, plus preview and cleartext)
+      - name: Build the check APKs (preview and cleartext added, R8 off then on)
         run: |
           widgets=modules/finlynq-widgets/android/src
           cp -r "$widgets/debug" "$widgets/release"
           sed -i 's|<application>|<application android:usesCleartextTraffic="true">|' "$widgets/release/AndroidManifest.xml"
           cd android
+          ./gradlew :app:assembleRelease --no-daemon --stacktrace -PreactNativeArchitectures=x86_64 -Pandroid.enableMinifyInReleaseBuilds=false
+          cp app/build/outputs/apk/release/app-release.apk ../r8-check/check-no-r8.apk
           ./gradlew :app:assembleRelease --no-daemon --stacktrace -PreactNativeArchitectures=x86_64
           cp app/build/outputs/apk/release/app-release.apk ../r8-check/check.apk
 
@@ -126,5 +130,6 @@ jobs:
             !mobile/r8-check/*.aab
             !mobile/r8-check/no-r8.apk
             !mobile/r8-check/check.apk
+            !mobile/r8-check/check-no-r8.apk
           if-no-files-found: warn
           retention-days: 14
