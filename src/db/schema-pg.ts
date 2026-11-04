@@ -1481,6 +1481,15 @@ export const stagedTransactions = pgTable("staged_transactions", {
   index("idx_staged_tx_import_dedup").on(t.stagedImportId, t.dedupStatus),
   index("idx_staged_tx_user_row_status").on(t.userId, t.rowStatus),
   index("idx_staged_tx_user_tier").on(t.userId, t.encryptionTier),
+  // FK lookups: deleting a transaction (SET NULL) or a staged row (self-FK)
+  // scans for children by these columns; unindexed, every delete was a full
+  // table scan per parent row (20261101_fk_lookup_indexes.sql).
+  index("idx_staged_tx_linked_transaction")
+    .on(t.linkedTransactionId)
+    .where(sql`${t.linkedTransactionId} IS NOT NULL`),
+  index("idx_staged_tx_peer_staged")
+    .on(t.peerStagedId)
+    .where(sql`${t.peerStagedId} IS NOT NULL`),
   // ─── CHECK constraints — mirror of the migration chain ───
   // Adding one in a migration means declaring it here in the SAME commit;
   // tests/schema-check-parity.test.ts fails the build otherwise.
@@ -1689,6 +1698,11 @@ export const bankTransactions = pgTable("bank_transactions", {
   idxBankTransactionsUploadBatch: index("idx_bank_transactions_upload_batch")
     .on(table.uploadBatchId)
     .where(sql`${table.uploadBatchId} IS NOT NULL`),
+  // FK lookup: deleting a staged import (SET NULL) scans for its lineage rows
+  // by this column (20261101_fk_lookup_indexes.sql).
+  idxBankTxOriginalStagedImport: index("idx_bank_tx_original_staged_import")
+    .on(table.originalStagedImportId)
+    .where(sql`${table.originalStagedImportId} IS NOT NULL`),
   // ─── CHECK constraints — mirror of the migration chain ───
   // Adding one in a migration means declaring it here in the SAME commit;
   // tests/schema-check-parity.test.ts fails the build otherwise.
