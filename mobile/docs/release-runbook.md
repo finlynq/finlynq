@@ -82,6 +82,46 @@ npx eas build --platform ios --profile production --auto-submit --non-interactiv
 - Then run on-device acceptance and report which `kind: human` test cases passed so the related
   DevManager item(s) can move to **Done**.
 
+## R8 (Android release builds are minified)
+
+Google Play's production track flagged 1.0.27: "DEX code optimization is below our threshold: Obfuscation
+(1%)", fix by Feb 2027. Release builds now run R8. `plugins/withAndroidR8.js` sets the gradle property Expo's
+template reads, `android.enableMinifyInReleaseBuilds`; the older `android.enableProguardInReleaseBuilds` does
+nothing since SDK 54, silently. Resource shrinking stays off. The app has no keep rules of its own: what the
+libraries ship was enough, and the manifest keeps the widget providers.
+
+Measured with `mobile-r8-check` on an x86_64 build: APK 34.6 → 28.6 MB, DEX inside it 25.1 → 8.0 MB, and 92%
+of the 11,007 classes left are renamed. R8 only touches the DEX, which is the same for every ABI, so expect
+about 6 MB off a Play download. Play's own score only exists after an upload: check that the warning clears
+on the first R8 build.
+
+- **Mapping file.** It travels inside the bundle (`BUNDLE-METADATA/com.android.tools.build.obfuscation/proguard.map`)
+  and Play reads it from there, so the publish step has no `mappingFile` and crash reports stay readable. The
+  release workflow fails before publishing if R8 left no mapping, which also catches an Expo upgrade renaming
+  the property. It is kept 90 days as the run's `finlynq-vc<N>-mapping` artifact. After the first R8 upload,
+  confirm it in Play Console → App bundle explorer → that version → Downloads (ReTrace mapping file).
+- **Run the check after anything native changes** (an Expo or React Native upgrade, a new native module, the
+  widgets). R8 breaks reflection-heavy code only at runtime, so a green build proves nothing. About 25 minutes;
+  it publishes nothing and uses no versionCode:
+  ```bash
+  git tag -a mobile-r8-check-<n> -m "R8 check <n>" HEAD && git push origin mobile-r8-check-<n>
+  ```
+  It builds the release variant and runs it on an emulator (`scripts/r8-check.sh`): the APK as shipped to the
+  login screen; every widget drawn in every scenario; a sign-in against a stub server, every tab, the Budgets,
+  Widgets and Settings screens, and a cold start back into the session through `expo-secure-store`; and a
+  build without R8 signed in, then updated in place to the R8 one, which is how every existing user gets it.
+  It fails on a crash, an ANR in the app, a missing native module, or a class or method R8 took away. Read the
+  screenshots in the `r8-check` artifact too. `Failed to download remote update` in its logs is not R8: builds
+  from gradle have no update channel, so `u.expo.dev` answers 400 on every launch and the embedded bundle runs.
+- **Only a device can confirm**, so check these on the first R8 build before promoting it past internal:
+  - **Biometric sign-in.** Turning it on, the real OS prompt, and silent re-login after the session is rejected.
+    No finger is enrolled on the emulator, so the credential stored behind `requireAuthentication` and
+    `BiometricPrompt` never ran under R8. An existing user's stored credential surviving the update is part of
+    this: the check proves it only for the plain session token.
+  - **A real session with real data.** The stub answers 404 to everything but sign-in, so screens after it
+    showed their error states: charts, lists, forms, loans, portfolio operations and reconcile never drew data.
+  - **Widgets on a real launcher**, their tap links, and the document picker (Import).
+
 ## Gotchas
 
 - **New iOS target or capability = the owner logs in once.** A new bundle id needs its own provisioning
@@ -253,6 +293,8 @@ npx eas build --platform ios --profile production --auto-submit --non-interactiv
   only seen rendered through react-native-web and in jest), the marker and count clear after opening a
   thread, and on iOS "See your feedback and replies" leaves the send form (it uses `popTo` because a
   card pushed from a modal lands behind it).
+- **R8 on Android release builds (on `mobile-dev`; native, so it needs a store build, not an OTA update)**: see
+  the R8 section above, including what to check on a device before promoting.
 - **iOS widgets (on `mobile-dev`; native code, so it needs a store build, not an OTA update)** (GH #392):
   the Android widgets on iOS 16.1+: **Left to spend** (small, Lock Screen circular), **Upcoming payments**
   (medium, Lock Screen rectangular), **Net worth** (small, medium), **Add transaction** (small). Added
