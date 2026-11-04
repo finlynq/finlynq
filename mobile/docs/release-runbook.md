@@ -86,8 +86,9 @@ npx eas build --platform ios --profile production --auto-submit --non-interactiv
 
 Google Play's production track flagged 1.0.27: "DEX code optimization is below our threshold: Obfuscation
 (1%)", fix by Feb 2027. Release builds now run R8. `plugins/withAndroidR8.js` sets the gradle property Expo's
-template reads, `android.enableMinifyInReleaseBuilds`; the older `android.enableProguardInReleaseBuilds` does
-nothing since SDK 54, silently. Resource shrinking stays off. The app has no keep rules of its own: what the
+template reads, `android.enableMinifyInReleaseBuilds`; the SDK 54 template doesn't read the older
+`android.enableProguardInReleaseBuilds`, and a name it doesn't read does nothing, silently. Resource shrinking
+stays off. The app has no keep rules of its own: what the
 libraries ship was enough, and the manifest keeps the widget providers.
 
 Measured with `mobile-r8-check` on an x86_64 build: APK 34.6 → 28.6 MB, DEX inside it 25.1 → 8.0 MB, and 92%
