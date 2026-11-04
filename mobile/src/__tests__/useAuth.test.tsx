@@ -4,6 +4,7 @@ import * as SecureStore from "expo-secure-store";
 import * as LocalAuthentication from "expo-local-authentication";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import { AuthProvider, useAuth, type BiometricEnableResult } from "../hooks/useAuth";
+import { setServerUrl } from "../api/client";
 
 // Mock the API client so we drive login / session without real fetch. The hook
 // imports endpoints/getSession/setAuthToken/getServerUrl/setServerUrl from here.
@@ -583,6 +584,84 @@ describe("useAuth — FINLYNQ-134 biometric silent re-login + secure credential 
       expect(unlocked).toBe(true);
       expect(mockLogin).toHaveBeenCalledTimes(1); // re-login, not a UI-only unlock
       expect(result.current.isUnlocked).toBe(true);
+    });
+  });
+
+  // Nothing but the spinner waits on these reads, so one that fails must not strand the app on it.
+  describe("startup when something stored can't be read", () => {
+    const refused = () => Promise.reject(new Error("KeyChainException"));
+
+    it("goes to the login screen when the keychain refuses the session token", async () => {
+      SECURE.getItemAsync.mockImplementation(refused);
+
+      const { result } = renderHook(() => useAuth(), { wrapper });
+
+      await waitFor(() => expect(result.current.isLoading).toBe(false));
+      expect(result.current.hasSession).toBe(false);
+      expect(result.current.isUnlocked).toBe(false);
+      expect(mockGetSession).not.toHaveBeenCalled();
+    });
+
+    it("leaves the token where it is, so the next launch can still read it", async () => {
+      SECURE.getItemAsync.mockImplementation(refused);
+
+      const { result } = renderHook(() => useAuth(), { wrapper });
+
+      await waitFor(() => expect(result.current.isLoading).toBe(false));
+      expect(SECURE.deleteItemAsync).not.toHaveBeenCalled();
+    });
+
+    it("keeps a self-hosted server address when only the keychain fails", async () => {
+      SECURE.getItemAsync.mockImplementation(refused);
+      ASYNC.getItem.mockImplementation(async (key: string) =>
+        key === "pf_server_url" ? "https://finlynq.example" : null
+      );
+
+      const { result } = renderHook(() => useAuth(), { wrapper });
+
+      await waitFor(() => expect(result.current.isLoading).toBe(false));
+      expect(setServerUrl).toHaveBeenCalledWith("https://finlynq.example");
+    });
+
+    it("can still sign back in with biometrics when only the token read fails", async () => {
+      SECURE.getItemAsync.mockImplementation(async (key: string) => {
+        if (key === SESSION_TOKEN_KEY) throw new Error("KeyChainException");
+        if (key === STORED_CREDENTIALS_KEY)
+          return JSON.stringify({ identifier: "alice", password: "hunter2hunter2" });
+        return null;
+      });
+      ASYNC.getItem.mockImplementation(async (key: string) =>
+        key === BIOMETRIC_KEY ? "true" : null
+      );
+      LOCAL.hasHardwareAsync.mockResolvedValue(true);
+      mockLogin.mockResolvedValue({ ok: true, status: 200, data: {}, token: "fresh-jwt" });
+      mockGetSession.mockResolvedValue({ authenticated: true, isAdmin: false });
+
+      const { result } = renderHook(() => useAuth(), { wrapper });
+
+      await waitFor(() => expect(result.current.isLoading).toBe(false));
+      expect(result.current.hasSession).toBe(true);
+      expect(result.current.isUnlocked).toBe(true);
+    });
+
+    it("goes to the login screen when the app's own settings can't be read", async () => {
+      ASYNC.getItem.mockImplementation(refused);
+
+      const { result } = renderHook(() => useAuth(), { wrapper });
+
+      await waitFor(() => expect(result.current.isLoading).toBe(false));
+      expect(result.current.hasSession).toBe(false);
+      expect(result.current.autoLockMinutes).toBe(5);
+    });
+
+    it("goes to the login screen when the biometric hardware can't be checked", async () => {
+      LOCAL.hasHardwareAsync.mockImplementation(refused);
+
+      const { result } = renderHook(() => useAuth(), { wrapper });
+
+      await waitFor(() => expect(result.current.isLoading).toBe(false));
+      expect(result.current.biometricAvailable).toBe(false);
+      expect(result.current.hasSession).toBe(false);
     });
   });
 });
