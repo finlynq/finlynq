@@ -313,7 +313,7 @@ review never prompts.
   hosts every widget on an emulator through a real AppWidgetHost in every scenario, light and dark, and
   leaves the images in the run's artifact (`scripts/widget-render-check.sh`). It uses no versionCode.
   It does not cover the app writing a real snapshot or a real launcher: check those on a device.
-- **Next build (not cut yet; ships on the owner's say)**: **Your feedback** (More → Your feedback, in-app
+- **1.0.30 / vc39 (Android internal testing only)** (2026-11-04; on the owner's word, not promoted, pending their check on a device; no iOS build): **Your feedback** (More → Your feedback, in-app
   feedback #30): the user's feedback threads with a "New reply" marker and a count on the More row;
   a thread shows the original message and the replies, with a text reply box. The send form links to
   it. JavaScript only, no native code. No server change: `GET /api/feedback`, `GET /api/feedback/[id]`,
@@ -324,8 +324,8 @@ review never prompts.
   only seen rendered through react-native-web and in jest), the marker and count clear after opening a
   thread, and on iOS "See your feedback and replies" leaves the send form (it uses `popTo` because a
   card pushed from a modal lands behind it).
-- **Update prompt** (native on Android, so it needs a store build): see "The update prompt" above.
-- **R8 on Android release builds**: see
+- **Also in 1.0.30 / vc39: update prompt** (native on Android, so it needs a store build): see "The update prompt" above.
+- **Also in 1.0.30 / vc39: OTA updates switched off and R8 on Android release builds**: see
   the R8 section above, including what to check on a device before promoting.
 - **1.0.29 / iOS build 16 (submitted to App Review)** (2026-11-04, from `a9c654c`; sent on the owner's word, automatic release to everyone on approval, App
   Store still on 1.0.27, not yet checked on a device). Apple marked it Validated, and App Store Connect's build metadata
@@ -355,8 +355,8 @@ review never prompts.
   and while locked; the Lock Screen redacts while locked and uses its own colours; Hide amounts updates the
   widgets at once; sign-out empties them. If a check run says "The job was not acquired by Runner", GitHub
   had no `macos-15` free: re-run it later.
-- **Next build (not cut yet)**: **a stored value that can't be read at startup goes to the login screen**
+- **Also in 1.0.30 / vc39**: **a stored value that can't be read at startup goes to the login screen**
   (`2094c72`). The app used to wait on those reads with nothing to catch a failure, so a keychain that
   refused the session token left it on its spinner for good, with nothing to tap. The token stays stored for
   the next launch, and a self-hosted server address is kept. JavaScript only. Seen on an unsigned simulator
-  build, spinner before and login after, and pinned in `useAuth.test.tsx`; not in iOS build 16 or Android vc38.
+  build, spinner before and login after, and pinned in `useAuth.test.tsx`; not in iOS build 16.
