@@ -353,4 +353,10 @@ review never prompts.
   really reports a placed widget, else More → Widgets → Refresh says "Add a widget first"); the app and the
   extension really share the file through the App Group; taps open the right screens, also from a cold start
   and while locked; the Lock Screen redacts while locked and uses its own colours; Hide amounts updates the
-  widgets at once; sign-out empties them.
+  widgets at once; sign-out empties them. If a check run says "The job was not acquired by Runner", GitHub
+  had no `macos-15` free: re-run it later.
+- **Next build (not cut yet)**: **a stored value that can't be read at startup goes to the login screen**
+  (`2094c72`). The app used to wait on those reads with nothing to catch a failure, so a keychain that
+  refused the session token left it on its spinner for good, with nothing to tap. The token stays stored for
+  the next launch, and a self-hosted server address is kept. JavaScript only. Seen on an unsigned simulator
+  build, spinner before and login after, and pinned in `useAuth.test.tsx`; not in iOS build 16 or Android vc38.

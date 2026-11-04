@@ -95,6 +95,21 @@ async function purgeStoredCredentials(): Promise<void> {
   await SecureStore.deleteItemAsync(STORED_CREDENTIALS_KEY);
 }
 
+/**
+ * A startup read that fails counts as nothing stored, so the user reaches the
+ * login screen instead of a spinner nothing will ever clear. Each read falls back
+ * alone: a keychain that refuses the token must not lose a self-hosted server
+ * address, and the token stays stored for the next launch to try.
+ */
+async function readAtStartup<T>(what: string, read: Promise<T>, fallback: T): Promise<T> {
+  try {
+    return await read;
+  } catch (e) {
+    logger.warn("auth", `could not read ${what} at startup`, { error: e instanceof Error ? e.name : "unknown" });
+    return fallback;
+  }
+}
+
 interface SilentReloginResult {
   /** True when the session was restored (token re-issued + stored). */
   restored: boolean;
@@ -222,11 +237,11 @@ function useAuthEngine() {
     (async () => {
       const [storedUrl, biometricHw, bioEnabled, autoLockStr, token] =
         await Promise.all([
-          AsyncStorage.getItem(SERVER_URL_KEY),
-          LocalAuthentication.hasHardwareAsync(),
-          AsyncStorage.getItem(BIOMETRIC_KEY),
-          AsyncStorage.getItem(AUTO_LOCK_KEY),
-          SecureStore.getItemAsync(SESSION_TOKEN_KEY),
+          readAtStartup("server url", AsyncStorage.getItem(SERVER_URL_KEY), null),
+          readAtStartup("biometric hardware", LocalAuthentication.hasHardwareAsync(), false),
+          readAtStartup("biometric setting", AsyncStorage.getItem(BIOMETRIC_KEY), null),
+          readAtStartup("auto-lock", AsyncStorage.getItem(AUTO_LOCK_KEY), null),
+          readAtStartup("session token", SecureStore.getItemAsync(SESSION_TOKEN_KEY), null),
         ]);
 
       if (storedUrl) setServerUrl(storedUrl);
