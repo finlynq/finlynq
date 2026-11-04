@@ -34,7 +34,7 @@ class WidgetPreviewActivity : Activity() {
     applyScenario(scenario)
 
     host = AppWidgetHost(this, HOST_ID)
-    host.deleteAppWidgetIds()
+    host.deleteHost()
     host.startListening()
 
     val root = LinearLayout(this).apply {
