@@ -327,8 +327,8 @@ review never prompts.
 - **Update prompt** (native on Android, so it needs a store build): see "The update prompt" above.
 - **R8 on Android release builds**: see
   the R8 section above, including what to check on a device before promoting.
-- **1.0.29 / iOS build 16 (TestFlight internal group only)** (2026-11-04, from `a9c654c`; not sent to App
-  Review, not yet checked on a device). Apple marked it Validated, and App Store Connect's build metadata
+- **1.0.29 / iOS build 16 (submitted to App Review)** (2026-11-04, from `a9c654c`; sent on the owner's word, automatic release to everyone on approval, App
+  Store still on 1.0.27, not yet checked on a device). Apple marked it Validated, and App Store Connect's build metadata
   shows the app and `FinlynqWidget.appex` both signed with `group.com.finlynq.mobile`. The last iOS build was
   1.0.27, so this one also carries the 1.0.28 and 1.0.29 changes above and **Your feedback**. It does not
   carry R8, which is Android only, or the switch-off of OTA updates. **iOS widgets** (GH #392):
