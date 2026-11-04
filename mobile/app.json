@@ -48,7 +48,8 @@
     },
     "plugins": [
       "expo-secure-store",
-      "./plugins/withAssetStatements"
+      "./plugins/withAssetStatements",
+      "./plugins/withAndroidR8"
     ]
   }
 }
