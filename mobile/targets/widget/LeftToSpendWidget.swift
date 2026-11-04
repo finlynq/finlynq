@@ -51,6 +51,15 @@ struct LeftToSpendModel {
   let ringLabel: String
   let tone: String
 
+  /**
+   * The lines under the amount. Three would squeeze the ring on a small phone until
+   * its label spills out, and how old the figures are matters more than the budget.
+   */
+  var lines: [String] {
+    let all = [sub, days, stale].compactMap { $0 }
+    return all.count > 2 ? Array(all.dropFirst()) : all
+  }
+
   /** Nil when there is nothing to show for the month this entry falls in. */
   init?(entry: SnapshotEntry) {
     // Last month's figures say nothing about this month.
@@ -98,6 +107,7 @@ struct LeftToSpendModel {
 /** A ring that empties as the budget is spent; `fill` runs 1 to 0. */
 private struct BudgetRing: View {
   @Environment(\.colorScheme) private var scheme
+  @Environment(\.redactionReasons) private var redaction
   let fill: Double
   let color: Color
   let lineWidth: CGFloat
@@ -105,7 +115,8 @@ private struct BudgetRing: View {
   var body: some View {
     ZStack {
       Circle().stroke(Palette.of(scheme).ringTrack, lineWidth: lineWidth)
-      if fill > 0 {
+      // privacySensitive() only hides text: the ring would still say how much is spent.
+      if fill > 0 && !redaction.contains(.privacy) {
         Circle()
           .trim(from: 0, to: fill)
           .stroke(color, style: StrokeStyle(lineWidth: lineWidth, lineCap: .round))
@@ -147,7 +158,7 @@ private struct LeftToSpendSmall: View {
         .lineLimit(1)
         .minimumScaleFactor(0.5)
         .privacySensitive()
-      ForEach([model.sub, model.days, model.stale].compactMap { $0 }, id: \.self) { line in
+      ForEach(model.lines, id: \.self) { line in
         Text(line)
           .font(.system(size: 11))
           .foregroundColor(palette.muted)

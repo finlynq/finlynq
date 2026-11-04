@@ -31,7 +31,7 @@ struct UpcomingRow: Identifiable {
 }
 
 enum UpcomingModel {
-  case rows([UpcomingRow], stale: String?, staleAge: String?)
+  case rows([UpcomingRow], stale: String?, staleShort: String?)
   case message(String)
 
   init(entry: SnapshotEntry) {
@@ -59,7 +59,7 @@ enum UpcomingModel {
     self = .rows(
       rows,
       stale: WidgetDates.staleText(asOfMs: section.asOfMs, now: entry.date),
-      staleAge: WidgetDates.staleAge(asOfMs: section.asOfMs, now: entry.date)
+      staleShort: WidgetDates.staleShortText(asOfMs: section.asOfMs, now: entry.date)
     )
   }
 }
@@ -122,10 +122,13 @@ private struct UpcomingMedium: View {
               .lineLimit(1)
               .privacySensitive()
             Spacer(minLength: 8)
+            // The name gives way first: an amount is no use cut short.
             Text(row.amount)
               .font(.system(size: 13, weight: .bold))
               .foregroundColor(palette.foreground)
               .lineLimit(1)
+              .fixedSize(horizontal: true, vertical: false)
+              .layoutPriority(1)
               .privacySensitive()
           }
           .frame(height: 25)
@@ -145,7 +148,7 @@ private struct UpcomingRectangular: View {
   var body: some View {
     Group {
       switch model {
-      case .rows(let rows, _, let staleAge):
+      case .rows(let rows, _, let staleShort):
         if let next = rows.first {
           VStack(alignment: .leading, spacing: 0) {
             HStack(spacing: 4) {
@@ -154,8 +157,8 @@ private struct UpcomingRectangular: View {
                 .widgetAccentable()
                 .lineLimit(1)
               Spacer(minLength: 0)
-              if let staleAge {
-                Text("\(staleAge) ago")
+              if let staleShort {
+                Text(staleShort)
                   .font(.system(size: 11))
                   .foregroundStyle(.secondary)
                   .lineLimit(1)

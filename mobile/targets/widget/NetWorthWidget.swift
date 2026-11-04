@@ -46,19 +46,20 @@ struct NetWorthView: View {
           .foregroundColor(palette.muted)
           .lineLimit(1)
         Spacer(minLength: 0)
-        if let stale = WidgetDates.staleText(asOfMs: section.asOfMs, now: entry.date) {
+        if let stale = family == .systemSmall
+          ? WidgetDates.staleShortText(asOfMs: section.asOfMs, now: entry.date)
+          : WidgetDates.staleText(asOfMs: section.asOfMs, now: entry.date) {
           Text(stale)
             .font(.system(size: 10))
             .foregroundColor(palette.muted)
             .lineLimit(1)
-            .minimumScaleFactor(0.8)
         }
       }
       Text(amount(section.netWorthLabel))
         .font(.system(size: 26, weight: .bold))
         .foregroundColor(palette.foreground)
         .lineLimit(1)
-        .minimumScaleFactor(0.5)
+        .minimumScaleFactor(0.35)
         .privacySensitive()
         .widgetAccentable()
       Spacer(minLength: 0)

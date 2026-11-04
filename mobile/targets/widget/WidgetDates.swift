@@ -62,7 +62,7 @@ enum WidgetDates {
   }
 
   /** "2h" or "3d" when the figures are at least an hour old, else nil. */
-  static func staleAge(asOfMs: Double, now: Date) -> String? {
+  private static func staleAge(asOfMs: Double, now: Date) -> String? {
     guard asOfMs > 0 else { return nil }
     let age = now.timeIntervalSince1970 - asOfMs / 1000
     if age < staleAfterSeconds { return nil }
@@ -72,6 +72,11 @@ enum WidgetDates {
 
   static func staleText(asOfMs: Double, now: Date) -> String? {
     staleAge(asOfMs: asOfMs, now: now).map { "Updated \($0) ago" }
+  }
+
+  /** For a widget with no room to say "Updated". */
+  static func staleShortText(asOfMs: Double, now: Date) -> String? {
+    staleAge(asOfMs: asOfMs, now: now).map { "\($0) ago" }
   }
 
   /**
