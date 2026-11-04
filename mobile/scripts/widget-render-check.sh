@@ -13,6 +13,13 @@ mkdir -p "$OUT"
 
 adb wait-for-device
 adb install -r "$APK"
+# A fresh install takes a moment to reach the widget service, and a bind before
+# then fails with "No widget provider". (No grep -q: with pipefail, closing the
+# pipe early would read as no match.)
+for _ in $(seq 1 30); do
+  if adb shell dumpsys appwidget | grep "$PKG/com.finlynq.widgets" > /dev/null; then break; fi
+  sleep 1
+done
 adb shell appwidget grantbind --package "$PKG" --user 0
 adb logcat -c
 
