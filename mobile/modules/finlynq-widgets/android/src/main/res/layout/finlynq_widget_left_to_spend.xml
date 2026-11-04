@@ -1,0 +1,75 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+  android:id="@+id/finlynq_root"
+  android:layout_width="match_parent"
+  android:layout_height="match_parent"
+  android:background="@drawable/finlynq_widget_background"
+  android:gravity="center_horizontal"
+  android:orientation="vertical"
+  android:padding="12dp">
+
+  <TextView
+    android:id="@+id/finlynq_title"
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content"
+    android:ellipsize="end"
+    android:maxLines="1"
+    android:textColor="@color/finlynq_widget_muted"
+    android:textSize="12sp" />
+
+  <FrameLayout
+    android:layout_width="match_parent"
+    android:layout_height="0dp"
+    android:layout_marginVertical="4dp"
+    android:layout_weight="1">
+
+    <ImageView
+      android:id="@+id/finlynq_ring"
+      android:layout_width="match_parent"
+      android:layout_height="match_parent"
+      android:contentDescription="@null"
+      android:scaleType="fitCenter" />
+
+    <TextView
+      android:id="@+id/finlynq_ring_label"
+      android:layout_width="wrap_content"
+      android:layout_height="wrap_content"
+      android:layout_gravity="center"
+      android:textColor="@color/finlynq_widget_fg"
+      android:textSize="13sp"
+      android:textStyle="bold" />
+  </FrameLayout>
+
+  <TextView
+    android:id="@+id/finlynq_amount"
+    android:layout_width="match_parent"
+    android:layout_height="26dp"
+    android:autoSizeMaxTextSize="20sp"
+    android:autoSizeMinTextSize="11sp"
+    android:autoSizeStepGranularity="1sp"
+    android:autoSizeTextType="uniform"
+    android:gravity="center"
+    android:maxLines="1"
+    android:textColor="@color/finlynq_widget_fg"
+    android:textStyle="bold" />
+
+  <TextView
+    android:id="@+id/finlynq_sub"
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content"
+    android:ellipsize="end"
+    android:gravity="center"
+    android:maxLines="1"
+    android:textColor="@color/finlynq_widget_muted"
+    android:textSize="11sp" />
+
+  <TextView
+    android:id="@+id/finlynq_stale"
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content"
+    android:gravity="center"
+    android:maxLines="1"
+    android:textColor="@color/finlynq_widget_muted"
+    android:textSize="10sp"
+    android:visibility="gone" />
+</LinearLayout>

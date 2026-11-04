@@ -72,6 +72,8 @@ const Pressable = ({ children, onPress, onLongPress, ...props }) =>
 const Linking = {
   openURL: jest.fn(() => Promise.resolve()),
   canOpenURL: jest.fn(() => Promise.resolve(true)),
+  getInitialURL: jest.fn(() => Promise.resolve(null)),
+  addEventListener: jest.fn(() => ({ remove: jest.fn() })),
 };
 
 module.exports = {

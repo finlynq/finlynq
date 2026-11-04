@@ -16,6 +16,7 @@ import { endpoints } from "../api/client";
 import { logger } from "../lib/logger";
 import { Icon, type IconName } from "../components/icon";
 import type { MoreStackParamList } from "../navigation/MoreStack";
+import { widgetsAvailable } from "../../modules/finlynq-widgets";
 
 type Nav = NativeStackNavigationProp<MoreStackParamList, "MoreHome">;
 
@@ -130,6 +131,9 @@ export default function MoreScreen() {
       title: "Tools",
       rows: [
         { icon: "whatsNew", label: "What's new", onPress: () => navigation.navigate("WhatsNew") },
+        ...(widgetsAvailable
+          ? [{ icon: "widgets" as IconName, label: "Widgets", onPress: () => navigation.navigate("Widgets") }]
+          : []),
         { icon: "settings", label: "Settings", onPress: () => navigation.navigate("Settings") },
         { icon: "feedback", label: "Send feedback", onPress: () => navigation.navigate("Feedback") },
         { icon: "logout", label: "Sign out", onPress: confirmSignOut, danger: true },

@@ -46,6 +46,14 @@ export function setAuthFailureHandler(fn: (() => Promise<boolean>) | null) {
   _recoveryInFlight = null;
 }
 
+// Told when a change was saved, so the home-screen widgets can refresh (sign-in
+// and other /api/auth/* calls don't count).
+let _onMutation: (() => void) | null = null;
+
+export function setMutationListener(fn: (() => void) | null) {
+  _onMutation = fn;
+}
+
 /** Run the registered recovery handler, de-duped so concurrent failures share a
  *  single attempt. Never throws — a throwing handler resolves to `false`. */
 function runRecovery(): Promise<boolean> {
@@ -163,6 +171,8 @@ async function request<T>(
         : undefined;
     return code ? { success: false, error, code } : { success: false, error };
   }
+
+  if (method !== "GET" && !path.startsWith("/api/auth/")) _onMutation?.();
 
   // Already enveloped? (no REST route does this today, but be defensive.)
   if (body && typeof body === "object" && "success" in body) {
@@ -331,6 +341,7 @@ export const api = {
 };
 
 // Typed endpoint helpers
+import type { BudgetMonthInput } from "../lib/widgets/snapshot";
 import type {
   Account,
   AccountBalance,
@@ -691,6 +702,9 @@ export const endpoints = {
     api.get<CategoryDetailResponse>(`/api/reports/category?categoryId=${categoryId}&months=${months}`),
 
   // Loans — the list is a bare array.
+  // The month's cash-flow budget (Budget v2); the widgets read its totals.
+  getBudgetMonth: (month: string) => api.get<BudgetMonthInput>(`/api/budgets/month?month=${month}`),
+
   getLoans: () => api.get<LoanSummary[]>("/api/loans"),
   // Create / edit / delete. POST and PUT answer bare JSON and refuse a loan
   // that cannot be scheduled with a 400 and a message; DELETE is by `?id=`.

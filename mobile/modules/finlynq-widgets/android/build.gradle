@@ -1,0 +1,15 @@
+plugins {
+  id 'com.android.library'
+  id 'expo-module-gradle-plugin'
+}
+
+group = 'com.finlynq'
+version = '1.0.0'
+
+android {
+  namespace "com.finlynq.widgets"
+  defaultConfig {
+    versionCode 1
+    versionName '1.0.0'
+  }
+}

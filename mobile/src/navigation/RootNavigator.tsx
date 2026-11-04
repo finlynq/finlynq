@@ -7,10 +7,13 @@ import LockScreen from "../screens/LockScreen";
 import LoginScreen from "../screens/LoginScreen";
 import { OnboardingPrompt } from "../components/onboarding-prompt";
 import { useAuth } from "../hooks/useAuth";
+import { useWidgetLinks, useWidgetSync } from "../hooks/useWidgets";
 
 export default function RootNavigator() {
   const theme = useTheme();
   const auth = useAuth();
+  useWidgetSync(auth.isUnlocked);
+  const { navigationRef, onNavigationChange } = useWidgetLinks(auth.isUnlocked);
 
   const navTheme = theme.mode === "dark"
     ? {
@@ -90,7 +93,12 @@ export default function RootNavigator() {
   };
 
   return (
-    <NavigationContainer theme={navTheme}>
+    <NavigationContainer
+      ref={navigationRef}
+      theme={navTheme}
+      onReady={onNavigationChange}
+      onStateChange={onNavigationChange}
+    >
       {renderContent()}
     </NavigationContainer>
   );

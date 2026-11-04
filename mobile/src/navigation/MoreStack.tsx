@@ -26,6 +26,7 @@ import EmailImportsScreen from "../screens/EmailImportsScreen";
 import EmailRecordScreen from "../screens/EmailRecordScreen";
 import StagedImportScreen from "../screens/StagedImportScreen";
 import BankFeedScreen from "../screens/BankFeedScreen";
+import WidgetsScreen from "../screens/WidgetsScreen";
 import ReconcileThresholdsScreen from "../screens/ReconcileThresholdsScreen";
 import SubscriptionsScreen from "../screens/SubscriptionsScreen";
 import AddSubscriptionScreen from "../screens/AddSubscriptionScreen";
@@ -72,6 +73,8 @@ export type MoreStackParamList = {
   StagedImport: { id: string; title: string };
   // Bank feed (2026-10-30): sync SimpleFIN for the accounts linked on the web.
   BankFeed: undefined;
+  // Home-screen widgets (GH #392): add them, hide amounts, refresh.
+  Widgets: undefined;
   Settings: undefined;
   ReconcileThresholds: undefined;
   // Simple average or advanced lot allocation (also on the Portfolio tab).
@@ -128,6 +131,7 @@ export default function MoreStack() {
       />
       <Stack.Screen name="StagedImport" component={StagedImportScreen} />
       <Stack.Screen name="BankFeed" component={BankFeedScreen} />
+      <Stack.Screen name="Widgets" component={WidgetsScreen} />
       <Stack.Screen name="Settings" component={SettingsScreen} />
       <Stack.Screen name="ReconcileThresholds" component={ReconcileThresholdsScreen} />
       <Stack.Screen name="CostBasis" component={CostBasisScreen} />

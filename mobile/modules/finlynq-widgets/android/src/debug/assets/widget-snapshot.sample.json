@@ -1,0 +1,31 @@
+{
+  "version": 1,
+  "updatedAtMs": 1762300800000,
+  "leftToSpend": {
+    "asOfMs": 1762300800000,
+    "month": "2026-11",
+    "hasBudget": true,
+    "leftLabel": "C$1,284.50",
+    "plannedLabel": "C$3,000.00",
+    "spentLabel": "C$1,715.50",
+    "usedFraction": 0.5718,
+    "tone": "ok"
+  },
+  "upcoming": {
+    "asOfMs": 1762300800000,
+    "items": [
+      { "date": "2026-11-04", "name": "Car loan", "amountLabel": "C$612.40", "kind": "loan", "link": "pf-mobile://loans" },
+      { "date": "2026-11-05", "name": "Spotify", "amountLabel": "C$15.81", "kind": "subscription", "link": "pf-mobile://subscriptions" },
+      { "date": "2026-11-07", "name": "Hydro One", "amountLabel": "C$148.22", "kind": "detected", "link": "pf-mobile://subscriptions" },
+      { "date": "2026-11-13", "name": "A very long merchant name that does not fit on one row", "amountLabel": "$1,204.99", "kind": "subscription", "link": "pf-mobile://subscriptions" },
+      { "date": "2026-11-24", "name": "Mortgage", "amountLabel": "C$2,410.00", "kind": "loan", "link": "pf-mobile://loans" },
+      { "date": "2026-12-14", "name": "Insurance", "amountLabel": "€88.00", "kind": "subscription", "link": "pf-mobile://subscriptions" }
+    ]
+  },
+  "netWorth": {
+    "asOfMs": 1762300800000,
+    "netWorthLabel": "C$589,864.20",
+    "assetsLabel": "C$812,300.00",
+    "debtsLabel": "C$222,435.80"
+  }
+}

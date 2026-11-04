@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+  <string name="finlynq_widget_left_to_spend_name">Left to spend</string>
+  <string name="finlynq_widget_left_to_spend_description">What is left of this month\'s spending budget and the days to go.</string>
+  <string name="finlynq_widget_upcoming_name">Upcoming payments</string>
+  <string name="finlynq_widget_upcoming_description">Your next bills, subscriptions and loan payments.</string>
+  <string name="finlynq_widget_net_worth_name">Net worth</string>
+  <string name="finlynq_widget_net_worth_description">Your net worth, with assets and debts.</string>
+  <string name="finlynq_widget_quick_add_name">Add transaction</string>
+  <string name="finlynq_widget_quick_add_description">Opens a new transaction in one tap.</string>
+  <string name="finlynq_widget_quick_add_label">Add</string>
+
+  <string name="finlynq_widget_open_to_update">Open Finlynq to update</string>
+  <string name="finlynq_widget_loading">Loading…</string>
+  <string name="finlynq_widget_nothing_due">Nothing due soon</string>
+  <string name="finlynq_widget_updated_ago">Updated %1$s ago</string>
+  <string name="finlynq_widget_today">Today</string>
+  <string name="finlynq_widget_tomorrow">Tomorrow</string>
+  <string name="finlynq_widget_over">Over</string>
+  <string name="finlynq_widget_over_budget">Over budget</string>
+  <string name="finlynq_widget_spent_this_month">Spent this month</string>
+  <string name="finlynq_widget_no_budget">No budget set</string>
+  <string name="finlynq_widget_last_day">Last day</string>
+  <string name="finlynq_widget_of_budget">of %1$s · %2$s</string>
+  <string name="finlynq_widget_assets">Assets</string>
+  <string name="finlynq_widget_debts">Debts</string>
+  <plurals name="finlynq_widget_days_left">
+    <item quantity="one">%d day left</item>
+    <item quantity="other">%d days left</item>
+  </plurals>
+</resources>

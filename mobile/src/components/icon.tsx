@@ -5,6 +5,7 @@
 import React from "react";
 import {
   LayoutDashboard,
+  LayoutGrid,
   Wallet,
   TrendingUp,
   ArrowLeftRight,
@@ -70,6 +71,7 @@ export const Icons = {
   loans: Landmark,
   reports: FileText,
   bank: Building2,
+  widgets: LayoutGrid,
   inflow: ArrowUpRight,
   outflow: ArrowDownLeft,
   search: Search,

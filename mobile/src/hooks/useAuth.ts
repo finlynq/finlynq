@@ -22,6 +22,7 @@ import {
   setServerUrl,
 } from "../api/client";
 import { logger } from "../lib/logger";
+import { clearSnapshot as clearWidgetSnapshot } from "../../modules/finlynq-widgets";
 
 const BIOMETRIC_KEY = "pf_biometric_enabled";
 const AUTO_LOCK_KEY = "pf_auto_lock_minutes";
@@ -628,6 +629,8 @@ function useAuthEngine() {
     if (purge) {
       lastCredentials.current = null;
       await purgeStoredCredentials();
+      // Signing out leaves no figures on the home screen.
+      await clearWidgetSnapshot();
     }
     setState((s) => ({
       ...s,

@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- The app's dark palette (src/theme/colors.ts). -->
+<resources>
+  <color name="finlynq_widget_bg">#101317</color>
+  <color name="finlynq_widget_border">#1e242b</color>
+  <color name="finlynq_widget_fg">#e8eaed</color>
+  <color name="finlynq_widget_muted">#9aa3ad</color>
+  <color name="finlynq_widget_primary">#f5a623</color>
+  <color name="finlynq_widget_on_primary">#241a06</color>
+  <color name="finlynq_widget_pos">#4fc8a6</color>
+  <color name="finlynq_widget_neg">#e5624b</color>
+</resources>

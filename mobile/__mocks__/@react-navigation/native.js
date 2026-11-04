@@ -15,6 +15,12 @@ const useRoute = jest.fn(() => ({
 
 const useIsFocused = jest.fn(() => true);
 
+const useNavigationContainerRef = jest.fn(() => ({
+  isReady: jest.fn(() => false),
+  getRootState: jest.fn(() => undefined),
+  navigate: jest.fn(),
+}));
+
 const NavigationContainer = ({ children }) =>
   React.createElement("NavigationContainer", null, children);
 
@@ -43,6 +49,7 @@ const DarkTheme = {
 };
 
 module.exports = {
+  useNavigationContainerRef,
   useNavigation,
   useRoute,
   useIsFocused,

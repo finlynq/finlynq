@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+  android:id="@+id/finlynq_root"
+  android:layout_width="match_parent"
+  android:layout_height="match_parent"
+  android:background="@drawable/finlynq_widget_background"
+  android:gravity="center"
+  android:orientation="vertical"
+  android:padding="4dp">
+
+  <ImageView
+    android:layout_width="34dp"
+    android:layout_height="34dp"
+    android:background="@drawable/finlynq_widget_add_button"
+    android:contentDescription="@string/finlynq_widget_quick_add_name"
+    android:padding="7dp"
+    android:src="@drawable/finlynq_widget_plus" />
+
+  <TextView
+    android:layout_width="wrap_content"
+    android:layout_height="wrap_content"
+    android:layout_marginTop="2dp"
+    android:maxLines="1"
+    android:text="@string/finlynq_widget_quick_add_label"
+    android:textColor="@color/finlynq_widget_fg"
+    android:textSize="11sp" />
+</LinearLayout>
