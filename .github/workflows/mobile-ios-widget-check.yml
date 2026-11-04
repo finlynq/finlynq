@@ -6,8 +6,7 @@ name: Mobile iOS Widget Check
 # dark; the images are in the run's artifact. The other runs a real prebuild and
 # Release build of the whole app, extension embedded, and starts it on a simulator.
 # It is only signed to run locally, so it can't reach a device or TestFlight, but it
-# has its entitlements: without them the keychain read at startup never returns and
-# the app sits on its spinner.
+# has its entitlements, so the keychain and the App Group work as they do on a phone.
 #
 # HOW IT RUNS: push a tag like `mobile-ios-widget-check-1`. It publishes nothing.
 
