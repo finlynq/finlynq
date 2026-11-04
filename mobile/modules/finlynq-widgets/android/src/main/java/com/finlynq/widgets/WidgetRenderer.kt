@@ -34,7 +34,7 @@ internal object WidgetRenderer {
   private const val RING_STROKE_PX = 30f
   private const val RING_TRACK_COLOR = 0x4488929C
 
-  /** Below this height the ring needs the room more than the budget total does. */
+  /** Below this height the ring needs the room, and is too small to hold its label. */
   private const val LEFT_TO_SPEND_FULL_HEIGHT_DP = 150
 
   private const val UPCOMING_HEADER_DP = 40
@@ -173,6 +173,11 @@ internal object WidgetRenderer {
 
     val views = RemoteViews(context.packageName, R.layout.finlynq_widget_left_to_spend)
     views.setOnClickPendingIntent(R.id.finlynq_root, openLink(context, LINK_BUDGETS))
+    val height = options?.let {
+      maxOf(it.getInt(AppWidgetManager.OPTION_APPWIDGET_MAX_HEIGHT), it.getInt(AppWidgetManager.OPTION_APPWIDGET_MIN_HEIGHT))
+    } ?: 0
+    val cramped = height in 1 until LEFT_TO_SPEND_FULL_HEIGHT_DP
+    views.setViewVisibility(R.id.finlynq_ring_label, if (cramped) View.GONE else View.VISIBLE)
 
     val ringFill = when {
       hide || !hasBudget -> 0f
@@ -203,10 +208,6 @@ internal object WidgetRenderer {
         R.id.finlynq_sub,
         context.getString(if (over) R.string.finlynq_widget_budget_was else R.string.finlynq_widget_of_budget, planned),
       )
-      val height = options?.let {
-        maxOf(it.getInt(AppWidgetManager.OPTION_APPWIDGET_MAX_HEIGHT), it.getInt(AppWidgetManager.OPTION_APPWIDGET_MIN_HEIGHT))
-      } ?: 0
-      val cramped = height in 1 until LEFT_TO_SPEND_FULL_HEIGHT_DP
       views.setViewVisibility(R.id.finlynq_sub, if (hide || cramped) View.GONE else View.VISIBLE)
     } else {
       views.setTextViewText(R.id.finlynq_title, context.getString(R.string.finlynq_widget_spent_this_month))

@@ -22,10 +22,11 @@ for mode in no yes; do
   for scenario in sample hidden warn over no-budget long stale nothing-due empty corrupt; do
     adb shell am force-stop "$PKG"
     adb shell am start -W -n "$PREVIEW" --es scenario "$scenario" > /dev/null
-    sleep 5
+    sleep 8
     adb exec-out screencap -p > "$OUT/screen-$scenario-$label.png"
   done
 done
+adb shell am force-stop "$PKG"
 adb shell cmd uimode night no
 
 adb pull "/sdcard/Android/data/$PKG/files/preview" "$OUT/widgets" > /dev/null

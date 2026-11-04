@@ -207,3 +207,22 @@ npx eas build --platform ios --profile production --auto-submit --non-interactiv
   use" list, `5382bb3`) is on dev. Also in this build: a waiting email that a rule matched **says why
   it is waiting** and can be **recorded with that rule** in one tap (server side is web PR #381,
   prod since 2026-10-16).
+- **1.0.29 / vc38 (Android internal testing only)** (2026-11-04; no iOS build): **Home-screen widgets**
+  (GH #392): Left to spend, Upcoming payments, Net worth and Add transaction, added from More → Widgets
+  or the launcher, with a Hide amounts switch. Native code, so this needs a store build, not an OTA
+  update. The app writes a snapshot of already-formatted figures after unlock, on returning to the
+  foreground and shortly after a save; the widgets only read it and redraw from it every 30 minutes,
+  so they hold no session, password or encryption key and they do not fetch on their own. Their
+  figures are as of the last time the app was open, and say how old once an hour old. No server
+  change: the figures come from `/api/budgets/month`, `/api/subscriptions`, `/api/recurring`,
+  `/api/loans`, `/api/loans/schedule` and `/api/dashboard`, all on prod; a server missing one keeps
+  that widget on "Open Finlynq to update". **Android only: there is no iOS WidgetKit target yet**, and
+  the module is a no-op on iOS. **Bank feed** (More → Bank feed): status and a Sync now button for
+  accounts linked on the web (in-app feedback #29). **Entry type** on the investment income/expense
+  form: Dividend, Interest, Fee or Other, so a dividend entered on the phone reaches the Dividends
+  report without picking its category; this landed on dev in June (`a8d2e84`) and never reached
+  mobile-dev.
+  To see the widgets without a device, push a tag `mobile-widget-check-<n>`: it builds a debug app,
+  hosts every widget on an emulator through a real AppWidgetHost in every scenario, light and dark, and
+  leaves the images in the run's artifact (`scripts/widget-render-check.sh`). It uses no versionCode.
+  It does not cover the app writing a real snapshot or a real launcher: check those on a device.

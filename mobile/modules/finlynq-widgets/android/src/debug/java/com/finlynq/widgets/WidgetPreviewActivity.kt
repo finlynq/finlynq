@@ -147,7 +147,7 @@ class WidgetPreviewActivity : Activity() {
     const val TAG = "FinlynqWidgetPreview"
     const val HOST_ID = 9217
     const val WALLPAPER_COLOR = 0xFF4A5A6A.toInt()
-    const val RENDER_WAIT_MS = 2500L
+    const val RENDER_WAIT_MS = 5000L
     const val STALE_AGE_MS = 3 * 60 * 60 * 1000L
     val UPCOMING_OFFSETS = intArrayOf(0, 1, 3, 9, 20, 40)
   }
