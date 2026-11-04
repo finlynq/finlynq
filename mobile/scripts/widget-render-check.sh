@@ -7,8 +7,8 @@ set -euo pipefail
 
 PKG=com.finlynq.mobile
 PREVIEW="$PKG/com.finlynq.widgets.WidgetPreviewActivity"
-OUT=widget-render
-APK=android/app/build/outputs/apk/debug/app-debug.apk
+OUT=${OUT:-widget-render}
+APK=${APK:-android/app/build/outputs/apk/debug/app-debug.apk}
 mkdir -p "$OUT"
 
 adb wait-for-device
