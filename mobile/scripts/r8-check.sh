@@ -6,6 +6,8 @@
 #   3. check.apk: signs in against a stub server, opens every tab and a few screens,
 #      then force-stops and comes back signed in, which reads the session back out
 #      of expo-secure-store.
+#   4. check-no-r8.apk signed in, then check.apk installed over it: the update every
+#      existing user gets, with the session written without R8 and read with it.
 # Fails on a crash, a missing native module, or a class or method R8 took away.
 # It can't do a real biometric prompt, or a real server's data: see the runbook.
 set -uo pipefail
@@ -100,6 +102,28 @@ start_app() {
   adb shell am start -W -n "$PKG/.MainActivity" > /dev/null
 }
 
+sign_in() { # label, for errors and the screenshot
+  start_app
+  wait_for_js_log 'native module' 90 || err "$1: JS never logged the widgets native module line"
+  sleep 3
+  # The server field sits behind a toggle under the form, so set it up first.
+  tap "Server: https://finlynq.com" || err "$1: no server toggle on the login screen"
+  tap "edit:-1"
+  adb shell input keyevent KEYCODE_MOVE_END
+  for _ in $(seq 1 30); do adb shell input keyevent KEYCODE_DEL; done
+  adb shell input text "$STUB_URL"
+  hide_keyboard
+  tap "edit:0"
+  adb shell input text "r8check"
+  hide_keyboard
+  tap "edit:1"
+  adb shell input text "not-a-real-password"
+  hide_keyboard
+  shot "$1-signin-filled"
+  tap "Sign In" || err "$1: no Sign In button"
+  wait_for_js_log 'sign-in succeeded' 30 || err "$1: sign-in against the stub did not succeed"
+}
+
 # 1. The APK as shipped ------------------------------------------------------------
 adb wait-for-device
 # The launcher tends to ANR on a software-rendered emulator, and its dialog sat over
@@ -127,26 +151,7 @@ node scripts/r8-check-stub.mjs "$STUB_PORT" > "$OUT/stub.log" 2>&1 &
 stub_pid=$!
 trap 'kill "$stub_pid" 2>/dev/null || true' EXIT
 
-start_app
-wait_for_js_log 'native module' 90 || err "check: JS never logged the widgets native module line"
-sleep 3
-
-# The server field sits behind a toggle under the form, so set it up first.
-tap "Server: https://finlynq.com" || err "check: no server toggle on the login screen"
-tap "edit:-1"
-adb shell input keyevent KEYCODE_MOVE_END
-for _ in $(seq 1 30); do adb shell input keyevent KEYCODE_DEL; done
-adb shell input text "$STUB_URL"
-hide_keyboard
-tap "edit:0"
-adb shell input text "r8check"
-hide_keyboard
-tap "edit:1"
-adb shell input text "not-a-real-password"
-hide_keyboard
-shot signin-filled
-tap "Sign In" || err "check: no Sign In button"
-wait_for_js_log 'sign-in succeeded' 30 || err "check: sign-in against the stub did not succeed"
+sign_in check
 sleep 6
 shot home
 
@@ -194,6 +199,22 @@ adb logcat -d > "$OUT/logcat-restored.txt"
 shows_text "Accounts" || err "check: did not come back signed in after a restart"
 adb shell am force-stop "$PKG"
 
+# 4. The update every user gets ----------------------------------------------------
+adb uninstall "$PKG" > /dev/null
+adb install "$OUT/check-no-r8.apk" || err "update: check-no-r8.apk would not install"
+sign_in update
+sleep 3
+adb shell am force-stop "$PKG"
+adb install -r "$OUT/check.apk" || err "update: check.apk would not install over check-no-r8.apk"
+start_app
+wait_for_js_log 'api/auth/session.*200' 90   || err "update: the session stored without R8 did not come back with R8"
+sleep 10
+shot updated
+js_log > "$OUT/logcat-js-updated.txt"
+adb logcat -d > "$OUT/logcat-updated.txt"
+shows_text "Accounts" || err "update: signed out by the update to R8"
+adb shell am force-stop "$PKG"
+
 adb logcat -d -b crash > "$OUT/logcat-crash-buffer.txt" || true
 
 # The verdict ----------------------------------------------------------------------
@@ -204,7 +225,7 @@ fi
 
 # What a class or method R8 removed or renamed looks like, in the app's own lines.
 casualties='ANR in |NoSuchMethodError|NoSuchFieldError|NoClassDefFoundError|ClassNotFoundException|AbstractMethodError|IncompatibleClassChangeError|KotlinReflectionInternalError|ExceptionInInitializerError|FATAL EXCEPTION|Unable to instantiate|Cannot find native module|Unhandled JS Exception'
-for log in "$OUT"/logcat-as-shipped.txt "$OUT"/logcat-signed-in.txt "$OUT"/logcat-restored.txt; do
+for log in "$OUT"/logcat-as-shipped.txt "$OUT"/logcat-signed-in.txt "$OUT"/logcat-restored.txt "$OUT"/logcat-updated.txt; do
   pid_lines=$(grep -E "$casualties" "$log" | grep -E "ReactNative|AndroidRuntime|$PKG|expo\.|com\.facebook|com\.swmansion|com\.finlynq" || true)
   if [ -n "$pid_lines" ]; then
     err "A class or method went missing, or the app crashed, in $log"
