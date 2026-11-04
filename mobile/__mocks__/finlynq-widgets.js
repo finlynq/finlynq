@@ -1,4 +1,4 @@
-// Default for tests: the native widget module is absent, as on iOS.
+// Default for tests: the native widget module is absent, as in an old store build.
 module.exports = {
   widgetsAvailable: false,
   hasSnapshotReaders: jest.fn(() => false),

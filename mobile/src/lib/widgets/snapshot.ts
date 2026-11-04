@@ -4,7 +4,8 @@
 // Amounts are formatted here, in the app's one formatCurrency, and the widgets
 // draw the strings as they are. Anything that depends on today's date ("3 days
 // left", "Tomorrow") is left to the widget, which redraws without the app.
-// The native side reads this shape: see WidgetRenderer.kt, and the sample in
+// The native side reads this shape: see WidgetRenderer.kt and, on iOS,
+// targets/widget/SharedData.swift, and the sample in
 // modules/finlynq-widgets/android/src/debug/assets that a test holds it to.
 
 import type { LoanSummary, LoanScheduleRow } from "../../../../shared/types";

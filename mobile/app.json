@@ -21,6 +21,21 @@
       "bundleIdentifier": "com.finlynq.mobile",
       "infoPlist": {
         "ITSAppUsesNonExemptEncryption": false
+      },
+      "entitlements": {
+        "com.apple.security.application-groups": [
+          "group.com.finlynq.mobile"
+        ]
+      },
+      "privacyManifests": {
+        "NSPrivacyAccessedAPITypes": [
+          {
+            "NSPrivacyAccessedAPIType": "NSPrivacyAccessedAPICategoryUserDefaults",
+            "NSPrivacyAccessedAPITypeReasons": [
+              "1C8F.1"
+            ]
+          }
+        ]
       }
     },
     "android": {
@@ -48,7 +63,8 @@
     },
     "plugins": [
       "expo-secure-store",
-      "./plugins/withAssetStatements"
+      "./plugins/withAssetStatements",
+      "@bacons/apple-targets"
     ]
   }
 }

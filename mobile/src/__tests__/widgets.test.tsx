@@ -52,7 +52,7 @@ jest.mock("../api/client", () => ({
   },
 }));
 
-// The native module is present here (the default mock is the iOS case).
+// The native module is present here (the default mock is a build without it).
 jest.mock("../../modules/finlynq-widgets", () => ({
   __esModule: true,
   widgetsAvailable: true,
@@ -111,6 +111,18 @@ function loan(over: Partial<LoanSummary> = {}): LoanSummary {
     accountName: null,
     ...over,
   };
+}
+
+/** Every field a real snapshot has, for the tests that hold the native readers to it. */
+function knownSnapshotFields() {
+  const built = upcomingSection([sub()], [], [], TODAY, NOW)!;
+  return new Set([
+    ...Object.keys(mergeSnapshot(null, { leftToSpend: null, upcoming: null, netWorth: null }, NOW)),
+    ...Object.keys(built),
+    ...Object.keys(built.items[0]),
+    ...Object.keys(leftToSpendSection({ month: "2026-11", currency: "CAD", summary: { plannedSpending: 1, spent: 0 } }, NOW)),
+    ...Object.keys(netWorthSection({ displayCurrency: "CAD", netWorth: 1, totalAssets: 1, totalLiabilities: 0 }, NOW)),
+  ]);
 }
 
 describe("left to spend", () => {
@@ -273,14 +285,7 @@ describe("the native side", () => {
   });
 
   it("reads the snapshot's real field names", () => {
-    const built = upcomingSection([sub()], [], [], TODAY, NOW)!;
-    const known = new Set([
-      ...Object.keys(mergeSnapshot(null, { leftToSpend: null, upcoming: null, netWorth: null }, NOW)),
-      ...Object.keys(built),
-      ...Object.keys(built.items[0]),
-      ...Object.keys(leftToSpendSection({ month: "2026-11", currency: "CAD", summary: { plannedSpending: 1, spent: 0 } }, NOW)),
-      ...Object.keys(netWorthSection({ displayCurrency: "CAD", netWorth: 1, totalAssets: 1, totalLiabilities: 0 }, NOW)),
-    ]);
+    const known = knownSnapshotFields();
     const read = [...renderer.matchAll(/\.opt(?:String|Boolean|Double|Long|JSONObject|JSONArray)\("([A-Za-z]+)"/g)].map((m) => m[1]);
     expect(read.length).toBeGreaterThan(8);
     for (const field of read) expect(known.has(field)).toBe(true);
@@ -296,6 +301,109 @@ describe("the native side", () => {
     expect(fs.readFileSync(path.join(androidDir, "java/com/finlynq/widgets/WidgetStore.kt"), "utf8")).toContain("noBackupFilesDir");
     expect(manifest).not.toContain("android:exported=\"true\"");
     expect(manifest).not.toContain("uses-permission");
+  });
+});
+
+describe("the iOS side", () => {
+  const mobileDir = path.join(__dirname, "../..");
+  const targetDir = path.join(mobileDir, "targets/widget");
+  const moduleDir = path.join(mobileDir, "modules/finlynq-widgets");
+  const extensionFiles = fs.readdirSync(targetDir).filter((f) => f.endsWith(".swift"));
+  const read = (...parts: string[]) => fs.readFileSync(path.join(...parts), "utf8");
+  const extensionSwift = extensionFiles.map((f) => read(targetDir, f)).join("\n");
+  const store = read(moduleDir, "ios/WidgetStore.swift");
+  const swiftModule = read(moduleDir, "ios/FinlynqWidgetsModule.swift");
+  const appConfig = JSON.parse(read(mobileDir, "app.json")).expo;
+
+  it("only opens links the app knows", () => {
+    const links = [...extensionSwift.matchAll(/"(pf-mobile:\/\/[a-z-]+)"/g)].map((m) => m[1]);
+    expect(links.length).toBeGreaterThan(0);
+    for (const link of links) expect(widgetLinkTarget(link)).not.toBeNull();
+  });
+
+  it("reads the snapshot's real field names, and the sample decodes with them", () => {
+    const known = knownSnapshotFields();
+    const declared = [...read(targetDir, "SharedData.swift").matchAll(/^ {2}let (\w+):/gm)].map((m) => m[1]);
+    expect(declared.length).toBeGreaterThan(8);
+    for (const field of declared) expect(known.has(field)).toBe(true);
+    // Decodable refuses a missing field that is not optional, so each must be in a real snapshot.
+    const sample = JSON.parse(read(moduleDir, "android/src/debug/assets/widget-snapshot.sample.json"));
+    const present = new Set([
+      ...Object.keys(sample),
+      ...Object.keys(sample.leftToSpend),
+      ...Object.keys(sample.upcoming),
+      ...Object.keys(sample.upcoming.items[0]),
+      ...Object.keys(sample.netWorth),
+    ]);
+    for (const field of declared) expect(present.has(field)).toBe(true);
+  });
+
+  it("offers the same functions as Android", () => {
+    const names = (source: string) => [...source.matchAll(/(?:Async)?Function\("(\w+)"\)/g)].map((m) => m[1]).sort();
+    const kotlin = read(moduleDir, "android/src/main/java/com/finlynq/widgets/FinlynqWidgetsModule.kt");
+    expect(names(swiftModule).length).toBeGreaterThan(0);
+    expect(names(swiftModule)).toEqual(names(kotlin));
+  });
+
+  it("is linked as the module's Apple side", () => {
+    const config = JSON.parse(read(moduleDir, "expo-module.config.json"));
+    expect(config.platforms).toEqual(expect.arrayContaining(["apple", "android"]));
+    expect(config.apple.modules).toEqual(["FinlynqWidgetsModule"]);
+    expect(swiftModule).toContain('Name("FinlynqWidgets")');
+  });
+
+  it("the app and the extension share one App Group", () => {
+    const groups = appConfig.ios.entitlements["com.apple.security.application-groups"];
+    expect(groups).toHaveLength(1);
+    const group = /appGroup = "([^"]+)"/;
+    expect(store.match(group)?.[1]).toBe(groups[0]);
+    expect(extensionSwift.match(group)?.[1]).toBe(groups[0]);
+    const targetConfig = read(targetDir, "expo-target.config.js");
+    expect(targetConfig).toContain('config.ios.entitlements["com.apple.security.application-groups"]');
+    expect(store.match(/snapshotFile = "([^"]+)"/)?.[1]).toBe(extensionSwift.match(/snapshotFile = "([^"]+)"/)?.[1]);
+    expect(store.match(/keyHideAmounts = "([^"]+)"/)?.[1]).toBe(extensionSwift.match(/keyHideAmounts = "([^"]+)"/)?.[1]);
+  });
+
+  it("every widget that reads figures keeps its snapshot alive", () => {
+    const kinds = Object.fromEntries([...extensionSwift.matchAll(/static let (\w+) = "(Finlynq\w+)"/g)].map((m) => [m[1], m[2]]));
+    expect(Object.keys(kinds).sort()).toEqual(["leftToSpend", "netWorth", "quickAdd", "upcoming"]);
+    const readers = [...(store.match(/readerKinds: Set<String> = \[([^\]]+)\]/)?.[1] ?? "").matchAll(/"(\w+)"/g)].map((m) => m[1]).sort();
+    expect(readers).toEqual([kinds.leftToSpend, kinds.netWorth, kinds.upcoming].sort());
+  });
+
+  it("holds no credentials and never reaches the network", () => {
+    const code = extensionSwift.replace(/\/\*\*[\s\S]*?\*\//g, "").replace(/\/\/.*$/gm, "");
+    for (const banned of ["URLSession", "URLRequest", "SecItem", "kSecClass", "ExpoModulesCore", "password", "token"]) {
+      expect(code.toLowerCase()).not.toContain(banned.toLowerCase());
+    }
+    // And it only reads: the app is the one writer of the shared data.
+    expect(code).not.toMatch(/\.write\(|\.set\(|removeItem/);
+  });
+
+  it("keeps the snapshot out of backups, but readable on the Lock Screen", () => {
+    expect(store).toContain("isExcludedFromBackup = true");
+    expect(store).toContain("completeFileProtectionUntilFirstUserAuthentication");
+  });
+
+  it("hides amounts and marks them privacy sensitive in every widget that shows them", () => {
+    for (const file of ["LeftToSpendWidget.swift", "UpcomingWidget.swift", "NetWorthWidget.swift"]) {
+      const source = read(targetDir, file);
+      expect(source).toContain("privacySensitive()");
+      expect(source).toMatch(/[hH]ide/);
+    }
+  });
+
+  it("declares why it uses shared preferences, for both the app and the extension", () => {
+    expect(read(targetDir, "PrivacyInfo.xcprivacy")).toContain("1C8F.1");
+    expect(JSON.stringify(appConfig.ios.privacyManifests)).toContain("1C8F.1");
+  });
+
+  it("the render check draws the extension's own sample", () => {
+    const script = read(mobileDir, "scripts/ios-widget-render-check.sh");
+    expect(script).toContain("widget-snapshot.sample.json");
+    const host = read(mobileDir, "scripts/ios-widget-preview/WidgetPreviewHost.swift");
+    const scenarios = [...(host.match(/scenarios = \[([\s\S]*?)\]/)?.[1] ?? "").matchAll(/"([a-z-]+)"/g)].map((m) => m[1]);
+    expect(script).toContain(`EXPECTED_IMAGES=${scenarios.length * 2}`);
   });
 });
 

@@ -1,5 +1,5 @@
-// Home-screen widgets (GH #392). The native side is Android only so far, so
-// everything here is a safe no-op on iOS, where the module does not exist.
+// Home-screen widgets (GH #392). Everything here is a safe no-op in a build
+// without the native module, such as an old store build updated over the air.
 import { requireOptionalNativeModule } from "expo";
 
 export type WidgetKindKey = "leftToSpend" | "upcoming" | "netWorth" | "quickAdd";
@@ -17,10 +17,10 @@ interface FinlynqWidgetsNative {
 
 const native = requireOptionalNativeModule<FinlynqWidgetsNative>("FinlynqWidgets");
 
-/** False on iOS and in any build without the native module. */
+/** False in any build without the native module. */
 export const widgetsAvailable = native != null;
 
-/** Is a widget that shows figures on a home screen? */
+/** Is a widget that shows figures on a home screen or, on iOS, the Lock Screen? */
 export function hasSnapshotReaders(): boolean {
   return native?.hasSnapshotReaders() ?? false;
 }
@@ -45,7 +45,7 @@ export async function setHideAmounts(hide: boolean): Promise<void> {
   await native?.setHideAmounts(hide);
 }
 
-/** Can this launcher show its "add this widget" prompt (Android 8+, launcher permitting)? */
+/** Can this launcher show its "add this widget" prompt (Android 8+, launcher permitting)? Never on iOS. */
 export function canPinWidgets(): boolean {
   return native?.canPinWidgets() ?? false;
 }

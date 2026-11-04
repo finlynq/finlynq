@@ -1,0 +1,132 @@
+name: Mobile iOS Widget Check
+
+# The iOS counterpart of mobile-widget-check.yml, for when there is no Mac at hand
+# and an EAS build would be a slow, paid way to find a Swift error. One job compiles
+# the WidgetKit extension's Swift and draws every widget in every scenario, light and
+# dark; the images are in the run's artifact. The other runs a real prebuild and
+# unsigned Release build of the whole app, extension embedded, and starts it on a
+# simulator. Neither can sign, so neither can reach a device or TestFlight.
+#
+# HOW IT RUNS: push a tag like `mobile-ios-widget-check-1`. It publishes nothing.
+
+on:
+  push:
+    tags: ['mobile-ios-widget-check-*']
+
+concurrency:
+  group: mobile-ios-widget-check-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  render:
+    name: Draw the widgets on a simulator
+    runs-on: macos-15
+    timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: mobile
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Compile and draw
+        shell: bash
+        run: bash scripts/ios-widget-render-check.sh
+
+      - name: Upload what was drawn
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: widget-render-ios
+          path: mobile/widget-render-ios
+          if-no-files-found: warn
+          retention-days: 14
+
+  build:
+    name: Build the whole app (unsigned)
+    runs-on: macos-15
+    timeout-minutes: 90
+    defaults:
+      run:
+        working-directory: mobile
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Setup Node.js
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: mobile/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Expo prebuild (generate ios/)
+        run: npx expo prebuild --platform ios --no-install
+
+      - name: Check what prebuild produced
+        shell: bash
+        run: |
+          provider="ios/Pods/Target Support Files/Pods-Finlynq/ExpoModulesProvider.swift"
+          cd ios && pod install && cd ..
+          grep -q FinlynqWidgetsModule "$provider" || { echo "::error::The widget module was not autolinked"; exit 1; }
+          if grep -q ExtensionStorageModule "$provider"; then echo "::error::apple-targets' unused module was linked"; exit 1; fi
+
+      - name: Build for the simulator, without signing
+        shell: bash
+        run: |
+          set -o pipefail
+          xcodebuild \
+            -workspace ios/Finlynq.xcworkspace \
+            -scheme Finlynq \
+            -configuration Release \
+            -sdk iphonesimulator \
+            -destination 'generic/platform=iOS Simulator' \
+            -derivedDataPath ios/build \
+            ARCHS=arm64 ONLY_ACTIVE_ARCH=NO CODE_SIGNING_ALLOWED=NO \
+            build 2>&1 | tee xcodebuild.log | xcbeautify --quiet || {
+              grep -nE "error:|fatal error|BUILD FAILED" xcodebuild.log | head -60
+              exit 1
+            }
+
+      - name: Check the extension, then start the app
+        shell: bash
+        run: |
+          app=ios/build/Build/Products/Release-iphonesimulator/Finlynq.app
+          appex="$app/PlugIns/FinlynqWidget.appex"
+          test -d "$appex" || { echo "::error::The extension is not embedded"; exit 1; }
+          test -f "$appex/PrivacyInfo.xcprivacy" || { echo "::error::The extension has no privacy manifest"; exit 1; }
+          plutil -p "$appex/Info.plist"
+          mkdir -p widget-render-ios-app
+          device=$(xcrun simctl list devices available -j | node -e "
+            let s = '';
+            process.stdin.on('data', (d) => (s += d)).on('end', () => {
+              const phones = Object.values(JSON.parse(s).devices).flat().filter((d) => d.name.startsWith('iPhone'));
+              console.log(phones[phones.length - 1].udid);
+            });
+          ")
+          xcrun simctl boot "$device"
+          xcrun simctl bootstatus "$device" -b > /dev/null
+          xcrun simctl install "$device" "$app"
+          xcrun simctl spawn "$device" pluginkit -m -p com.apple.widgetkit-extension || true
+          xcrun simctl launch "$device" com.finlynq.mobile
+          sleep 30
+          xcrun simctl io "$device" screenshot widget-render-ios-app/screen-app.png
+          xcrun simctl spawn "$device" launchctl list | grep -q com.finlynq.mobile || {
+            echo "::error::The app is no longer running"
+            exit 1
+          }
+
+      - name: Upload the app's first screen
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: widget-render-ios-app
+          path: |
+            mobile/widget-render-ios-app
+            mobile/xcodebuild.log
+          if-no-files-found: warn
+          retention-days: 14

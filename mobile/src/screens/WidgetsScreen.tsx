@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useRef, useState } from "react";
 import {
   View,
   Text,
+  Platform,
   ScrollView,
   StyleSheet,
   Switch,
@@ -48,7 +49,9 @@ const WIDGETS: { kind: WidgetKindKey; title: string; description: string }[] = [
 ];
 
 export const WIDGETS_HOW_TO_ADD =
-  "To add one, touch and hold your home screen, choose Widgets, then find Finlynq.";
+  Platform.OS === "ios"
+    ? "To add one, touch and hold your Home Screen, tap Edit or +, choose Add Widget, then find Finlynq. Left to spend and Upcoming payments also fit on the Lock Screen: touch and hold it, then tap Customize."
+    : "To add one, touch and hold your home screen, choose Widgets, then find Finlynq.";
 
 export const WIDGETS_REFRESH_NOTE =
   "Widgets update when you open Finlynq and when you change something in it. They can't reach your data on their own, so once their figures are an hour old they say how old.";
