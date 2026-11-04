@@ -138,6 +138,12 @@ on the first R8 build.
   ```bash
   npx eas credentials:configure-build --platform ios --profile production
   ```
+  Apple refuses this with a 403 ("PLA Update available") whenever a new Program License Agreement is
+  waiting, and the same lock covers App Store Connect and its API, so a submit would fail too. Only the
+  owner can accept it, under Account at developer.apple.com. Each refused non-interactive attempt still
+  uses up a build number; the gap is harmless.
+- **The EAS submit queue is slow on the free tier:** build 16 took 7 minutes to build, then waited 40 in
+  the queue for a 4-second upload. "Queued" on the submission page is normal.
 - **EAS uploads the working copy, uncommitted files included** (`requireCommit` is off). With other work
   in progress in `pf-mobile/`, build from a clean clone so it can't reach TestFlight:
   `git clone --depth 1 --branch mobile-dev https://github.com/finlynq/finlynq.git`, `npm ci` in its
@@ -299,7 +305,11 @@ on the first R8 build.
   card pushed from a modal lands behind it).
 - **R8 on Android release builds**: see
   the R8 section above, including what to check on a device before promoting.
-- **iOS widgets (on `mobile-dev`)** (GH #392):
+- **1.0.29 / iOS build 16 (TestFlight internal group only)** (2026-11-04, from `a9c654c`; not sent to App
+  Review, not yet checked on a device). Apple marked it Validated, and App Store Connect's build metadata
+  shows the app and `FinlynqWidget.appex` both signed with `group.com.finlynq.mobile`. The last iOS build was
+  1.0.27, so this one also carries the 1.0.28 and 1.0.29 changes above and **Your feedback**. It does not
+  carry R8, which is Android only, or the switch-off of OTA updates. **iOS widgets** (GH #392):
   the Android widgets on iOS 16.1+: **Left to spend** (small, Lock Screen circular), **Upcoming payments**
   (medium, Lock Screen rectangular), **Net worth** (small, medium), **Add transaction** (small). Added
   from the home screen, since iOS has no "add this widget" prompt; More → Widgets holds Hide amounts and
@@ -318,6 +328,7 @@ on the first R8 build.
   `widget-render-ios-app`, its first screen should be the login).
   It draws through `ImageRenderer`, not WidgetKit, so **only a device can confirm:** widgets appear in the
   gallery and on the Lock Screen; the figures arrive after opening the app (`getCurrentConfigurations`
-  really reports a placed widget, else More → Widgets → Refresh says "Add a widget first"); the App Group
-  works when signed; taps open the right screens, also from a cold start and while locked; the Lock Screen
-  redacts while locked and uses its own colours; sign-out empties the widgets.
+  really reports a placed widget, else More → Widgets → Refresh says "Add a widget first"); the app and the
+  extension really share the file through the App Group; taps open the right screens, also from a cold start
+  and while locked; the Lock Screen redacts while locked and uses its own colours; Hide amounts updates the
+  widgets at once; sign-out empties them.
