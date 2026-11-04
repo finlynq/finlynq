@@ -26,10 +26,13 @@ follows; it is also the fast path for a manual "release mobile 1.0.x" request.
   - The trailing integer of the tag **is** the versionCode. Workflow reads the marketing version
     from `app.json` at the tagged commit, so **the tag must point at the commit that already has the
     bumped version**.
-- **iOS build:** EAS cloud build + auto-submit to App Store Connect (→ TestFlight).
+- **iOS build:** EAS cloud build + auto-submit to App Store Connect (→ TestFlight). Two targets since
+  the widgets: the app and its WidgetKit extension `com.finlynq.mobile.widgets` (`mobile/targets/widget`,
+  added at prebuild by `@bacons/apple-targets`), sharing the App Group `group.com.finlynq.mobile`.
 - **Auth needed:** `gh` logged in (HussienH) for the Android tag/CI; `eas` logged in
-  (`eas whoami` → hussein.halawi). EAS holds the iOS dist cert, provisioning profile, and ASC API
-  key on its servers, so a non-interactive build resolves credentials itself.
+  (`eas whoami` → hussein.halawi). EAS holds the iOS dist cert, provisioning profiles, and ASC API
+  key on its servers, so a non-interactive build resolves credentials itself, once they exist (see
+  "New iOS target or capability" under Gotchas).
 
 ## Pick the new version numbers
 
@@ -81,6 +84,19 @@ npx eas build --platform ios --profile production --auto-submit --non-interactiv
 
 ## Gotchas
 
+- **New iOS target or capability = the owner logs in once.** A new bundle id needs its own provisioning
+  profile, and a new capability (the App Group) invalidates the existing ones. A non-interactive build
+  can create neither: without an Apple login it stops on the new target, and it would not notice the
+  capability on the old one. So the first build after such a change starts with the owner running this
+  in a terminal and logging in to Apple; EAS registers the bundle id and App Group and makes the profiles.
+  `credentials:configure-build` has no `--non-interactive`. After that the usual command works again.
+  ```bash
+  npx eas credentials:configure-build --platform ios --profile production
+  ```
+- **EAS uploads the working copy, uncommitted files included** (`requireCommit` is off). With other work
+  in progress in `pf-mobile/`, build from a clean clone so it can't reach TestFlight:
+  `git clone --depth 1 --branch mobile-dev https://github.com/finlynq/finlynq.git`, `npm ci` in its
+  `mobile/`, and run `eas build` there.
 - **Tag points at the version-bump commit.** If you tag before committing the `app.json` bump, the
   Android build ships the OLD marketing version with the new versionCode.
 - **versionCode must strictly increase** over the last uploaded build, or Play rejects the upload.
@@ -216,8 +232,8 @@ npx eas build --platform ios --profile production --auto-submit --non-interactiv
   figures are as of the last time the app was open, and say how old once an hour old. No server
   change: the figures come from `/api/budgets/month`, `/api/subscriptions`, `/api/recurring`,
   `/api/loans`, `/api/loans/schedule` and `/api/dashboard`, all on prod; a server missing one keeps
-  that widget on "Open Finlynq to update". **Android only: there is no iOS WidgetKit target yet**, and
-  the module is a no-op on iOS. **Bank feed** (More → Bank feed): status and a Sync now button for
+  that widget on "Open Finlynq to update". **Android only in this build**; iOS came later (see "iOS
+  widgets" below). **Bank feed** (More → Bank feed): status and a Sync now button for
   accounts linked on the web (in-app feedback #29). **Entry type** on the investment income/expense
   form: Dividend, Interest, Fee or Other, so a dividend entered on the phone reaches the Dividends
   report without picking its category; this landed on dev in June (`a8d2e84`) and never reached
@@ -237,3 +253,25 @@ npx eas build --platform ios --profile production --auto-submit --non-interactiv
   only seen rendered through react-native-web and in jest), the marker and count clear after opening a
   thread, and on iOS "See your feedback and replies" leaves the send form (it uses `popTo` because a
   card pushed from a modal lands behind it).
+- **iOS widgets (on `mobile-dev`; native code, so it needs a store build, not an OTA update)** (GH #392):
+  the Android widgets on iOS 16.1+: **Left to spend** (small, Lock Screen circular), **Upcoming payments**
+  (medium, Lock Screen rectangular), **Net worth** (small, medium), **Add transaction** (small). Added
+  from the home screen, since iOS has no "add this widget" prompt; More → Widgets holds Hide amounts and
+  Refresh now and explains how. No server change, and the same rules as Android: the extension only reads
+  a snapshot of already-formatted figures from the App Group, holds no session, password or encryption
+  key, never fetches, and redraws hourly and at midnight so dates and "Updated 2h ago" stay right. The
+  figures are `privacySensitive()`, on top of Hide amounts. The snapshot file is out of iCloud backups,
+  readable while locked but not after a restart until the first unlock, and deleted on sign-out; iOS does
+  not say when the last widget goes, so the app deletes it when next opened with none left.
+  **To see them without a Mac or a device, push a tag `mobile-ios-widget-check-<n>`:** it publishes
+  nothing, uses no build number and costs no EAS build. One job compiles the extension's Swift against its
+  deployment target and draws every widget in every scenario, light and dark, on the smallest and largest
+  iPhone sizes (`scripts/ios-widget-render-check.sh`; artifact `widget-render-ios`, 26 sheets: read them,
+  the first green run still had a label spilling out of a ring). The other runs a real prebuild and a
+  Release build of the whole app, signed only to run locally, and starts it on a simulator (artifact
+  `widget-render-ios-app`, its first screen should be the login).
+  It draws through `ImageRenderer`, not WidgetKit, so **only a device can confirm:** widgets appear in the
+  gallery and on the Lock Screen; the figures arrive after opening the app (`getCurrentConfigurations`
+  really reports a placed widget, else More → Widgets → Refresh says "Add a widget first"); the App Group
+  works when signed; taps open the right screens, also from a cold start and while locked; the Lock Screen
+  redacts while locked and uses its own colours; sign-out empties the widgets.

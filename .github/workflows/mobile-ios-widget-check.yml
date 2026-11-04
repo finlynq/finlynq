@@ -4,8 +4,10 @@ name: Mobile iOS Widget Check
 # and an EAS build would be a slow, paid way to find a Swift error. One job compiles
 # the WidgetKit extension's Swift and draws every widget in every scenario, light and
 # dark; the images are in the run's artifact. The other runs a real prebuild and
-# unsigned Release build of the whole app, extension embedded, and starts it on a
-# simulator. Neither can sign, so neither can reach a device or TestFlight.
+# Release build of the whole app, extension embedded, and starts it on a simulator.
+# It is only signed to run locally, so it can't reach a device or TestFlight, but it
+# has its entitlements: without them the keychain read at startup never returns and
+# the app sits on its spinner.
 #
 # HOW IT RUNS: push a tag like `mobile-ios-widget-check-1`. It publishes nothing.
 
@@ -45,7 +47,7 @@ jobs:
           retention-days: 14
 
   build:
-    name: Build the whole app (unsigned)
+    name: Build the whole app (signed to run locally)
     runs-on: macos-15
     timeout-minutes: 90
     defaults:
@@ -75,7 +77,7 @@ jobs:
           grep -q FinlynqWidgetsModule "$provider" || { echo "::error::The widget module was not autolinked"; exit 1; }
           if grep -q ExtensionStorageModule "$provider"; then echo "::error::apple-targets' unused module was linked"; exit 1; fi
 
-      - name: Build for the simulator, without signing
+      - name: Build for the simulator
         shell: bash
         run: |
           set -o pipefail
@@ -86,7 +88,8 @@ jobs:
             -sdk iphonesimulator \
             -destination 'generic/platform=iOS Simulator' \
             -derivedDataPath ios/build \
-            ARCHS=arm64 ONLY_ACTIVE_ARCH=NO CODE_SIGNING_ALLOWED=NO \
+            ARCHS=arm64 ONLY_ACTIVE_ARCH=NO \
+            CODE_SIGN_STYLE=Manual CODE_SIGN_IDENTITY=- DEVELOPMENT_TEAM= PROVISIONING_PROFILE_SPECIFIER= \
             build 2>&1 | tee xcodebuild.log | xcbeautify --quiet || {
               grep -nE "error:|fatal error|BUILD FAILED" xcodebuild.log | head -60
               exit 1
