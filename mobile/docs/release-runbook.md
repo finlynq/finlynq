@@ -295,7 +295,7 @@ review never prompts.
   use" list, `5382bb3`) is on dev. Also in this build: a waiting email that a rule matched **says why
   it is waiting** and can be **recorded with that rule** in one tap (server side is web PR #381,
   prod since 2026-10-16).
-- **1.0.29 / vc38 (Android; no iOS build)** (2026-11-04; promoted internal → production and sent for review the same day on the owner's word, before an on-device check of the widgets, full rollout on approval): **Home-screen widgets**
+- **1.0.29 / vc38 (Android; no iOS build)** (2026-11-04; promoted internal → production on the owner's word and approved the same day, live as a full rollout; the owner then confirmed the widgets on their Android phone): **Home-screen widgets**
   (GH #392): Left to spend, Upcoming payments, Net worth and Add transaction, added from More → Widgets
   or the launcher, with a Hide amounts switch. Native code. The app writes a snapshot of already-formatted figures after unlock, on returning to the
   foreground and shortly after a save; the widgets only read it and redraw from it every 30 minutes,
