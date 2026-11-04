@@ -64,7 +64,8 @@
     "plugins": [
       "expo-secure-store",
       "./plugins/withAssetStatements",
-      "@bacons/apple-targets"
+      "@bacons/apple-targets",
+      "./plugins/withAndroidR8"
     ]
   }
 }
