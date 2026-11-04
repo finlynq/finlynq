@@ -163,7 +163,7 @@ done
 
 # A few pushed screens, so react-native-screens does a real transition. Widgets also
 # makes real calls into the native module. Settings reads the biometric status.
-for screen in Widgets Settings Budgets; do
+for screen in Budgets Widgets Settings; do
   tap "More"
   if tap "$screen"; then
     sleep 3
