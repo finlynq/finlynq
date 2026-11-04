@@ -180,6 +180,16 @@ jobs:
             ./gradlew :app:bundleRelease :app:assembleRelease --no-daemon --stacktrace
           fi
 
+      - name: R8 ran, and the bundle carries its mapping
+        run: |
+          # Play reads the mapping out of the bundle (AGP 4.1+), so the publish step
+          # below needs no mappingFile and crash reports stay readable. No mapping
+          # here means R8 didn't run, e.g. an Expo upgrade renamed the gradle property
+          # plugins/withAndroidR8.js sets, and Play would flag the release again.
+          test -s android/app/build/outputs/mapping/release/mapping.txt
+          unzip -l android/app/build/outputs/bundle/release/app-release.aab \
+            | grep BUNDLE-METADATA/com.android.tools.build.obfuscation/proguard.map
+
       - name: Upload .aab artifact (Play upload)
         uses: actions/upload-artifact@v7
         with:
@@ -195,6 +205,14 @@ jobs:
           path: mobile/android/app/build/outputs/apk/release/app-release.apk
           if-no-files-found: error
           retention-days: 30
+
+      - name: Upload R8 mapping file (reads a stack trace from outside Play)
+        uses: actions/upload-artifact@v7
+        with:
+          name: finlynq-vc${{ steps.ver.outputs.versionCode }}-mapping
+          path: mobile/android/app/build/outputs/mapping/release/mapping.txt
+          if-no-files-found: error
+          retention-days: 90
 
       - name: Decide whether to publish to Play
         id: publish

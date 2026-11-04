@@ -32,11 +32,17 @@ wait_for_js_log() { # pattern, seconds
   return 1
 }
 
+# Clears a system "isn't responding" dialog if one got up before the setting below
+# took effect: one over the app hides everything under it from uiautomator. The app's
+# own ANR still fails the run, from the log.
 dump_ui() {
-  local tries=5
+  local tries=5 xy
   while [ "$tries" -gt 0 ]; do
     if adb shell uiautomator dump "$UI" 2>/dev/null | grep -q 'dumped to'; then
-      adb exec-out cat "$UI" > "$OUT/ui.xml" && return 0
+      adb exec-out cat "$UI" > "$OUT/ui.xml"
+      xy=$(find_node "Close app") || return 0
+      # shellcheck disable=SC2086
+      adb shell input tap $xy
     fi
     sleep 2
     tries=$((tries - 1))
@@ -83,7 +89,10 @@ hide_keyboard() {
   fi
 }
 
-shot() { adb exec-out screencap -p > "$OUT/screen-$1.png"; }
+shot() {
+  dump_ui || true
+  adb exec-out screencap -p > "$OUT/screen-$1.png"
+}
 
 start_app() {
   adb shell am force-stop "$PKG"
@@ -93,6 +102,9 @@ start_app() {
 
 # 1. The APK as shipped ------------------------------------------------------------
 adb wait-for-device
+# The launcher tends to ANR on a software-rendered emulator, and its dialog sat over
+# the app for the whole of an earlier run. The app's own ANR is caught from the log.
+adb shell settings put global hide_error_dialogs 1
 adb install -r "$OUT/as-shipped.apk" || err "as-shipped.apk would not install"
 start_app
 wait_for_js_log 'native module' 90 || err "as-shipped: JS never logged the widgets native module line"
@@ -170,14 +182,15 @@ js_log > "$OUT/logcat-js-signed-in.txt"
 adb logcat -d > "$OUT/logcat-signed-in.txt"
 
 # A cold start reads the token back through expo-secure-store and its Record options.
+# The logger redacts hasStoredToken, but bootstrap only asks for the session when it
+# got a token back, so that request is the evidence.
 start_app
-wait_for_js_log 'hasStoredToken' 90 || err "check: no bootstrap line after a restart"
+wait_for_js_log 'api/auth/session.*200' 90 \
+  || err "check: the session token did not come back out of expo-secure-store"
 sleep 10
 shot restored
 js_log > "$OUT/logcat-js-restored.txt"
 adb logcat -d > "$OUT/logcat-restored.txt"
-grep -qE 'hasStoredToken"?: ?true' "$OUT/logcat-js-restored.txt" \
-  || err "check: the session token did not come back out of expo-secure-store"
 shows_text "Accounts" || err "check: did not come back signed in after a restart"
 adb shell am force-stop "$PKG"
 
@@ -190,7 +203,7 @@ if grep -q "$PKG" "$OUT/logcat-crash-buffer.txt"; then
 fi
 
 # What a class or method R8 removed or renamed looks like, in the app's own lines.
-casualties='NoSuchMethodError|NoSuchFieldError|NoClassDefFoundError|ClassNotFoundException|AbstractMethodError|IncompatibleClassChangeError|KotlinReflectionInternalError|ExceptionInInitializerError|FATAL EXCEPTION|Unable to instantiate|Cannot find native module|Unhandled JS Exception'
+casualties='ANR in |NoSuchMethodError|NoSuchFieldError|NoClassDefFoundError|ClassNotFoundException|AbstractMethodError|IncompatibleClassChangeError|KotlinReflectionInternalError|ExceptionInInitializerError|FATAL EXCEPTION|Unable to instantiate|Cannot find native module|Unhandled JS Exception'
 for log in "$OUT"/logcat-as-shipped.txt "$OUT"/logcat-signed-in.txt "$OUT"/logcat-restored.txt; do
   pid_lines=$(grep -E "$casualties" "$log" | grep -E "ReactNative|AndroidRuntime|$PKG|expo\.|com\.facebook|com\.swmansion|com\.finlynq" || true)
   if [ -n "$pid_lines" ]; then
