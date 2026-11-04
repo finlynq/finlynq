@@ -139,6 +139,10 @@ adb logcat -d > "$OUT/logcat-as-shipped.txt"
 grep -q 'native module.*true' "$OUT/logcat-js-as-shipped.txt" \
   || err "as-shipped: the widgets native module is not available"
 shows_text "Sign In" || err "as-shipped: the login screen did not render"
+# OTA is off (app.json), so the app must not be asking the update server.
+if grep -q 'Remote update request|Failed to download remote update' "$OUT/logcat-as-shipped.txt"; then
+  err "as-shipped: the app asked the update server, but OTA should be off"
+fi
 adb shell am force-stop "$PKG"
 adb uninstall "$PKG" > /dev/null
 

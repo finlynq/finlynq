@@ -29,6 +29,11 @@ follows; it is also the fast path for a manual "release mobile 1.0.x" request.
 - **iOS build:** EAS cloud build + auto-submit to App Store Connect (→ TestFlight). Two targets since
   the widgets: the app and its WidgetKit extension `com.finlynq.mobile.widgets` (`mobile/targets/widget`,
   added at prebuild by `@bacons/apple-targets`), sharing the App Group `group.com.finlynq.mobile`.
+- **Updates reach phones only through the stores.** Owner decision 2026-11-04: no OTA updates, so every
+  change, JavaScript included, ships in a store build. `updates.enabled` is `false` in `mobile/app.json`. No
+  app code uses `expo-updates`, so it stays installed and does nothing. Before this, every launch asked
+  `u.expo.dev` and got a 400 (`"channel-name": Required`), measured on Android, because no build carries a
+  channel, so an `eas update` could not have reached those builds. `eas.json` sets no channel for iOS either.
 - **Auth needed:** `gh` logged in (HussienH) for the Android tag/CI; `eas` logged in
   (`eas whoami` → hussein.halawi). EAS holds the iOS dist cert, provisioning profiles, and ASC API
   key on its servers, so a non-interactive build resolves credentials itself, once they exist (see
@@ -112,8 +117,7 @@ on the first R8 build.
   Widgets and Settings screens, and a cold start back into the session through `expo-secure-store`; and a
   build without R8 signed in, then updated in place to the R8 one, which is how every existing user gets it.
   It fails on a crash, an ANR in the app, a missing native module, or a class or method R8 took away. Read the
-  screenshots in the `r8-check` artifact too. `Failed to download remote update` in its logs is not R8: builds
-  from gradle have no update channel, so `u.expo.dev` answers 400 on every launch and the embedded bundle runs.
+  screenshots in the `r8-check` artifact too.
 - **Only a device can confirm**, so check these on the first R8 build before promoting it past internal:
   - **Biometric sign-in.** Turning it on, the real OS prompt, and silent re-login after the session is rejected.
     No finger is enrolled on the emulator, so the credential stored behind `requireAuthentication` and
@@ -266,8 +270,7 @@ on the first R8 build.
   prod since 2026-10-16).
 - **1.0.29 / vc38 (Android; no iOS build)** (2026-11-04; promoted internal → production and sent for review the same day on the owner's word, before an on-device check of the widgets, full rollout on approval): **Home-screen widgets**
   (GH #392): Left to spend, Upcoming payments, Net worth and Add transaction, added from More → Widgets
-  or the launcher, with a Hide amounts switch. Native code, so this needs a store build, not an OTA
-  update. The app writes a snapshot of already-formatted figures after unlock, on returning to the
+  or the launcher, with a Hide amounts switch. Native code. The app writes a snapshot of already-formatted figures after unlock, on returning to the
   foreground and shortly after a save; the widgets only read it and redraw from it every 30 minutes,
   so they hold no session, password or encryption key and they do not fetch on their own. Their
   figures are as of the last time the app was open, and say how old once an hour old. No server
@@ -294,9 +297,9 @@ on the first R8 build.
   only seen rendered through react-native-web and in jest), the marker and count clear after opening a
   thread, and on iOS "See your feedback and replies" leaves the send form (it uses `popTo` because a
   card pushed from a modal lands behind it).
-- **R8 on Android release builds (on `mobile-dev`; native, so it needs a store build, not an OTA update)**: see
+- **R8 on Android release builds**: see
   the R8 section above, including what to check on a device before promoting.
-- **iOS widgets (on `mobile-dev`; native code, so it needs a store build, not an OTA update)** (GH #392):
+- **iOS widgets (on `mobile-dev`)** (GH #392):
   the Android widgets on iOS 16.1+: **Left to spend** (small, Lock Screen circular), **Upcoming payments**
   (medium, Lock Screen rectangular), **Net worth** (small, medium), **Add transaction** (small). Added
   from the home screen, since iOS has no "add this widget" prompt; More → Widgets holds Hide amounts and

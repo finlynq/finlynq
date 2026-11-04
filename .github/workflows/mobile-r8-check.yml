@@ -61,6 +61,10 @@ jobs:
           grep -x 'android.enableMinifyInReleaseBuilds=true' gradle.properties
           grep -n 'enableMinifyInReleaseBuilds' app/build.gradle
 
+      - name: OTA updates are off
+        working-directory: mobile/android
+        run: grep 'expo.modules.updates.ENABLED" android:value="false"' app/src/main/AndroidManifest.xml
+
       - name: Disable release-lint gate (match the release workflow)
         working-directory: mobile/android
         run: |
