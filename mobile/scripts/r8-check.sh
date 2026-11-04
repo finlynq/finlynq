@@ -145,6 +145,12 @@ if grep -q 'Remote update request|Failed to download remote update' "$OUT/logcat
 fi
 adb shell am force-stop "$PKG"
 adb uninstall "$PKG" > /dev/null
+# The widget service hears about an uninstall late. Installing again before it has
+# means it drops the new install's widgets, and the first bind finds none.
+for _ in $(seq 1 30); do
+  adb shell dumpsys appwidget | grep "$PKG/com.finlynq.widgets" > /dev/null || break
+  sleep 1
+done
 
 # 2. Every widget, minified --------------------------------------------------------
 APK="$OUT/check.apk" OUT="$OUT/widgets" bash scripts/widget-render-check.sh \

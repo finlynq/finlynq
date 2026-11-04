@@ -145,8 +145,8 @@ review never prompts.
 - **Only a device can confirm the card appearing for real.** Jest covers the logic, and `mobile-r8-check` proves
   the Android module loads under R8 and survives Play having no answer, because the emulator has no Play Store.
   So the first real test is the second release that contains it: install the first from Play, upload the second
-  to the same track, and Home should offer it (Play can take a few hours to notice). The first build to carry
-  the card can only ever say nothing.
+  to the same track, and Home should offer it (Play can take a few hours to notice). Until that second release
+  exists, the card has nothing to announce.
 
 ## Gotchas
 
