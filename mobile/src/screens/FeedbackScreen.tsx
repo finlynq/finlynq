@@ -13,10 +13,12 @@ import {
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { useNavigation } from "@react-navigation/native";
+import type { NativeStackNavigationProp } from "@react-navigation/native-stack";
 import { useTheme } from "../theme";
 import { endpoints } from "../api/client";
 import { logger } from "../lib/logger";
 import type { FeedbackType } from "../../../shared/types";
+import type { MoreStackParamList } from "../navigation/MoreStack";
 
 const TYPES: { value: FeedbackType; label: string }[] = [
   { value: "bug", label: "Bug" },
@@ -27,7 +29,7 @@ const TYPES: { value: FeedbackType; label: string }[] = [
 
 export default function FeedbackScreen() {
   const { colors } = useTheme();
-  const navigation = useNavigation<{ goBack: () => void }>();
+  const navigation = useNavigation<NativeStackNavigationProp<MoreStackParamList, "Feedback">>();
 
   const [type, setType] = useState<FeedbackType>("bug");
   const [message, setMessage] = useState("");
@@ -141,6 +143,19 @@ export default function FeedbackScreen() {
               Please don&apos;t include sensitive financial details.
             </Text>
           </View>
+
+          {/* popTo, not navigate: this screen is a modal, and a card pushed from a
+              modal lands behind it on iOS. popTo closes the modal first, and goes
+              back to the list when that is where the modal was opened from. */}
+          <TouchableOpacity
+            accessibilityRole="link"
+            onPress={() => navigation.popTo("FeedbackThreads")}
+            style={styles.threadsLink}
+          >
+            <Text style={[styles.threadsLinkText, { color: colors.primary }]}>
+              See your feedback and replies
+            </Text>
+          </TouchableOpacity>
         </ScrollView>
       </KeyboardAvoidingView>
     </SafeAreaView>
@@ -168,6 +183,8 @@ const styles = StyleSheet.create({
     padding: 16,
     marginBottom: 12,
   },
+  threadsLink: { alignSelf: "center", paddingVertical: 8 },
+  threadsLinkText: { fontSize: 14, fontWeight: "700" },
 });
 
 const fieldStyles = StyleSheet.create({

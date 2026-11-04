@@ -1,4 +1,4 @@
-import React, { useState } from "react";
+import React, { useEffect, useState } from "react";
 import {
   View,
   Text,
@@ -8,12 +8,13 @@ import {
   Alert,
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
-import { useNavigation } from "@react-navigation/native";
+import { useIsFocused, useNavigation } from "@react-navigation/native";
 import type { NativeStackNavigationProp } from "@react-navigation/native-stack";
 import { useTheme } from "../theme";
 import { useAuth } from "../hooks/useAuth";
 import { endpoints } from "../api/client";
 import { logger } from "../lib/logger";
+import { countUnreadThreads } from "../lib/feedback";
 import { Icon, type IconName } from "../components/icon";
 import type { MoreStackParamList } from "../navigation/MoreStack";
 import { widgetsAvailable } from "../../modules/finlynq-widgets";
@@ -25,6 +26,8 @@ interface Row {
   label: string;
   onPress: () => void;
   danger?: boolean;
+  /** Count shown on the row; hidden at 0. */
+  badge?: number;
 }
 
 interface Section {
@@ -37,6 +40,20 @@ export default function MoreScreen() {
   const navigation = useNavigation<Nav>();
   const { signOut } = useAuth();
   const [seedingSample, setSeedingSample] = useState(false);
+  const [feedbackUnread, setFeedbackUnread] = useState(0);
+  const isFocused = useIsFocused();
+
+  // Threads with a reply not read yet, like the web nav's "Your feedback" badge.
+  // A failed fetch leaves the count as it was: no badge is not worth an error here.
+  useEffect(() => {
+    if (!isFocused) return;
+    endpoints
+      .getFeedbackThreads()
+      .then((res) => {
+        if (res.success && Array.isArray(res.data)) setFeedbackUnread(countUnreadThreads(res.data));
+      })
+      .catch(() => {});
+  }, [isFocused]);
 
   const confirmSignOut = () => {
     Alert.alert("Sign Out", "Are you sure you want to sign out?", [
@@ -135,6 +152,12 @@ export default function MoreScreen() {
           ? [{ icon: "widgets" as IconName, label: "Widgets", onPress: () => navigation.navigate("Widgets") }]
           : []),
         { icon: "settings", label: "Settings", onPress: () => navigation.navigate("Settings") },
+        {
+          icon: "feedback",
+          label: "Your feedback",
+          badge: feedbackUnread,
+          onPress: () => navigation.navigate("FeedbackThreads"),
+        },
         { icon: "feedback", label: "Send feedback", onPress: () => navigation.navigate("Feedback") },
         { icon: "logout", label: "Sign out", onPress: confirmSignOut, danger: true },
       ],
@@ -182,6 +205,11 @@ export default function MoreScreen() {
                   >
                     {row.label}
                   </Text>
+                  {row.badge ? (
+                    <View style={[styles.badge, { backgroundColor: colors.primary }]}>
+                      <Text style={[styles.badgeText, { color: colors.primaryForeground }]}>{row.badge}</Text>
+                    </View>
+                  ) : null}
                   {!row.danger && <Icon name="chevronRight" size={16} color={colors.mutedForeground} />}
                 </TouchableOpacity>
               ))}
@@ -227,4 +255,13 @@ const styles = StyleSheet.create({
     marginRight: 12,
   },
   rowLabel: { flex: 1, fontSize: 15, fontWeight: "500" },
+  badge: {
+    minWidth: 20,
+    borderRadius: 10,
+    paddingHorizontal: 6,
+    paddingVertical: 1,
+    alignItems: "center",
+    marginRight: 6,
+  },
+  badgeText: { fontSize: 12, fontWeight: "700" },
 });

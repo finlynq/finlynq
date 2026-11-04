@@ -34,6 +34,53 @@ describe("API Client", () => {
     });
   });
 
+  describe("feedback threads", () => {
+    const respond = (body: unknown, status = 200) =>
+      mockFetch.mockResolvedValue({
+        ok: status < 400,
+        status,
+        json: () => Promise.resolve(body),
+      });
+
+    it("lists threads from the bare array", async () => {
+      respond([{ id: 1, unread: true }]);
+      const res = await endpoints.getFeedbackThreads();
+      expect(mockFetch.mock.calls[0][0]).toBe("http://localhost:3000/api/feedback");
+      expect(res).toEqual({ success: true, data: [{ id: 1, unread: true }] });
+    });
+
+    it("reads one thread", async () => {
+      respond({ id: 12, messages: [] });
+      const res = await endpoints.getFeedbackThread(12);
+      expect(mockFetch.mock.calls[0][0]).toBe("http://localhost:3000/api/feedback/12");
+      expect(res).toEqual({ success: true, data: { id: 12, messages: [] } });
+    });
+
+    it("posts a reply as { body } and returns the new message", async () => {
+      respond({ id: 5, body: "Hi" }, 201);
+      const res = await endpoints.replyToFeedback(12, "Hi");
+      const [url, init] = mockFetch.mock.calls[0];
+      expect(url).toBe("http://localhost:3000/api/feedback/12/reply");
+      expect(init.method).toBe("POST");
+      expect(JSON.parse(init.body)).toEqual({ body: "Hi" });
+      expect(res).toEqual({ success: true, data: { id: 5, body: "Hi" } });
+    });
+
+    it("passes on the server's reason when a reply is refused", async () => {
+      respond({ error: "Too many replies. Please try again later." }, 429);
+      const res = await endpoints.replyToFeedback(12, "Hi");
+      expect(res).toEqual({ success: false, error: "Too many replies. Please try again later." });
+    });
+
+    it("marks a thread read", async () => {
+      respond({ ok: true });
+      await endpoints.markFeedbackRead(12);
+      const [url, init] = mockFetch.mock.calls[0];
+      expect(url).toBe("http://localhost:3000/api/feedback/12/read");
+      expect(init.method).toBe("POST");
+    });
+  });
+
   describe("api.get", () => {
     it("makes GET request to correct URL", async () => {
       mockFetch.mockResolvedValue({

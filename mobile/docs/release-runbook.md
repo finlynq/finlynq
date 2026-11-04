@@ -226,3 +226,14 @@ npx eas build --platform ios --profile production --auto-submit --non-interactiv
   hosts every widget on an emulator through a real AppWidgetHost in every scenario, light and dark, and
   leaves the images in the run's artifact (`scripts/widget-render-check.sh`). It uses no versionCode.
   It does not cover the app writing a real snapshot or a real launcher: check those on a device.
+- **Next build (not cut yet; ships on the owner's say)**: **Your feedback** (More → Your feedback, in-app
+  feedback #30): the user's feedback threads with a "New reply" marker and a count on the More row;
+  a thread shows the original message and the replies, with a text reply box. The send form links to
+  it. JavaScript only, no native code. No server change: `GET /api/feedback`, `GET /api/feedback/[id]`,
+  `POST /api/feedback/[id]/reply` and `POST /api/feedback/[id]/read` are on prod. Attachments show by
+  name with a link to the website's `/feedback` page; they don't open in the app, and replies from the
+  phone are text only. **Check on a device before promoting:** the reply box stays above the keyboard
+  on Android (`KeyboardAvoidingView behavior="padding"`, which no other screen uses on Android; it was
+  only seen rendered through react-native-web and in jest), the marker and count clear after opening a
+  thread, and on iOS "See your feedback and replies" leaves the send form (it uses `popTo` because a
+  card pushed from a modal lands behind it).

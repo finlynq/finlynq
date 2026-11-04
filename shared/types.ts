@@ -282,12 +282,68 @@ export interface Announcement {
 
 // --- Feedback ---
 export type FeedbackType = "bug" | "idea" | "question" | "other";
+export type FeedbackStatus = "new" | "triaged" | "resolved";
 /** POST /api/feedback body. */
 export interface FeedbackFormData {
   type: FeedbackType;
   message: string;
   pageUrl?: string;
   appVersion?: string;
+}
+
+/** One reply in a feedback thread. The original submission is the thread SEED
+ *  (FeedbackThread.seed), NOT a FeedbackMessage. */
+export interface FeedbackAttachmentMeta {
+  filename: string | null;
+  mime: string | null;
+  size: number | null;
+}
+
+export interface FeedbackMessage {
+  id: number;
+  feedbackId: number;
+  authorRole: "user" | "admin";
+  body: string;
+  createdAt: string;
+  /** True when the requesting side authored this message (right-aligned in UI). */
+  mine?: boolean;
+  /** FINLYNQ-228 — optional per-message attachment. Bytes served by the
+   *  thread's serve route with `?messageId=<id>`. */
+  attachment?: FeedbackAttachmentMeta | null;
+}
+
+/** Row shape for a feedback thread list (GET /api/feedback, admin list). */
+export interface FeedbackThreadSummary {
+  id: number;
+  type: FeedbackType;
+  status: FeedbackStatus;
+  /** The original submission — the immutable first bubble of the thread. */
+  seed: string;
+  createdAt: string;
+  updatedAt: string;
+  lastMessageAt: string;
+  lastMessagePreview: string;
+  /** feedback_messages count — EXCLUDES the seed. */
+  messageCount: number;
+  /** Unread for the requesting side (user on /api/feedback, admin on admin list). */
+  unread: boolean;
+}
+
+/** Full thread (GET /api/feedback/[id], GET /api/admin/feedback/[id]). */
+export interface FeedbackThread extends FeedbackThreadSummary {
+  pageUrl: string | null;
+  appVersion: string | null;
+  /** Present only on the admin route (private maintainer note). */
+  adminNote?: string | null;
+  /** Submitter identity — present only on the admin route. */
+  username?: string | null;
+  email?: string | null;
+  /** FINLYNQ-226/228 — attachment on the initial submission (the thread seed).
+   *  Present on BOTH the admin and the user thread routes. The bytes are served
+   *  by the thread's serve route (no `messageId` = the seed). */
+  attachment?: FeedbackAttachmentMeta | null;
+  /** Ordered oldest→newest; EXCLUDES the seed. */
+  messages: FeedbackMessage[];
 }
 
 // --- Auth ---

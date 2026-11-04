@@ -381,6 +381,9 @@ import type {
   GoalFormData,
   Announcement,
   FeedbackFormData,
+  FeedbackMessage,
+  FeedbackThread,
+  FeedbackThreadSummary,
   Split,
   SplitInput,
   IncomeStatement,
@@ -903,6 +906,15 @@ export const endpoints = {
       ...payload,
       appVersion: payload.appVersion ?? "mobile",
     }),
+  // Your feedback — the user's own threads, same routes as the web /feedback
+  // page. Bare JSON; the original submission is `seed`, not a message.
+  getFeedbackThreads: () => api.get<FeedbackThreadSummary[]>("/api/feedback"),
+  getFeedbackThread: (id: number) => api.get<FeedbackThread>(`/api/feedback/${id}`),
+  // Text only: the route also takes one file over multipart, which only the web offers.
+  replyToFeedback: (id: number, body: string) =>
+    api.post<FeedbackMessage>(`/api/feedback/${id}/reply`, { body }),
+  markFeedbackRead: (id: number) =>
+    api.post<{ ok: boolean }>(`/api/feedback/${id}/read`),
 
   // ─── Reconcile inbox (account-anchored Approve-each / Auto-pilot cards) ───
   // Account list WITH the per-account reconciliation `mode` + investment flag +
