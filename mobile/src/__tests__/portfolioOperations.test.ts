@@ -147,6 +147,30 @@ describe("income-expense", () => {
     expect(cfg.prefillFromLoad({ op: "income-expense", primaryTxId: 1, amount: -12 }).isExpense).toBe(true);
     expect(cfg.prefillFromLoad({ op: "income-expense", primaryTxId: 1, amount: 12 }).isExpense).toBe(false);
   });
+  it("a preset entry type lets the server choose the category, ignoring a picked one", () => {
+    const body = cfg.toBody(
+      state({ amount: "50", accountId: 1, currency: "USD", incomeType: "dividend", categoryId: 9 }),
+      ctxWithSleeve
+    ) as IncomeExpenseOpBody & { incomeType?: string };
+    expect(body.incomeType).toBe("dividend");
+    expect(body.categoryId).toBeUndefined();
+  });
+  it("entry type Other sends the picked category and no preset", () => {
+    const body = cfg.toBody(
+      state({ amount: "50", accountId: 1, currency: "USD", incomeType: "other", categoryId: 9 }),
+      ctxWithSleeve
+    ) as IncomeExpenseOpBody & { incomeType?: string };
+    expect(body.incomeType).toBeUndefined();
+    expect(body.categoryId).toBe(9);
+  });
+  it("editing keeps the row's own category rather than re-resolving a preset", () => {
+    const loaded = cfg.prefillFromLoad({ op: "income-expense", primaryTxId: 1, amount: 12, categoryId: 9 });
+    expect(loaded.incomeType).toBe("other");
+    expect(loaded.categoryId).toBe(9);
+  });
+  it("a new entry starts as a dividend", () => {
+    expect(initialOpState().incomeType).toBe("dividend");
+  });
 });
 
 describe("fx-conversion", () => {

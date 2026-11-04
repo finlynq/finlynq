@@ -40,6 +40,7 @@ export type FieldSpec =
   | { kind: "number"; key: NumberKey; label: string; placeholder?: string; optional?: boolean }
   | { kind: "amount"; label: string }
   | { kind: "signToggle"; label: string }
+  | { kind: "incomeType"; label: string }
   | { kind: "lotPicker"; label: string }
   | { kind: "category"; label: string }
   | { kind: "date"; label: string }
@@ -57,6 +58,8 @@ export interface OpState {
   destHoldingId: number | null;
   relatedHoldingId: number | null;
   categoryId: number | null;
+  /** Income-expense entry-type preset → server auto-categorization. */
+  incomeType: "dividend" | "interest" | "fee" | "other";
   amount: string;
   qty: string;
   sourceQty: string;
@@ -126,6 +129,7 @@ export function initialOpState(): OpState {
     destHoldingId: null,
     relatedHoldingId: null,
     categoryId: null,
+    incomeType: "dividend",
     amount: "",
     qty: "",
     sourceQty: "",
@@ -385,10 +389,11 @@ const incomeExpense: OpConfig = {
   fields: [
     { kind: "amount", label: "Amount" },
     { kind: "signToggle", label: "Type" },
+    { kind: "incomeType", label: "Entry type" },
     { kind: "account", key: "accountId", label: "Account", scope: "investment" },
     { kind: "sleeveCurrency", key: "currency", accountKey: "accountId", label: "Cash sleeve" },
     { kind: "relatedHolding", accountKey: "accountId", label: "Related holding (optional)" },
-    { kind: "category", label: "Category (optional)" },
+    { kind: "category", label: "Category (only used for “Other”)" },
     { kind: "date", label: "Date" },
     { kind: "text", key: "payee", label: "Payee (optional)" },
     { kind: "text", key: "note", label: "Note (optional)", multiline: true },
@@ -400,17 +405,24 @@ const incomeExpense: OpConfig = {
     if (!s.currency) return "Pick a cash sleeve currency";
     return null;
   },
-  toBody: (s) => ({
-    accountId: s.accountId!,
-    currency: s.currency.toUpperCase(),
-    amount: s.isExpense ? -Math.abs(num(s.amount)) : Math.abs(num(s.amount)),
-    relatedHoldingId: s.relatedHoldingId ?? undefined,
-    categoryId: s.categoryId ?? undefined,
-    date: s.date,
-    payee: trimOrUndef(s.payee),
-    note: trimOrUndef(s.note),
-    tags: trimOrUndef(s.tags),
-  }),
+  toBody: (s) => {
+    // Preset entry types auto-resolve the category server-side; "other" sends
+    // the manually-picked categoryId. Server precedence: explicit categoryId
+    // wins, so for presets we omit it.
+    const preset = s.incomeType !== "other";
+    return {
+      accountId: s.accountId!,
+      currency: s.currency.toUpperCase(),
+      amount: s.isExpense ? -Math.abs(num(s.amount)) : Math.abs(num(s.amount)),
+      relatedHoldingId: s.relatedHoldingId ?? undefined,
+      categoryId: preset ? undefined : (s.categoryId ?? undefined),
+      incomeType: preset ? s.incomeType : undefined,
+      date: s.date,
+      payee: trimOrUndef(s.payee),
+      note: trimOrUndef(s.note),
+      tags: trimOrUndef(s.tags),
+    };
+  },
   prefillFromLoad: (d) =>
     d.op !== "income-expense"
       ? {}
@@ -420,6 +432,8 @@ const incomeExpense: OpConfig = {
           amount: d.amount != null ? String(Math.abs(d.amount)) : "",
           isExpense: (d.amount ?? 0) < 0,
           relatedHoldingId: d.relatedHoldingId ?? null,
+          // Editing keeps the row's existing category via the manual picker.
+          incomeType: "other",
           categoryId: d.categoryId ?? null,
           date: d.date ?? todayStr(),
           payee: d.payee ?? "",
