@@ -207,7 +207,7 @@ npx eas build --platform ios --profile production --auto-submit --non-interactiv
   use" list, `5382bb3`) is on dev. Also in this build: a waiting email that a rule matched **says why
   it is waiting** and can be **recorded with that rule** in one tap (server side is web PR #381,
   prod since 2026-10-16).
-- **1.0.29 / vc38 (Android internal testing only)** (2026-11-04; no iOS build): **Home-screen widgets**
+- **1.0.29 / vc38 (Android; no iOS build)** (2026-11-04; promoted internal → production and sent for review the same day on the owner's word, before an on-device check of the widgets, full rollout on approval): **Home-screen widgets**
   (GH #392): Left to spend, Upcoming payments, Net worth and Add transaction, added from More → Widgets
   or the launcher, with a Hide amounts switch. Native code, so this needs a store build, not an OTA
   update. The app writes a snapshot of already-formatted figures after unlock, on returning to the
