@@ -34,6 +34,9 @@ internal object WidgetRenderer {
   private const val RING_STROKE_PX = 30f
   private const val RING_TRACK_COLOR = 0x4488929C
 
+  /** Below this height the ring needs the room more than the budget total does. */
+  private const val LEFT_TO_SPEND_FULL_HEIGHT_DP = 150
+
   private const val UPCOMING_HEADER_DP = 40
   private const val UPCOMING_ROW_DP = 27
   private const val UPCOMING_DEFAULT_ROWS = 3
@@ -43,7 +46,7 @@ internal object WidgetRenderer {
   fun render(context: Context, kind: WidgetKind, options: Bundle?): RemoteViews = try {
     val snapshot = if (kind.readsSnapshot) readSnapshot(context) else null
     when (kind) {
-      WidgetKind.LEFT_TO_SPEND -> leftToSpend(context, snapshot)
+      WidgetKind.LEFT_TO_SPEND -> leftToSpend(context, snapshot, options)
       WidgetKind.UPCOMING -> upcoming(context, snapshot, options)
       WidgetKind.NET_WORTH -> netWorth(context, snapshot)
       WidgetKind.QUICK_ADD -> quickAdd(context)
@@ -152,7 +155,7 @@ internal object WidgetRenderer {
     return bitmap
   }
 
-  private fun leftToSpend(context: Context, snapshot: JSONObject?): RemoteViews {
+  private fun leftToSpend(context: Context, snapshot: JSONObject?, options: Bundle?): RemoteViews {
     val title = R.string.finlynq_widget_left_to_spend_name
     val section = snapshot?.optJSONObject("leftToSpend")
       ?: return message(context, title, R.string.finlynq_widget_open_to_update, LINK_BUDGETS)
@@ -193,18 +196,23 @@ internal object WidgetRenderer {
         context.getString(if (over) R.string.finlynq_widget_over_budget else title),
       )
       views.setTextViewText(R.id.finlynq_amount, amountOr(hide, section.optString("leftLabel")))
+      views.setTextViewText(R.id.finlynq_days, daysLeftText(context))
+      // When over, the amount is how far over, so "of" the budget would misread.
+      val planned = section.optString("plannedLabel")
       views.setTextViewText(
         R.id.finlynq_sub,
-        if (hide) {
-          daysLeftText(context)
-        } else {
-          context.getString(R.string.finlynq_widget_of_budget, section.optString("plannedLabel"), daysLeftText(context))
-        },
+        context.getString(if (over) R.string.finlynq_widget_budget_was else R.string.finlynq_widget_of_budget, planned),
       )
+      val height = options?.let {
+        maxOf(it.getInt(AppWidgetManager.OPTION_APPWIDGET_MAX_HEIGHT), it.getInt(AppWidgetManager.OPTION_APPWIDGET_MIN_HEIGHT))
+      } ?: 0
+      val cramped = height in 1 until LEFT_TO_SPEND_FULL_HEIGHT_DP
+      views.setViewVisibility(R.id.finlynq_sub, if (hide || cramped) View.GONE else View.VISIBLE)
     } else {
       views.setTextViewText(R.id.finlynq_title, context.getString(R.string.finlynq_widget_spent_this_month))
       views.setTextViewText(R.id.finlynq_amount, amountOr(hide, section.optString("spentLabel")))
       views.setTextViewText(R.id.finlynq_sub, context.getString(R.string.finlynq_widget_no_budget))
+      views.setViewVisibility(R.id.finlynq_days, View.GONE)
     }
     setStale(context, views, section)
     return views

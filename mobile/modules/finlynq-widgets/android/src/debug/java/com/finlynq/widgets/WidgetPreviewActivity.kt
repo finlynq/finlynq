@@ -49,6 +49,7 @@ class WidgetPreviewActivity : Activity() {
     addWidget(root, WidgetKind.UPCOMING, "upcoming-large", 340, 200)
     addWidget(root, WidgetKind.UPCOMING, "upcoming-small", 340, 110)
     addWidget(root, WidgetKind.NET_WORTH, "net-worth", 260, 120)
+    addWidget(root, WidgetKind.LEFT_TO_SPEND, "left-to-spend-small", 130, 120)
     setContentView(root)
 
     root.postDelayed({ saveAndFinish(scenario) }, RENDER_WAIT_MS)
@@ -128,11 +129,14 @@ class WidgetPreviewActivity : Activity() {
     }
     when (scenario) {
       "warn" -> left.put("tone", "warn").put("usedFraction", 0.86)
-      "over" -> left.put("tone", "over").put("usedFraction", 1.14).put("leftLabel", "C$420.10")
+      "over" -> left.put("tone", "over").put("usedFraction", 1.14).put("leftLabel", "$420.10")
       "no-budget" -> left.put("hasBudget", false).put("usedFraction", 0)
       "long" -> {
         left.put("leftLabel", "HK$1,234,567.89").put("plannedLabel", "HK$9,876,543.21")
         netWorth.put("netWorthLabel", "HK$12,345,678,901.23")
+        items.getJSONObject(3)
+          .put("name", "A very long merchant name that does not fit on one row")
+          .put("amountLabel", "HK$1,204,999.00")
       }
       "nothing-due" -> upcoming.put("items", org.json.JSONArray())
     }

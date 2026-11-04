@@ -64,6 +64,16 @@
     android:textSize="11sp" />
 
   <TextView
+    android:id="@+id/finlynq_days"
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content"
+    android:ellipsize="end"
+    android:gravity="center"
+    android:maxLines="1"
+    android:textColor="@color/finlynq_widget_muted"
+    android:textSize="11sp" />
+
+  <TextView
     android:id="@+id/finlynq_stale"
     android:layout_width="match_parent"
     android:layout_height="wrap_content"

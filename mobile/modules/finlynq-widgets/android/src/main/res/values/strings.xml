@@ -21,7 +21,8 @@
   <string name="finlynq_widget_spent_this_month">Spent this month</string>
   <string name="finlynq_widget_no_budget">No budget set</string>
   <string name="finlynq_widget_last_day">Last day</string>
-  <string name="finlynq_widget_of_budget">of %1$s · %2$s</string>
+  <string name="finlynq_widget_of_budget">of %1$s</string>
+  <string name="finlynq_widget_budget_was">Budget %1$s</string>
   <string name="finlynq_widget_assets">Assets</string>
   <string name="finlynq_widget_debts">Debts</string>
   <plurals name="finlynq_widget_days_left">
