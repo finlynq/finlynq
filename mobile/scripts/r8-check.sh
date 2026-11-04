@@ -189,6 +189,10 @@ for screen in Budgets Widgets Settings; do
 done
 js_log > "$OUT/logcat-js-signed-in.txt"
 adb logcat -d > "$OUT/logcat-signed-in.txt"
+# Home asks Play for a newer release. Play can't answer on this emulator, so this is
+# the failure path: the module loads under R8 and a failed check does no harm.
+grep -q "update:', 'checked'" "$OUT/logcat-js-signed-in.txt" \
+  || err "check: Home never finished its check for a new release"
 
 # A cold start reads the token back through expo-secure-store and its Record options.
 # The logger redacts hasStoredToken, but bootstrap only asks for the session when it

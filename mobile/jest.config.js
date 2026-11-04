@@ -11,6 +11,7 @@ module.exports = {
     "^react-native-safe-area-context$": "<rootDir>/__mocks__/react-native-safe-area-context.js",
     "^../../../shared/(.*)$": "<rootDir>/../shared/$1",
     "modules/finlynq-widgets$": "<rootDir>/__mocks__/finlynq-widgets.js",
+    "modules/finlynq-app-update$": "<rootDir>/__mocks__/finlynq-app-update.js",
   },
   testPathIgnorePatterns: ["/node_modules/"],
   testEnvironment: "node",

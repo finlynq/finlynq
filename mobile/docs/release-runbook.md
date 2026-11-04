@@ -127,6 +127,27 @@ on the first R8 build.
     showed their error states: charts, lists, forms, loans, portfolio operations and reconcile never drew data.
   - **Widgets on a real launcher**, their tap links, and the document picker (Import).
 
+## The update prompt
+
+Home shows an **Update available** card when the store has a newer release, for people with auto-update
+turned off (`components/UpdateBanner.tsx`, `hooks/useAppUpdate.ts`, `lib/app-update.ts`). **There is nothing to
+do on a release:** both answers come from the store, so there is no version to bump, and a build still in
+review never prompts.
+
+- **Android** asks Google Play's in-app update API through the local module `modules/finlynq-app-update`. Play
+  answers for this install, so internal testers hear about internal builds. The card's **Update** opens the Play
+  listing; there is no in-app download.
+- **iOS** asks the public App Store lookup (`itunes.apple.com/lookup?bundleId=com.finlynq.mobile`) and compares
+  it with the installed version, so a TestFlight build ahead of the store stays quiet. It also stays quiet when
+  the phone's iOS is below the release's minimum. Apple's answer can lag a store release by up to a day.
+- **Not now** lasts until the next release (`pf_update_dismissed` in AsyncStorage). It checks when Home opens and
+  on returning to the app, at most every 12 hours. A failed check shows nothing.
+- **Only a device can confirm the card appearing for real.** Jest covers the logic, and `mobile-r8-check` proves
+  the Android module loads under R8 and survives Play having no answer, because the emulator has no Play Store.
+  So the first real test is the second release that contains it: install the first from Play, upload the second
+  to the same track, and Home should offer it (Play can take a few hours to notice). The first build to carry
+  the card can only ever say nothing.
+
 ## Gotchas
 
 - **New iOS target or capability = the owner logs in once.** A new bundle id needs its own provisioning
@@ -303,6 +324,7 @@ on the first R8 build.
   only seen rendered through react-native-web and in jest), the marker and count clear after opening a
   thread, and on iOS "See your feedback and replies" leaves the send form (it uses `popTo` because a
   card pushed from a modal lands behind it).
+- **Update prompt** (native on Android, so it needs a store build): see "The update prompt" above.
 - **R8 on Android release builds**: see
   the R8 section above, including what to check on a device before promoting.
 - **1.0.29 / iOS build 16 (TestFlight internal group only)** (2026-11-04, from `a9c654c`; not sent to App

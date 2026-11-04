@@ -36,6 +36,7 @@ import type {
 import type { MoreStackParamList } from "../navigation/MoreStack";
 import type { TransactionsStackParamList } from "../navigation/TransactionsStack";
 import { HomeCalendarCard } from "../components/HomeCalendarCard";
+import { UpdateBanner } from "../components/UpdateBanner";
 
 /** Summary tiles use whole units; transaction rows keep cents. */
 function formatWhole(amount: number, currency: string): string {
@@ -291,6 +292,7 @@ export default function DashboardScreen() {
       >
         <Text style={[styles.header, { color: colors.foreground }]}>Dashboard</Text>
 
+        <UpdateBanner />
         {errorBanner}
 
         {data && (
