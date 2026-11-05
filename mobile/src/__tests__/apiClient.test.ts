@@ -431,6 +431,52 @@ describe("API Client", () => {
       );
     });
 
+    it("getBudgetMonth reads the month model", async () => {
+      await endpoints.getBudgetMonth("2026-03");
+      expect(mockFetch).toHaveBeenCalledWith(
+        "http://localhost:3000/api/budgets/month?month=2026-03",
+        expect.any(Object)
+      );
+    });
+
+    it("setBudgetLine writes one cell, null clearing it", async () => {
+      await endpoints.setBudgetLine("c:3", "2026-03", null);
+      expect(mockFetch).toHaveBeenCalledWith(
+        "http://localhost:3000/api/budgets/line",
+        expect.objectContaining({ method: "PUT", body: JSON.stringify({ key: "c:3", month: "2026-03", amount: null }) })
+      );
+    });
+
+    it("setBudgetSettings and setBudgetCarryover use the shared routes", async () => {
+      const change = { target: { categoryId: 3 }, month: "2026-03", rollover: true };
+      await endpoints.setBudgetSettings(change);
+      expect(mockFetch).toHaveBeenCalledWith(
+        "http://localhost:3000/api/budgets/settings",
+        expect.objectContaining({ method: "PUT", body: JSON.stringify(change) })
+      );
+      await endpoints.setBudgetCarryover("g:Fun", "2026-03", 0);
+      expect(mockFetch).toHaveBeenCalledWith(
+        "http://localhost:3000/api/budgets/carryover",
+        expect.objectContaining({ method: "PUT", body: JSON.stringify({ key: "g:Fun", month: "2026-03", amount: 0 }) })
+      );
+    });
+
+    it("fillBudgets posts the request as it is", async () => {
+      const request = {
+        months: ["2026-03"],
+        source: { kind: "budget" as const },
+        overwrite: false,
+        scope: { kind: "all" as const },
+        section: "spending" as const,
+        preview: true,
+      };
+      await endpoints.fillBudgets(request);
+      expect(mockFetch).toHaveBeenCalledWith(
+        "http://localhost:3000/api/budgets/fill",
+        expect.objectContaining({ method: "POST", body: JSON.stringify(request) })
+      );
+    });
+
     it("getBudgets without month", async () => {
       await endpoints.getBudgets();
       expect(mockFetch).toHaveBeenCalledWith(

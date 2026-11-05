@@ -341,7 +341,7 @@ export const api = {
 };
 
 // Typed endpoint helpers
-import type { BudgetMonthInput } from "../lib/widgets/snapshot";
+import type { BudgetFillRequest, BudgetFillResult, BudgetMonth, BudgetSettingsChange } from "../lib/budgets";
 import type {
   Account,
   AccountBalance,
@@ -705,8 +705,19 @@ export const endpoints = {
     api.get<CategoryDetailResponse>(`/api/reports/category?categoryId=${categoryId}&months=${months}`),
 
   // Loans — the list is a bare array.
-  // The month's cash-flow budget (Budget v2); the widgets read its totals.
-  getBudgetMonth: (month: string) => api.get<BudgetMonthInput>(`/api/budgets/month?month=${month}`),
+  // The month's cash-flow budget (Budget v2): the Budgets screen and the widgets
+  // read it. Every amount is in `currency`, the display currency.
+  getBudgetMonth: (month: string) => api.get<BudgetMonth>(`/api/budgets/month?month=${month}`),
+  // One budget cell. `key` is a line key (`c:<categoryId>` or `g:<group>`), the
+  // amount is in the display currency, and null clears the month's budget.
+  setBudgetLine: (key: string, month: string, amount: number | null) =>
+    api.put<unknown>("/api/budgets/line", { key, month, amount }),
+  setBudgetSettings: (change: BudgetSettingsChange) => api.put<unknown>("/api/budgets/settings", change),
+  // Pins what a rollover line carries into `month`: 0 resets it.
+  setBudgetCarryover: (key: string, month: string, amount: number) =>
+    api.put<unknown>("/api/budgets/carryover", { key, month, amount }),
+  // `preview: true` returns the rows without saving.
+  fillBudgets: (request: BudgetFillRequest) => api.post<BudgetFillResult>("/api/budgets/fill", request),
 
   getLoans: () => api.get<LoanSummary[]>("/api/loans"),
   // Create / edit / delete. POST and PUT answer bare JSON and refuse a loan
@@ -851,21 +862,12 @@ export const endpoints = {
     return api.get<FxPreview>(`/api/fx/preview?${q.toString()}`);
   },
 
-  // Budgets
+  // Budgets — the per-budget list behind Home's Budget Progress card. The Budgets
+  // screen reads getBudgetMonth instead.
   getBudgets: (month?: string, spending = true) =>
     api.get<BudgetWithSpending[]>(
       `/api/budgets?spending=1${month ? `&month=${month}` : ""}`
     ),
-  // POST upserts by (categoryId, month). `currency` is REQUIRED here on
-  // purpose: on create an omitted one is server-defaulted (CAD on older
-  // servers), and on update an omitted one keeps the row's old currency — so
-  // an amount typed in the display currency would be stored against the wrong
-  // currency. Always send the currency the amount was entered in.
-  saveBudget: (d: { categoryId: number; month: string; amount: number; currency: string }) =>
-    api.post<unknown>("/api/budgets", d),
-  // Bare `{ success: true }` on 2xx (passed through by request()).
-  deleteBudget: (id: number) =>
-    api.delete<{ success?: boolean }>(`/api/budgets?id=${id}`),
 
   // Reports — all bare JSON (request() wraps). Every report route converts to
   // the display currency server-side and echoes the resolved `displayCurrency`;

@@ -360,3 +360,25 @@ review never prompts.
   refused the session token left it on its spinner for good, with nothing to tap. The token stays stored for
   the next launch, and a self-hosted server address is kept. JavaScript only. Seen on an unsigned simulator
   build, spinner before and login after, and pinned in `useAuth.test.tsx`; not in iOS build 16.
+- **Next build, not in 1.0.30: Budgets on Budget v2** (2026-11-05, branch `mobile-budget-v2`; not merged into
+  `mobile-dev`, not in any build; in-app feedback #26, martin1194 was told on 2026-10-30 that the Android update
+  comes next). More → Budgets now reads `GET /api/budgets/month`, the model behind the web page and the Left to
+  spend widget, instead of the legacy `/api/budgets` list. Every income and expense category is listed, budgeted
+  or not; debt payments and expense groups budgeted as one line show as the server returns them; **Not budgeted**,
+  **Overspent** and **Due later** chips narrow the list. Rows are one or two short lines (about 40 to 51 points);
+  sections and groups collapse, and that is remembered on the device under `pf_budget_collapsed`, which sign-out
+  removes because it holds group names. The summary's Left to spend, spent and planned come from the widget's own
+  `leftToSpendSection`, pinned in `BudgetsScreen.test.tsx`. Tapping a line opens a sheet: set the month's budget
+  (`PUT /api/budgets/line`), use the 3-month average, clear it, roll leftover over, carry overspending, reset
+  carryover to 0, see its history, leave it out. **Fill** does this month's lines with no budget from one of three
+  sources, previewed first. **Left for the web:** budgeting a group as one line, leaving a whole group out, how an
+  account counts ("What counts"), setting a carried-in amount, and Fill with several months, an increase, other
+  sources or overwriting. **"Not budgeted" counts income lines too**, because the phone's filter lists them, so its
+  number can be higher than the web's, whose chip filters spending only. A comma before the last one or two digits
+  is read as a decimal point ("12,50" is 12.5), since a phone's decimal pad types one in many locales. JavaScript
+  only, no native code. No server change: all the routes are on prod. A server without the month route shows a
+  message asking to update it, with no fallback to the old list. Home's Budget Progress card still reads the legacy
+  list. **Seen:** the real screen and the app's real API client, bundled through react-native-web, against
+  dev.finlynq.com as the demo account, in June, July and November 2026, light and dark, with web and MCP
+  `get_budget_summary` agreeing on the totals. **Check on a device before promoting:** the sheet's keyboard, the
+  `Switch` rows, scrolling a long list, and that the widget moves within seconds of a save.
