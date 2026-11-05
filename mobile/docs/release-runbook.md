@@ -313,7 +313,7 @@ review never prompts.
   hosts every widget on an emulator through a real AppWidgetHost in every scenario, light and dark, and
   leaves the images in the run's artifact (`scripts/widget-render-check.sh`). It uses no versionCode.
   It does not cover the app writing a real snapshot or a real launcher: check those on a device.
-- **1.0.30 / vc39 (Android internal testing only)** (2026-11-04; on the owner's word, not promoted, pending their check on a device; no iOS build): **Your feedback** (More → Your feedback, in-app
+- **1.0.30 / vc39 (Android; no iOS build)** (2026-11-04; the owner reported it working on their phone, promoted internal → production and sent for review the same day, full rollout on approval): **Your feedback** (More → Your feedback, in-app
   feedback #30): the user's feedback threads with a "New reply" marker and a count on the More row;
   a thread shows the original message and the replies, with a text reply box. The send form links to
   it. JavaScript only, no native code. No server change: `GET /api/feedback`, `GET /api/feedback/[id]`,
