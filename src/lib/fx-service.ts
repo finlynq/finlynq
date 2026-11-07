@@ -201,6 +201,11 @@ function markFxFetchMiss(code: string): void {
 // upstream is down for both).
 const fxHistoryMissKey = (code: string): string => `${code}@history`;
 
+// The historical window reaches 7 days back (see fetchYahooChartRateToUsd), and
+// Yahoo answers 400 to one that starts before 1970, so the first date worth
+// asking about is 1970-01-08. The Reports "All Time" preset asks for 1970-01-01.
+const FX_FIRST_FETCHABLE_DATE = "1970-01-08";
+
 function markFxHistoryMiss(code: string, date: string): void {
   fxNegativeCache.set(fxHistoryMissKey(code), Date.now() + FX_NEGATIVE_TTL_MS);
 
@@ -465,7 +470,7 @@ export async function getRateToUsdDetailed(
   let liveSource: "yahoo" | "coingecko" | "stooq" = "yahoo";
   const historical = date < todayISO();
   // No provider has rates before 1970 (Yahoo answers 400), so don't ask.
-  const tooOld = historical && date < FX_MIN_DATE;
+  const tooOld = historical && date < FX_FIRST_FETCHABLE_DATE;
   const skipFetch =
     tooOld ||
     isFxNegativelyCached(code) ||

@@ -82,6 +82,8 @@ describe("fx history misses stay out of today's rate", () => {
   it("does not ask about dates before 1970", async () => {
     await getRateToUsdDetailed("INR", "0002-01-01", "u1");
     await getRateToUsdDetailed("INR", "1969-12-25", "u1");
+    // The Reports "All Time" start: its 7-day window would begin in 1969.
+    await getRateToUsdDetailed("INR", "1970-01-01", "u1");
     expect(fetchSpy).not.toHaveBeenCalled();
     // ...and skipping them is not a miss: a real date still goes out.
     fetchSpy.mockResolvedValueOnce(refused);
