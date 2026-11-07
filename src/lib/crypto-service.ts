@@ -643,6 +643,12 @@ const SYMBOL_TO_COINGECKO: Record<string, string> = {
   YFI: "yearn-finance",
   EOS: "eos",
   S: "sonic-3",
+  // Tokenized gold (GH #395). Priced only when the holding is marked crypto:
+  // they are deliberately NOT in CRYPTO_HOLDING_SYMBOLS, because a bare "PAXG"
+  // on Yahoo is a stock (Pine Tree Acquisition Corp., ~$10), and that list
+  // classifies by symbol alone. Yahoo has both as PAXG-USD / XAUT-USD.
+  PAXG: "pax-gold",
+  XAUT: "tether-gold",
 };
 
 export function symbolToCoinGeckoId(symbol: string): string | null {

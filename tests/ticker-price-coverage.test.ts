@@ -50,6 +50,13 @@ describe("priceCacheKeyFor", () => {
   it("detects crypto from the symbol even when the flag is off", () => {
     expect(priceCacheKeyFor("SOL", false)).toBe("CRYPTO:SOL");
   });
+
+  it("drops a crypto pair suffix, since crypto-service caches the base coin", () => {
+    expect(priceCacheKeyFor("BTC-USD", false)).toBe("CRYPTO:BTC");
+    expect(priceCacheKeyFor("paxg-usd", true)).toBe("CRYPTO:PAXG");
+    // An equity keeps its hyphen (a class share), verbatim.
+    expect(priceCacheKeyFor("BRK-B", false)).toBe("BRK-B");
+  });
 });
 
 describe("isPriceCoverageCandidate", () => {
