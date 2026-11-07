@@ -313,7 +313,7 @@ review never prompts.
   hosts every widget on an emulator through a real AppWidgetHost in every scenario, light and dark, and
   leaves the images in the run's artifact (`scripts/widget-render-check.sh`). It uses no versionCode.
   It does not cover the app writing a real snapshot or a real launcher: check those on a device.
-- **1.0.30 / vc39 (Android; no iOS build)** (2026-11-04; the owner reported it working on their phone, promoted internal → production and sent for review the same day, full rollout on approval): **Your feedback** (More → Your feedback, in-app
+- **1.0.30 / vc39 (Android; no iOS build)** (2026-11-04; the owner reported it working on their phone, promoted internal → production the same day and approved that evening, live as a full rollout): **Your feedback** (More → Your feedback, in-app
   feedback #30): the user's feedback threads with a "New reply" marker and a count on the More row;
   a thread shows the original message and the replies, with a text reply box. The send form links to
   it. JavaScript only, no native code. No server change: `GET /api/feedback`, `GET /api/feedback/[id]`,
@@ -327,8 +327,8 @@ review never prompts.
 - **Also in 1.0.30 / vc39: update prompt** (native on Android, so it needs a store build): see "The update prompt" above.
 - **Also in 1.0.30 / vc39: OTA updates switched off and R8 on Android release builds**: see
   the R8 section above, including what to check on a device before promoting.
-- **1.0.29 / iOS build 16 (submitted to App Review)** (2026-11-04, from `a9c654c`; sent on the owner's word, automatic release to everyone on approval, App
-  Store still on 1.0.27, not yet checked on a device). Apple marked it Validated, and App Store Connect's build metadata
+- **1.0.29 / iOS build 16 (live on the App Store since 2026-11-05)** (2026-11-04, from `a9c654c`; sent on the owner's word, automatic release to everyone on approval, App
+  Store had 1.0.27 before it, not yet checked on a device). Apple marked it Validated, and App Store Connect's build metadata
   shows the app and `FinlynqWidget.appex` both signed with `group.com.finlynq.mobile`. The last iOS build was
   1.0.27, so this one also carries the 1.0.28 and 1.0.29 changes above and **Your feedback**. It does not
   carry R8, which is Android only, or the switch-off of OTA updates. **iOS widgets** (GH #392):
