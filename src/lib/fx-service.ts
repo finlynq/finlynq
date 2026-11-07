@@ -194,6 +194,21 @@ function markFxFetchMiss(code: string): void {
   );
 }
 
+// Historical misses get their own key (2026-11-07). Sharing the live one meant
+// a refused lookup for an old date (a half-typed Reports date like 0002-01-01)
+// stopped TODAY's rate for that currency for 10 minutes, which prod's journal
+// showed for HKD and CNY. A historical lookup still honours a live miss (the
+// upstream is down for both).
+const fxHistoryMissKey = (code: string): string => `${code}@history`;
+
+function markFxHistoryMiss(code: string, date: string): void {
+  fxNegativeCache.set(fxHistoryMissKey(code), Date.now() + FX_NEGATIVE_TTL_MS);
+
+  console.warn(
+    `[fx-service] historical rate fetch for "${code}" on ${date} failed/timed out — falling back to nearest cached rate, skipping historical fetches for ${FX_NEGATIVE_TTL_MS / 60000}m`,
+  );
+}
+
 // ─── Yahoo Finance fetch ────────────────────────────────────────────────
 
 // Yahoo front-month metal-futures tickers. stooq.com retired its free CSV
@@ -448,7 +463,14 @@ export async function getRateToUsdDetailed(
   //    every request — we fall through to the most-recent cached rate (step 4).
   let fetched: number | null = null;
   let liveSource: "yahoo" | "coingecko" | "stooq" = "yahoo";
-  if (!isFxNegativelyCached(code)) {
+  const historical = date < todayISO();
+  // No provider has rates before 1970 (Yahoo answers 400), so don't ask.
+  const tooOld = historical && date < FX_MIN_DATE;
+  const skipFetch =
+    tooOld ||
+    isFxNegativelyCached(code) ||
+    (historical && isFxNegativelyCached(fxHistoryMissKey(code)));
+  if (!skipFetch) {
     if (isCryptoCurrency(code)) {
       fetched = await fetchCryptoRateToUsd(code);
       liveSource = "coingecko";
@@ -462,7 +484,10 @@ export async function getRateToUsdDetailed(
     // A null result means the upstream is down/timed out (NOT a clean "no data"
     // for a real symbol — those still null but are rare). Negative-cache so the
     // next lookup skips the slow path and serves the nearest cached rate.
-    if (fetched == null) markFxFetchMiss(code);
+    if (fetched == null) {
+      if (historical) markFxHistoryMiss(code, date);
+      else markFxFetchMiss(code);
+    }
   }
   if (fetched != null) {
     // Issue #206: never persist future-dated rates. They would outrank

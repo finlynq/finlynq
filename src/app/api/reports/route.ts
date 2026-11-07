@@ -7,6 +7,7 @@ import { getRateMap, convertWithRateMap, getDisplayCurrency } from "@/lib/fx-ser
 import { selfHealReportingAmounts } from "@/lib/fx/reporting-amount";
 import { todayISO } from "@/lib/utils/date";
 import { parseAccountIdsParam, ACCOUNT_IDS_PARAM } from "@/lib/reports/account-filter";
+import { isReportDate, ALL_TIME_START } from "@/lib/reports/period";
 import { round2 } from "@/lib/utils/number";
 import {
   computeAllAccountsUnrealizedPnL,
@@ -23,6 +24,14 @@ export async function GET(request: NextRequest) {
   const type = params.get("type") ?? "income-statement";
   const startDate = params.get("startDate") ?? `${new Date().getFullYear()}-01-01`;
   const endDate = params.get("endDate") ?? todayISO();
+  // The income statement values every holding at both dates, so a half-typed
+  // date (0002-01-01) used to price the whole portfolio at year 2.
+  if (!isReportDate(startDate) || !isReportDate(endDate)) {
+    return NextResponse.json(
+      { error: `startDate and endDate must be real dates (YYYY-MM-DD) on or after ${ALL_TIME_START}` },
+      { status: 400 },
+    );
+  }
   const isBusiness = params.get("business") === "true";
   const displayCurrency = await getDisplayCurrency(userId, params.get("currency"));
   // Reports-page account scoping. `null` = every account (see account-filter.ts).

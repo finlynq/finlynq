@@ -79,6 +79,14 @@ export function isEtfQuoteType(quoteType: string | null | undefined): boolean {
 //      days (2026-10-31). Mechanics + rationale: securities/negative-quote-cache.ts.
 const QUOTE_FETCH_TIMEOUT_MS = 4000;
 const negativeQuoteCache = new NegativeQuoteCache();
+// Misses on HISTORICAL lookups are kept apart from live ones (2026-11-07). They
+// used to share the cache above, so one refused request for an old date (a
+// window before the listing, or a half-typed Reports date like 0002-01-01)
+// stopped the LIVE price of that ticker for every user for 10 minutes. Prod hit
+// it 9 times in one day, about 80 tickers at once (AAPL, MSFT, SPY...). History
+// lookups still skip a ticker with a live miss: one Yahoo doesn't know has no
+// history either.
+const historicalMissCache = new NegativeQuoteCache();
 
 // ── Intraday TTL for "today's" cache row (FINLYNQ-204) ──────────────────────
 // A price_cache row dated todayISO() is reused as a cache hit only for this long;
@@ -128,9 +136,33 @@ function markQuoteMiss(symbol: string, reason: string, status: number | null = n
   );
 }
 
-/** A successful fetch ends a 404 run — the next miss starts over at 10 min. */
+/** History lookups skip a symbol with a recent live OR historical miss. */
+function isHistoryNegativelyCached(symbol: string): boolean {
+  return negativeQuoteCache.isCached(symbol) || historicalMissCache.isCached(symbol);
+}
+
+/**
+ * Record a miss on a historical lookup. It only stops further HISTORY lookups
+ * for the symbol (the rebuild walk would otherwise re-ask once per day); the
+ * live quote is unaffected.
+ */
+function markHistoryMiss(symbol: string, reason: string, status: number | null = null): void {
+  const { ttlMs, notFoundStrikes } = historicalMissCache.markMiss(symbol, status);
+  console.warn(
+    `[price-service] no historical quote for "${symbol}" (${reason}) — history lookups skipped for ${Math.round(ttlMs / 60000)}m${
+      notFoundStrikes > 1 ? ` (404 x${notFoundStrikes})` : ""
+    }`,
+  );
+}
+
+/**
+ * A successful fetch ends a 404 run — the next miss starts over at 10 min.
+ * Any 200, live or historical, proves Yahoo knows the symbol, so both caches
+ * forget it.
+ */
 function clearQuoteMiss(symbol: string): void {
   negativeQuoteCache.clear(symbol);
+  historicalMissCache.clear(symbol);
 }
 
 /** Outcome of one live chart call: the quote, or WHY there is none. */
@@ -539,9 +571,10 @@ async function cacheHistoricalWindow(
  * caller decides how/where to persist (e.g. crypto writes under "CRYPTO:<SYM>").
  *
  * Negative-cache aware: a symbol Yahoo can't serve (delisted/unknown ticker, or
- * a timeout) is skipped on subsequent calls for the negative-cache TTL (10 min,
- * longer for repeat 404s) so a multi-year crypto rebuild doesn't re-hit a
- * hopeless ticker once per old date.
+ * a timeout) is skipped on subsequent history calls for the negative-cache TTL
+ * (10 min, longer for repeat 404s) so a multi-year crypto rebuild doesn't re-hit
+ * a hopeless ticker once per old date. The miss goes to the HISTORY cache, so it
+ * never stops the live quote.
  * Returns [] on miss/empty (never throws). Closes are in the ticker's quote
  * currency (callers use `<SYM>-USD` tickers → USD).
  */
@@ -550,7 +583,7 @@ export async function fetchYahooDailyCloses(
   fromDate: string,
   today: string,
 ): Promise<Array<{ date: string; close: number }>> {
-  if (isQuoteNegativelyCached(symbol)) return [];
+  if (isHistoryNegativelyCached(symbol)) return [];
   // No provider data exists before this symbol's first bar — skip the doomed
   // fetch that would only re-return post-inception data we already cached (the
   // snapshot-rebuild pre-inception storm). Earlier-dated walk days short-circuit
@@ -559,7 +592,8 @@ export async function fetchYahooDailyCloses(
   try {
     const period1 = Math.floor(Date.parse(`${fromDate}T00:00:00Z`) / 1000);
     const period2 = Math.floor(Date.now() / 1000);
-    if (!Number.isFinite(period1) || period1 >= period2) return [];
+    // Yahoo answers 400 to a window that starts before 1970 (negative period1).
+    if (!Number.isFinite(period1) || period1 < 0 || period1 >= period2) return [];
     const url = `${YAHOO_BASE}/chart/${encodeURIComponent(toYahooSymbol(symbol))}?period1=${period1}&period2=${period2}&interval=1d`;
     const res = await marketFetch(url, {
       headers: { "User-Agent": "Mozilla/5.0" },
@@ -567,7 +601,7 @@ export async function fetchYahooDailyCloses(
       signal: AbortSignal.timeout(QUOTE_FETCH_TIMEOUT_MS),
     });
     if (!res.ok) {
-      markQuoteMiss(symbol, `chart http ${res.status}`, res.status);
+      markHistoryMiss(symbol, `chart http ${res.status}`, res.status);
       return [];
     }
     const data = await res.json();
@@ -585,7 +619,7 @@ export async function fetchYahooDailyCloses(
       out.push({ date: d, close: c });
     }
     if (out.length === 0) {
-      markQuoteMiss(symbol, "no historical closes");
+      markHistoryMiss(symbol, "no historical closes");
       return [];
     }
     // Yahoo returns bars from period1 (=fromDate) onward; a first bar LATER than
@@ -595,7 +629,7 @@ export async function fetchYahooDailyCloses(
     if (out[0].date > fromDate) noteEarliestDataDate(symbol, out[0].date);
     return out;
   } catch {
-    markQuoteMiss(symbol, "chart timeout/error");
+    markHistoryMiss(symbol, "chart timeout/error");
     return [];
   }
 }
@@ -616,7 +650,7 @@ export async function fetchQuoteAtDate(symbol: string, date: string): Promise<Qu
   // Skip a symbol Yahoo recently couldn't serve historically — without this a
   // ticker with no chart data is re-fetched once PER DAY across the whole rebuild
   // walk (the FYIXX money-market re-fetch storm this guards against).
-  if (isQuoteNegativelyCached(symbol)) return null;
+  if (isHistoryNegativelyCached(symbol)) return null;
   try {
     // Window: 7 days BEFORE the target (so a weekend/holiday target still lands
     // on a real close) through HISTORICAL_WINDOW_FORWARD_DAYS AFTER it (capped at
@@ -632,6 +666,9 @@ export async function fetchQuoteAtDate(symbol: string, date: string): Promise<Qu
     );
     const period1 = Math.floor(windowStart.getTime() / 1000);
     const period2 = Math.floor(windowEndMs / 1000);
+    // Yahoo answers 400 to a window that starts before 1970 (negative period1),
+    // and an unparseable date gives NaN. Neither is worth a request.
+    if (!Number.isFinite(period1) || period1 < 0) return null;
     const url = `${YAHOO_BASE}/chart/${encodeURIComponent(toYahooSymbol(symbol))}?period1=${period1}&period2=${period2}&interval=1d`;
     const res = await marketFetch(url, {
       headers: { "User-Agent": "Mozilla/5.0" },
@@ -640,9 +677,10 @@ export async function fetchQuoteAtDate(symbol: string, date: string): Promise<Qu
     });
     if (!res.ok) {
       // 400 "Data doesn't exist" (a window entirely before the listing date) or
-      // any HTTP error: negative-cache so the rebuild walk doesn't re-hit this
-      // symbol every pre-inception day (the V3AA.L 400-per-day case).
-      markQuoteMiss(symbol, `chart http ${res.status}`, res.status);
+      // any HTTP error: skip further history lookups so the rebuild walk doesn't
+      // re-hit this symbol every pre-inception day (the V3AA.L 400-per-day case).
+      // The live quote is unaffected (history misses have their own cache).
+      markHistoryMiss(symbol, `chart http ${res.status}`, res.status);
       return null;
     }
     const data = await res.json();
@@ -697,7 +735,7 @@ export async function fetchQuoteAtDate(symbol: string, date: string): Promise<Qu
           previousClose: null,
         };
       }
-      markQuoteMiss(symbol, "no historical closes");
+      markHistoryMiss(symbol, "no historical closes");
       return null;
     }
     // Persist the FULL window (forward-filled to one row per calendar day) — not
@@ -724,7 +762,7 @@ export async function fetchQuoteAtDate(symbol: string, date: string): Promise<Qu
   } catch {
     // Timeout / network error: negative-cache so a slow ticker isn't re-fetched
     // once per day across the rebuild walk (mirrors fetchYahooDailyCloses).
-    markQuoteMiss(symbol, "chart timeout/error");
+    markHistoryMiss(symbol, "chart timeout/error");
     return null;
   }
 }

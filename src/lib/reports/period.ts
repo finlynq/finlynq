@@ -32,3 +32,23 @@ export const MULTI_YEAR_PRESETS: readonly string[] = ["last-5-years", "all-time"
  * transaction works; periods only appear where rows exist.
  */
 export const ALL_TIME_START = "1970-01-01";
+
+/**
+ * True for a date a report can be run for: a real `YYYY-MM-DD` calendar date
+ * no earlier than ALL_TIME_START. The Reports page sends a date only once this
+ * holds, and `GET /api/reports` answers 400 otherwise.
+ *
+ * A browser date input reports every keystroke of the year, so typing "2010"
+ * produces 0002-01-01, 0020-01-01 and 0201-01-01 on the way. Each of those is a
+ * real calendar date, which is why the floor is needed as well as the format
+ * check: before it, every keystroke ran a report that priced the user's
+ * holdings at year 2 (2026-11-07). The round-trip is the same one as
+ * `parseYmdSafe` in mcp-server/lib/date-validators.ts, kept here because that
+ * module pulls in zod and this one is imported by the client page.
+ */
+export function isReportDate(value: unknown): value is string {
+  if (typeof value !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(value)) return false;
+  const d = new Date(`${value}T00:00:00Z`);
+  if (Number.isNaN(d.getTime()) || d.toISOString().slice(0, 10) !== value) return false;
+  return value >= ALL_TIME_START;
+}
