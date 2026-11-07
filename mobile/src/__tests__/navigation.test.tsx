@@ -140,7 +140,7 @@ jest.mock("../api/client", () => ({
   endpoints: {
     getDashboard: jest.fn(),
     getHealthScore: jest.fn(),
-    getBudgets: jest.fn(),
+    getBudgetMonth: jest.fn(),
     getTransactions: jest.fn(),
     getAccounts: jest.fn(),
     getAccountBalances: jest.fn(),

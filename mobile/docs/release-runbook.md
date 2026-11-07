@@ -382,3 +382,14 @@ review never prompts.
   dev.finlynq.com as the demo account, in June, July and November 2026, light and dark, with web and MCP
   `get_budget_summary` agreeing on the totals. **Check on a device before promoting:** the sheet's keyboard, the
   `Switch` rows, scrolling a long list, and that the widget moves within seconds of a save.
+- **Next build, not in 1.0.31: Home's Budget Progress card on Budget v2** (2026-11-07, branch
+  `mobile-home-budget-v2`; not merged into `mobile-dev`, not in any build). The card reads `GET /api/budgets/month`,
+  like the Budgets screen and the Left to spend widget, instead of the legacy `/api/budgets` list, so a line on it no
+  longer differs from the Budgets screen. It lists each group budgeted as one line and, in the other groups, each
+  category with a budget or a rollover (`budgetProgressLines` in `lib/budgets.ts`), most at risk first, measured
+  against the budget plus anything carried in, and red when the server says over. Income and debt lines stay off it,
+  as before. `getBudgets` left the client because nothing called it any more; the server route stays for phones on
+  older builds. A server without the month route hides the card. JavaScript only. **Seen:** the real Home screen
+  through react-native-web against dev.finlynq.com as the demo account: November 2026 lists Groceries $0 / $199 (a
+  carried-in amount) beside PR389 Verify Target $0 / $250, where the legacy list has only the second, and no request
+  goes to `/api/budgets`.

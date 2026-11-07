@@ -2,11 +2,9 @@ import { endpoints, setServerUrl } from "../api/client";
 import {
   pickReferenceMonth,
   formatMonthLabel,
-  sortBudgetsByRisk,
   resolveSavingsRate,
   monthKey,
 } from "../lib/dashboard";
-import type { BudgetWithSpending } from "../../../shared/types";
 
 const mockFetch = jest.fn();
 global.fetch = mockFetch;
@@ -60,16 +58,6 @@ describe("formatMonthLabel", () => {
   it("names the month", () => {
     expect(formatMonthLabel("2026-09")).toBe("September 2026");
     expect(formatMonthLabel("garbage")).toBe("garbage");
-  });
-});
-
-describe("sortBudgetsByRisk", () => {
-  const b = (id: number, spent: number, amount: number) =>
-    ({ id, categoryId: id, month: "2026-09", amount, currency: "USD", convertedAmount: amount, convertedSpent: spent }) as BudgetWithSpending;
-
-  it("orders by spent/budget ratio, highest first, stable on ties", () => {
-    const sorted = sortBudgetsByRisk([b(1, 10, 100), b(2, 150, 100), b(3, 50, 100), b(4, 10, 100)]);
-    expect(sorted.map((x) => x.id)).toEqual([2, 3, 1, 4]);
   });
 });
 

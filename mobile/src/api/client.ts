@@ -347,7 +347,6 @@ import type {
   AccountBalance,
   Transaction,
   TransactionFormData,
-  BudgetWithSpending,
   Category,
   DashboardData,
   HealthScoreData,
@@ -705,8 +704,9 @@ export const endpoints = {
     api.get<CategoryDetailResponse>(`/api/reports/category?categoryId=${categoryId}&months=${months}`),
 
   // Loans — the list is a bare array.
-  // The month's cash-flow budget (Budget v2): the Budgets screen and the widgets
-  // read it. Every amount is in `currency`, the display currency.
+  // The month's cash-flow budget (Budget v2): the Budgets screen, Home's Budget
+  // Progress card and the widgets read it. Every amount is in `currency`, the
+  // display currency.
   getBudgetMonth: (month: string) => api.get<BudgetMonth>(`/api/budgets/month?month=${month}`),
   // One budget cell. `key` is a line key (`c:<categoryId>` or `g:<group>`), the
   // amount is in the display currency, and null clears the month's budget.
@@ -861,13 +861,6 @@ export const endpoints = {
     if (p.amount != null) q.set("amount", String(p.amount));
     return api.get<FxPreview>(`/api/fx/preview?${q.toString()}`);
   },
-
-  // Budgets — the per-budget list behind Home's Budget Progress card. The Budgets
-  // screen reads getBudgetMonth instead.
-  getBudgets: (month?: string, spending = true) =>
-    api.get<BudgetWithSpending[]>(
-      `/api/budgets?spending=1${month ? `&month=${month}` : ""}`
-    ),
 
   // Reports — all bare JSON (request() wraps). Every report route converts to
   // the display currency server-side and echoes the resolved `displayCurrency`;

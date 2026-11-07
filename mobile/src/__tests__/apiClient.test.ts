@@ -423,14 +423,6 @@ describe("API Client", () => {
       );
     });
 
-    it("getBudgets with month", async () => {
-      await endpoints.getBudgets("2026-03");
-      expect(mockFetch).toHaveBeenCalledWith(
-        "http://localhost:3000/api/budgets?spending=1&month=2026-03",
-        expect.any(Object)
-      );
-    });
-
     it("getBudgetMonth reads the month model", async () => {
       await endpoints.getBudgetMonth("2026-03");
       expect(mockFetch).toHaveBeenCalledWith(
@@ -477,13 +469,6 @@ describe("API Client", () => {
       );
     });
 
-    it("getBudgets without month", async () => {
-      await endpoints.getBudgets();
-      expect(mockFetch).toHaveBeenCalledWith(
-        "http://localhost:3000/api/budgets?spending=1",
-        expect.any(Object)
-      );
-    });
   });
 
   describe("portfolio endpoints", () => {
