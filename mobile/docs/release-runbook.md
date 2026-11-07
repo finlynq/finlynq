@@ -360,8 +360,8 @@ review never prompts.
   refused the session token left it on its spinner for good, with nothing to tap. The token stays stored for
   the next launch, and a self-hosted server address is kept. JavaScript only. Seen on an unsigned simulator
   build, spinner before and login after, and pinned in `useAuth.test.tsx`; not in iOS build 16.
-- **Next build, not in 1.0.30: Budgets on Budget v2** (2026-11-05, branch `mobile-budget-v2`; not merged into
-  `mobile-dev`, not in any build; in-app feedback #26, martin1194 was told on 2026-10-30 that the Android update
+- **Next build, not in 1.0.30: Budgets on Budget v2** (2026-11-05, merged into `mobile-dev` 2026-11-07,
+  not in any build yet; in-app feedback #26, martin1194 was told on 2026-10-30 that the Android update
   comes next). More → Budgets now reads `GET /api/budgets/month`, the model behind the web page and the Left to
   spend widget, instead of the legacy `/api/budgets` list. Every income and expense category is listed, budgeted
   or not; debt payments and expense groups budgeted as one line show as the server returns them; **Not budgeted**,
