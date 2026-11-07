@@ -42,6 +42,7 @@ import {
   type DialogCategory,
   type DialogHolding,
 } from "@/components/transactions/transaction-dialog";
+import { bankRowDialogState, linkSavedToBankRow } from "./bank-row-dialog";
 import {
   BalanceSummaryCard,
   type BalanceSummary,
@@ -197,9 +198,9 @@ export function InboxReconcileTab({
   const [dialogOpen, setDialogOpen] = useState(false);
   const [dialogInitial, setDialogInitial] =
     useState<TransactionDialogInitialState | null>(null);
-  const [materializeBankId, setMaterializeBankId] = useState<string | null>(
-    null,
-  );
+  const [materializeBank, setMaterializeBank] = useState<
+    { id: string; accountId: number } | null
+  >(null);
   const router = useRouter();
 
   // FINLYNQ-207 — whether the currently-reconciled account is an investment
@@ -832,51 +833,31 @@ export function InboxReconcileTab({
         );
         return;
       }
-      // Issue A + B (2026-06-04): always seed the Transfer tab too (so
-      // switching tabs keeps the bank row's date/amount/source account), and
-      // — when a rule's `create_transfer` action names a destination — open
-      // the dialog directly in Transfer mode with the destination pre-filled.
-      // Investment destinations need a holding/qty a rule can't supply, so we
-      // fall back to Transaction mode (the Transfer tab is still seeded).
+      // Issue A + B (2026-06-04): the Transfer tab is always seeded too (see
+      // bankRowDialogState), and when a rule's `create_transfer` action names
+      // a destination the dialog opens directly in Transfer mode with it
+      // pre-filled.
       const transferDestId = snap.suggestedTransferAccountId;
       const destAcct =
         transferDestId != null
           ? accounts.find((a) => a.id === transferDestId)
           : undefined;
-      // Only auto-route to Transfer mode for an OUTFLOW row (amount < 0): the
-      // transfer's "From" leg lands on this bank account and `onSaved` links
-      // the bank row to that debit leg — correct only when money is leaving
-      // here (the "e-Tfr to …" case). Inflow rows would need the credit leg,
-      // which onSaved doesn't expose, so we leave them in Transaction mode
-      // (the Transfer tab is still seeded for manual use). Investment dests
-      // need a holding/qty a rule can't supply, so they fall back too.
+      // Only auto-route to Transfer mode for an OUTFLOW row (amount < 0),
+      // matching the server-side transfer materializer and mobile, which
+      // apply a `create_transfer` rule to money leaving the account only.
+      // Investment dests need a holding/qty a rule can't supply, so they fall
+      // back to Transaction mode too (the Transfer tab is still seeded).
       const autoTransfer =
         !!destAcct &&
         destAcct.isInvestment !== true &&
         destAcct.id !== snap.accountId &&
         snap.amount < 0;
-      setDialogInitial({
-        kind: "transaction-prefill",
-        values: {
-          accountId: String(snap.accountId),
-          categoryId:
-            snap.suggestedCategoryId != null
-              ? String(snap.suggestedCategoryId)
-              : "",
-          date: snap.date,
-          currency: snap.currency,
-          amount: String(snap.amount),
-          payee: snap.payee ?? "",
-        },
-        transferSeed: {
-          fromAccountId: String(snap.accountId),
-          toAccountId: autoTransfer ? String(destAcct.id) : undefined,
-          date: snap.date,
-          amount: String(Math.abs(snap.amount)),
-          note: snap.payee ?? "",
-        },
-      });
-      setMaterializeBankId(snap.id);
+      setDialogInitial(
+        bankRowDialogState(snap, {
+          transferAccountId: autoTransfer ? destAcct.id : undefined,
+        }),
+      );
+      setMaterializeBank({ id: snap.id, accountId: snap.accountId });
       setDialogOpen(true);
     },
     [data, accounts, router, refresh],
@@ -1106,7 +1087,7 @@ export function InboxReconcileTab({
           setDialogOpen(o);
           if (!o) {
             setDialogInitial(null);
-            setMaterializeBankId(null);
+            setMaterializeBank(null);
           }
         }}
         accounts={accounts.map((a) => ({
@@ -1118,24 +1099,14 @@ export function InboxReconcileTab({
         categories={categories}
         holdings={holdings}
         initialState={dialogInitial}
-        onSaved={async (txId) => {
-          if (materializeBankId) {
-            try {
-              await fetch("/api/reconcile/links", {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({
-                  transactionId: txId,
-                  bankTransactionId: materializeBankId,
-                  linkType: "primary",
-                }),
-              });
-            } catch (e) {
-              setError(e instanceof Error ? e.message : String(e));
-            }
-            setMaterializeBankId(null);
-          }
+        onSaved={async (txId, ctx) => {
+          const linkError = materializeBank
+            ? await linkSavedToBankRow(materializeBank, txId, ctx)
+            : null;
+          setMaterializeBank(null);
+          // refresh() clears the error, so report a failed link after it.
           await refresh();
+          if (linkError) setError(linkError);
         }}
       />
     </div>

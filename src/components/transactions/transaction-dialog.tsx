@@ -181,21 +181,36 @@ export type TransactionDialogInitialState =
       values: Partial<TransactionFormValues>;
       /** Optional Transfer-tab seed (reconcile materialize, 2026-06-04). When
        *  present, the Transfer tab is pre-filled from the same bank row so
-       *  switching tabs no longer wipes the context. A non-empty `toAccountId`
-       *  (sourced from a matched `create_transfer` rule) also opens the dialog
-       *  directly in Transfer mode. */
+       *  switching tabs no longer wipes the context. `openInTransfer` (set when
+       *  a matched `create_transfer` rule named the other account) opens the
+       *  dialog directly in Transfer mode; a seeded account alone does not. */
       transferSeed?: {
         fromAccountId?: string;
         toAccountId?: string;
         date?: string;
         amount?: string;
         note?: string;
+        openInTransfer?: boolean;
       };
     }
   | {
       /** Open in Transfer mode without any prefill (Quick-add Transfer entry). */
       kind: "transfer-create";
     };
+
+export interface TransactionSavedContext {
+  mode: "create" | "update";
+  isTransfer: boolean;
+  /** Both legs of a newly created transfer, so a caller can pick the leg on a
+   *  given account (the reconcile tabs link a bank row to the leg on ITS
+   *  account, which is the credit leg for money arriving). */
+  legs?: {
+    fromTxId: number;
+    toTxId: number;
+    fromAccountId: number;
+    toAccountId: number;
+  };
+}
 
 export interface TransactionDialogProps {
   open: boolean;
@@ -213,10 +228,7 @@ export interface TransactionDialogProps {
   offerRuleSuggestion?: boolean;
   /** Invoked after a successful create or update (single tx OR transfer
    *  pair). For transfer mode, `savedTxId` is the debit leg id. */
-  onSaved: (
-    savedTxId: number,
-    ctx: { mode: "create" | "update"; isTransfer: boolean },
-  ) => void | Promise<void>;
+  onSaved: (savedTxId: number, ctx: TransactionSavedContext) => void | Promise<void>;
   /** Trash button in transaction-edit mode. Parent owns the confirm modal. */
   onRequestDelete?: (tx: DialogTransaction) => void;
   /** Sibling button in linked-siblings panel. Parent owns navigation. */
@@ -500,7 +512,7 @@ export function TransactionDialog({
         ...(seed.amount != null ? { amount: seed.amount } : {}),
         ...(seed.note != null ? { note: seed.note } : {}),
       }));
-      if (seed.toAccountId) {
+      if (seed.openInTransfer) {
         setDialogMode("transfer");
       }
     }
@@ -1080,20 +1092,31 @@ export function TransactionDialog({
     // Best-effort: return the debit leg id when we can recover it from the
     // server response, else fall back to the existing edit-pair fromTxId.
     let debitTxId = transferEdit?.fromTxId ?? 0;
+    let legs: TransactionSavedContext["legs"];
     try {
       const created = await res.clone().json();
       // `/api/transactions/transfer` returns `fromTransactionId` (the debit
-      // leg). Read it first so the reconcile materialize flow can auto-link
-      // the bank row to that leg; `fromTxId`/`id` kept as defensive fallbacks.
+      // leg) and `toTransactionId` (the credit leg). The reconcile tabs link
+      // the bank row to whichever leg is on its account; `fromTxId`/`id` kept
+      // as defensive fallbacks.
       if (typeof created?.fromTransactionId === "number") debitTxId = created.fromTransactionId;
       else if (typeof created?.fromTxId === "number") debitTxId = created.fromTxId;
       else if (typeof created?.id === "number") debitTxId = created.id;
+      if (typeof created?.fromTransactionId === "number" && typeof created?.toTransactionId === "number") {
+        legs = {
+          fromTxId: created.fromTransactionId,
+          toTxId: created.toTransactionId,
+          fromAccountId,
+          toAccountId,
+        };
+      }
     } catch {
       /* response may not have JSON body — ignore */
     }
     await onSaved(debitTxId, {
       mode: isEdit ? "update" : "create",
       isTransfer: true,
+      ...(legs ? { legs } : {}),
     });
     onOpenChange(false);
   }

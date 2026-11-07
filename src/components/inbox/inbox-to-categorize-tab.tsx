@@ -46,6 +46,7 @@ import {
   type DialogCategory,
   type DialogHolding,
 } from "@/components/transactions/transaction-dialog";
+import { bankRowDialogState, linkSavedToBankRow } from "./bank-row-dialog";
 import { safeAccountName } from "@/lib/safe-name";
 
 interface Account {
@@ -115,9 +116,9 @@ export function InboxToCategorizeTab({
   const [dialogOpen, setDialogOpen] = useState(false);
   const [dialogInitial, setDialogInitial] =
     useState<TransactionDialogInitialState | null>(null);
-  const [materializeBankId, setMaterializeBankId] = useState<string | null>(
-    null,
-  );
+  const [materializeBank, setMaterializeBank] = useState<
+    { id: string; accountId: number } | null
+  >(null);
   // FINLYNQ-208 — investment-op preview-before-record (Auto-pilot lens).
   const [opPreview, setOpPreview] = useState<
     { bankId: string; preview: InvestmentOpPreview } | null
@@ -349,21 +350,8 @@ export function InboxToCategorizeTab({
         );
         return;
       }
-      setDialogInitial({
-        kind: "transaction-prefill",
-        values: {
-          accountId: String(snap.accountId),
-          categoryId:
-            snap.suggestedCategoryId != null
-              ? String(snap.suggestedCategoryId)
-              : "",
-          date: snap.date,
-          currency: snap.currency,
-          amount: String(snap.amount),
-          payee: snap.payee ?? "",
-        },
-      });
-      setMaterializeBankId(snap.id);
+      setDialogInitial(bankRowDialogState(snap));
+      setMaterializeBank({ id: snap.id, accountId: snap.accountId });
       setDialogOpen(true);
     },
     [snapshot, accounts],
@@ -590,7 +578,7 @@ export function InboxToCategorizeTab({
           setDialogOpen(o);
           if (!o) {
             setDialogInitial(null);
-            setMaterializeBankId(null);
+            setMaterializeBank(null);
           }
         }}
         accounts={accounts.map((a) => ({
@@ -602,27 +590,17 @@ export function InboxToCategorizeTab({
         categories={categories}
         holdings={holdings}
         initialState={dialogInitial}
-        onSaved={async (txId) => {
+        onSaved={async (txId, ctx) => {
           // After a save through the dialog, primary-link the new tx to
           // the bank row so it leaves "To categorize" and shows up under
           // "Reconciled".
-          if (materializeBankId) {
-            try {
-              await fetch("/api/reconcile/links", {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({
-                  transactionId: txId,
-                  bankTransactionId: materializeBankId,
-                  linkType: "primary",
-                }),
-              });
-            } catch (e) {
-              setError(e instanceof Error ? e.message : String(e));
-            }
-            setMaterializeBankId(null);
-          }
+          const linkError = materializeBank
+            ? await linkSavedToBankRow(materializeBank, txId, ctx)
+            : null;
+          setMaterializeBank(null);
+          // refresh() clears the error, so report a failed link after it.
           await refresh();
+          if (linkError) setError(linkError);
         }}
       />
     </div>
