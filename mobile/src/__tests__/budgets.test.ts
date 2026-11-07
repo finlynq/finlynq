@@ -1,4 +1,5 @@
 import {
+  budgetProgressLines,
   budgetRows,
   debtStatusLabel,
   debtView,
@@ -147,6 +148,68 @@ describe("visibleLinesFor (mirror of budget-rows.tsx)", () => {
     const fun = group({ key: "g:Fun", name: "Fun", byGroup: true, status: "over", lines: [line({ categoryId: 4, name: "D", status: "ok" })] });
     expect(visibleLinesFor(fun, "over")).toHaveLength(1);
     expect(visibleLinesFor(fun, "unbudgeted")).toBeNull();
+  });
+});
+
+describe("budgetProgressLines (Home's Budget Progress card)", () => {
+  const m = month({
+    income: [group({ key: "g:income:Pay", name: "Pay", lines: [line({ categoryId: 1, name: "Salary", budgeted: 5000, left: 5000, status: "expected" })] })],
+    debt: [debt()],
+    spending: [
+      group({
+        key: "g:Needs",
+        name: "Needs",
+        lines: [
+          line({ categoryId: 2, name: "Groceries", budgeted: 500, actual: 350, left: 150, status: "ok" }),
+          line({ categoryId: 3, name: "Transport", actual: 80 }),
+          line({ categoryId: 4, name: "Repairs", rollover: true, carriedIn: 400, actual: 100, left: 300, status: "ok" }),
+          line({ categoryId: 5, name: "Gifts", budgeted: 0, actual: 20, left: -20, status: "over" }),
+        ],
+      }),
+      group({
+        key: "g:Fun",
+        name: "Fun",
+        byGroup: true,
+        budgeted: 200,
+        actual: 250,
+        left: -50,
+        status: "over",
+        lines: [line({ categoryId: 6, name: "Movies", actual: 250, status: "ok" })],
+      }),
+      group({ key: "g:", name: "Other", byGroup: true, lines: [line({ categoryId: 7, name: "Misc", actual: 5, status: "ok" })] }),
+    ],
+  });
+
+  it("lists what carries a budget: one-line groups whole, other categories with a budget or rollover", () => {
+    expect(budgetProgressLines(m).map((l) => l.name).sort()).toEqual(["Fun", "Gifts", "Groceries", "Repairs"]);
+  });
+
+  it("uses the server's figures, budget plus carried in as what is available", () => {
+    const byName = Object.fromEntries(budgetProgressLines(m).map((l) => [l.name, l]));
+    expect(byName.Fun).toEqual({ key: "g:Fun", name: "Fun", spent: 250, available: 200, status: "over" });
+    expect(byName.Repairs).toMatchObject({ spent: 100, available: 400, status: "ok" });
+  });
+
+  it("puts the most at risk first: anything spent against nothing, then by share used, ties in server order", () => {
+    expect(budgetProgressLines(m).map((l) => l.name)).toEqual(["Gifts", "Fun", "Groceries", "Repairs"]);
+    const tie = month({
+      spending: [
+        group({
+          key: "g:A",
+          name: "A",
+          lines: [
+            line({ categoryId: 1, name: "First", budgeted: 100, actual: 10, left: 90, status: "ok" }),
+            line({ categoryId: 2, name: "Second", budgeted: 100, actual: 10, left: 90, status: "ok" }),
+            line({ categoryId: 3, name: "Unused", budgeted: 0, actual: 0, left: 0, status: "ok" }),
+          ],
+        }),
+      ],
+    });
+    expect(budgetProgressLines(tie).map((l) => l.name)).toEqual(["First", "Second", "Unused"]);
+  });
+
+  it("is empty with no spending budgets", () => {
+    expect(budgetProgressLines(month())).toEqual([]);
   });
 });
 

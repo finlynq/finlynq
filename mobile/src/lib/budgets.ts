@@ -169,6 +169,48 @@ export function spendBar(x: Pick<BudgetLine, "budgeted" | "carriedIn" | "left" |
   return { value, target, tone };
 }
 
+/** One line of Home's Budget Progress card: something with a budget to spend against this month. */
+export interface BudgetProgressLine {
+  key: string;
+  name: string;
+  /** Spent this month, as the Budgets screen shows it. */
+  spent: number;
+  /** This month's budget plus anything carried in: what the bar fills towards. */
+  available: number;
+  /** The server's verdict; "over" means more was spent than was available. */
+  status: BudgetLineStatus;
+}
+
+/** Spent over available; anything spent against nothing available ranks above every ratio. */
+function budgetRisk(x: Pick<BudgetProgressLine, "spent" | "available">): number {
+  if (x.available <= 0.005) return x.spent > 0.005 ? Number.POSITIVE_INFINITY : 0;
+  return x.spent / x.available;
+}
+
+/**
+ * What Home's Budget Progress card lists, most at risk first: each group budgeted
+ * as one line, and in the other groups each category with a budget of its own or
+ * a rollover. Income and debt payments stay out, as on the card's old list of
+ * spending budgets. Ties keep the server's order.
+ */
+export function budgetProgressLines(month: BudgetMonth): BudgetProgressLine[] {
+  type Unit = Pick<BudgetLine, "key" | "name" | "budgeted" | "actual" | "carriedIn" | "left" | "status">;
+  const units = month.spending.flatMap<Unit>((g) => (g.byGroup ? [g] : g.lines)).filter((x) => x.left != null);
+  return units
+    .map((x, i) => {
+      const line: BudgetProgressLine = {
+        key: x.key,
+        name: x.name,
+        spent: x.actual,
+        available: (x.budgeted ?? 0) + (x.carriedIn ?? 0),
+        status: x.status,
+      };
+      return { line, i, risk: budgetRisk(line) };
+    })
+    .sort((a, b) => (a.risk === b.risk ? a.i - b.i : b.risk - a.risk))
+    .map((x) => x.line);
+}
+
 export const DEBT_TONE: Record<DebtStatus, BarTone | null> = { paid: "ok", late: "over", due: "warn", none: null };
 
 export function debtStatusLabel(d: Pick<DebtLine, "status" | "dueDates">, today: string): string {

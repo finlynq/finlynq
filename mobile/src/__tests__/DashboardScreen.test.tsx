@@ -5,6 +5,7 @@ import { endpoints } from "../api/client";
 import { ThemeContext } from "../theme";
 import type { Theme } from "../theme";
 import { lightColors } from "../theme/colors";
+import type { BudgetGroup, BudgetLine, BudgetMonth } from "../lib/budgets";
 
 // Drive the narrow-phone layout switch per test via the (shared) Dimensions stub.
 let mockWindowWidth = 390;
@@ -21,13 +22,13 @@ jest.mock("@react-navigation/native", () => ({
   useNavigation: () => ({ navigate: mockNavigate, goBack: jest.fn() }),
 }));
 
-// Mock the API client. NOTE: no getCategories — the dashboard reads the
-// decrypted `categoryName` straight off the budget rows now.
+// Mock the API client. NOTE: no getCategories — the budget card reads the names
+// the server decrypted into the month model.
 jest.mock("../api/client", () => ({
   endpoints: {
     getDashboard: jest.fn(),
     getHealthScore: jest.fn(),
-    getBudgets: jest.fn(),
+    getBudgetMonth: jest.fn(),
     getTransactionsCalendar: jest.fn(),
   },
 }));
@@ -68,26 +69,66 @@ const mockHealthData = {
   savingsRatePct: 22,
 };
 
-const groceries = {
-  id: 1,
-  categoryId: 1,
-  month: "2026-03",
-  amount: 500,
-  currency: "CAD",
-  categoryName: "Groceries",
-  categoryGroup: "Needs",
-  convertedAmount: 500,
-  convertedSpent: 350, // 70%
-  displayCurrency: "CAD",
-};
-const dining = {
-  ...groceries,
-  id: 2,
-  categoryId: 2,
-  categoryName: "Dining",
-  convertedAmount: 200,
-  convertedSpent: 300, // 150% — over budget
-};
+function line(over: Partial<BudgetLine> & { categoryId: number; name: string }): BudgetLine {
+  return {
+    key: `c:${over.categoryId}`,
+    budgeted: null,
+    actual: 0,
+    carriedIn: null,
+    left: null,
+    rollover: false,
+    rolloverNegative: "carry",
+    average3: 0,
+    upcoming: 0,
+    status: "unbudgeted",
+    ...over,
+  };
+}
+
+function group(over: Partial<BudgetGroup> & { key: string; name: string; lines: BudgetLine[] }): BudgetGroup {
+  return {
+    byGroup: false,
+    rollover: false,
+    rolloverNegative: "carry",
+    budgeted: null,
+    actual: 0,
+    carriedIn: null,
+    left: null,
+    upcoming: 0,
+    average3: 0,
+    status: "ok",
+    ...over,
+  };
+}
+
+/** GET /api/budgets/month with just the spending groups the card reads. */
+function budgetMonth(spending: BudgetGroup[], currency = "CAD"): BudgetMonth {
+  return {
+    month: "2026-03",
+    currency,
+    today: "2026-03-15",
+    summary: {
+      plannedIncome: 0,
+      receivedIncome: 0,
+      plannedSpending: 0,
+      spent: 0,
+      plannedDebt: 0,
+      paidDebt: 0,
+      leftToPlan: 0,
+      netCashFlow: 0,
+      upcoming: 0,
+    },
+    counts: { notBudgeted: 0, overspent: 0, withUpcoming: 0 },
+    income: [],
+    spending,
+    debt: [],
+    excluded: [],
+  };
+}
+
+const groceries = line({ categoryId: 1, name: "Groceries", budgeted: 500, actual: 350, left: 150, status: "ok" }); // 70%
+const dining = line({ categoryId: 2, name: "Dining", budgeted: 200, actual: 300, left: -100, status: "over" }); // 150%
+const needs = (lines: BudgetLine[]) => group({ key: "g:Needs", name: "Needs", lines });
 
 const theme: Theme = {
   mode: "light",
@@ -105,7 +146,7 @@ function renderWithTheme(component: React.ReactElement) {
   );
 }
 
-function mockAllOk(overrides: { dash?: object; health?: object | null; budgets?: object[] } = {}) {
+function mockAllOk(overrides: { dash?: object; health?: object | null; spending?: BudgetGroup[] } = {}) {
   (endpoints.getDashboard as jest.Mock).mockResolvedValue({
     success: true,
     data: { ...mockDashboardData, ...(overrides.dash ?? {}) },
@@ -115,9 +156,9 @@ function mockAllOk(overrides: { dash?: object; health?: object | null; budgets?:
       ? { success: false, error: "nope" }
       : { success: true, data: { ...mockHealthData, ...(overrides.health ?? {}) } },
   );
-  (endpoints.getBudgets as jest.Mock).mockResolvedValue({
+  (endpoints.getBudgetMonth as jest.Mock).mockResolvedValue({
     success: true,
-    data: overrides.budgets ?? [groceries],
+    data: budgetMonth(overrides.spending ?? [needs([groceries])]),
   });
   (endpoints.getTransactionsCalendar as jest.Mock).mockImplementation((month: string) =>
     Promise.resolve({
@@ -142,7 +183,7 @@ describe("DashboardScreen", () => {
   it("shows loading indicator initially", () => {
     (endpoints.getDashboard as jest.Mock).mockReturnValue(new Promise(() => {}));
     (endpoints.getHealthScore as jest.Mock).mockReturnValue(new Promise(() => {}));
-    (endpoints.getBudgets as jest.Mock).mockReturnValue(new Promise(() => {}));
+    (endpoints.getBudgetMonth as jest.Mock).mockReturnValue(new Promise(() => {}));
 
     const { UNSAFE_queryAllByType } = renderWithTheme(<DashboardScreen />);
     const { ActivityIndicator } = require("react-native");
@@ -166,7 +207,7 @@ describe("DashboardScreen", () => {
     expect(getByText("C$30,000")).toBeTruthy(); // liabilities
     expect(getByText("C$5,000")).toBeTruthy(); // income
     expect(getByText("C$3,500")).toBeTruthy(); // expenses
-    // Budget card follows the budgets' own display currency.
+    // Budget card follows the month model's currency.
     expect(getByText("C$350 / C$500")).toBeTruthy();
     expect(queryByText("$50,000")).toBeNull();
   });
@@ -210,18 +251,86 @@ describe("DashboardScreen", () => {
     expect(StyleSheet.flatten(getByText("75").props.style).color).toBe(lightColors.pos);
   });
 
-  it("shows budget progress from categoryName, most at-risk first", async () => {
-    mockAllOk({ budgets: [groceries, dining] });
+  it("shows budget progress from the month model, most at-risk first", async () => {
+    mockAllOk({ spending: [needs([groceries, dining])] });
     const { getByText, getAllByText } = renderWithTheme(<DashboardScreen />);
     await waitFor(() => expect(getByText("Budget Progress")).toBeTruthy());
     const names = getAllByText(/^(Groceries|Dining)$/).map((n) => n.props.children);
     expect(names).toEqual(["Dining", "Groceries"]);
+    expect(endpoints.getBudgetMonth).toHaveBeenCalledWith(expect.stringMatching(/^\d{4}-\d{2}$/));
+  });
+
+  // The legacy /api/budgets list could never show these: a group budget lives in
+  // budget_group_amounts, not in the budgets table it read, and it had no carryover.
+  it("lists a group budgeted as one line and a rolled-over budget as the Budgets screen does", async () => {
+    const fun = group({
+      key: "g:Fun",
+      name: "Fun",
+      byGroup: true,
+      budgeted: 200,
+      actual: 250,
+      left: -50,
+      status: "over",
+      lines: [line({ categoryId: 4, name: "Movies", actual: 250, status: "ok" })],
+    });
+    const rolled = line({
+      categoryId: 5,
+      name: "Car repairs",
+      budgeted: 100,
+      carriedIn: 400,
+      actual: 300,
+      left: 200,
+      rollover: true,
+      status: "ok",
+    });
+    mockAllOk({ spending: [needs([groceries, rolled]), fun] });
+    const { getByText, queryByText } = renderWithTheme(<DashboardScreen />);
+    await waitFor(() => expect(getByText("Fun")).toBeTruthy());
+
+    // The group is one line, from the server's own figures; its categories aren't listed.
+    expect(getByText("C$250 / C$200")).toBeTruthy();
+    expect(queryByText("Movies")).toBeNull();
+    const { StyleSheet } = require("react-native");
+    expect(StyleSheet.flatten(getByText("C$250 / C$200").props.style).color).toBe(lightColors.destructive);
+
+    // Measured against budget + carried in: 300 of 500 is not over, though it is more than 100.
+    expect(getByText("C$300 / C$500")).toBeTruthy();
+    expect(StyleSheet.flatten(getByText("C$300 / C$500").props.style).color).toBe(lightColors.mutedForeground);
+  });
+
+  it("leaves categories with no budget and income off the card", async () => {
+    const pay = group({
+      key: "g:income:Pay",
+      name: "Pay",
+      lines: [line({ categoryId: 9, name: "Paycheque", budgeted: 5000, actual: 2500, left: 2500, status: "expected" })],
+    });
+    (endpoints.getDashboard as jest.Mock).mockResolvedValue({ success: true, data: mockDashboardData });
+    (endpoints.getHealthScore as jest.Mock).mockResolvedValue({ success: true, data: mockHealthData });
+    (endpoints.getTransactionsCalendar as jest.Mock).mockResolvedValue({ success: false, error: "x" });
+    (endpoints.getBudgetMonth as jest.Mock).mockResolvedValue({
+      success: true,
+      data: { ...budgetMonth([needs([line({ categoryId: 3, name: "Transport", actual: 80 })])]), income: [pay] },
+    });
+    const { getByText, queryByText } = renderWithTheme(<DashboardScreen />);
+    await waitFor(() => expect(getByText("C$50,000")).toBeTruthy());
+    expect(queryByText("Budget Progress")).toBeNull();
+    expect(queryByText("Transport")).toBeNull();
+    expect(queryByText("Paycheque")).toBeNull(); // ("Salary" is a recent transaction's payee)
+  });
+
+  it("keeps the rest of Home when the month route is missing", async () => {
+    mockAllOk();
+    (endpoints.getBudgetMonth as jest.Mock).mockResolvedValue({ success: false, error: "HTTP 404" });
+    const { getByText, queryByText } = renderWithTheme(<DashboardScreen />);
+    await waitFor(() => expect(getByText("C$50,000")).toBeTruthy());
+    expect(queryByText("Budget Progress")).toBeNull();
+    expect(queryByText(/Server error|Cannot connect/)).toBeNull();
   });
 
   it("shows the error with Retry (and keeps pull-to-refresh) when the first load fails", async () => {
     (endpoints.getDashboard as jest.Mock).mockResolvedValue({ success: false, error: "Server error" });
     (endpoints.getHealthScore as jest.Mock).mockResolvedValue({ success: false, error: "Server error" });
-    (endpoints.getBudgets as jest.Mock).mockResolvedValue({ success: false, error: "Server error" });
+    (endpoints.getBudgetMonth as jest.Mock).mockResolvedValue({ success: false, error: "Server error" });
 
     const { getByText, UNSAFE_getByType } = renderWithTheme(<DashboardScreen />);
     await waitFor(() => expect(getByText("Server error")).toBeTruthy());
@@ -237,7 +346,7 @@ describe("DashboardScreen", () => {
   it("shows error when network fails", async () => {
     (endpoints.getDashboard as jest.Mock).mockRejectedValue(new Error("Network error"));
     (endpoints.getHealthScore as jest.Mock).mockRejectedValue(new Error("Network error"));
-    (endpoints.getBudgets as jest.Mock).mockRejectedValue(new Error("Network error"));
+    (endpoints.getBudgetMonth as jest.Mock).mockRejectedValue(new Error("Network error"));
 
     const { getByText } = renderWithTheme(<DashboardScreen />);
     await waitFor(() => expect(getByText("Cannot connect to server")).toBeTruthy());
@@ -329,7 +438,7 @@ describe("DashboardScreen", () => {
   // Owner request: the calendar sits after the dashboard figures and before
   // the recent transactions.
   it("shows this month's calendar between the budgets and the recent transactions", async () => {
-    mockAllOk({ budgets: [groceries, dining] });
+    mockAllOk({ spending: [needs([groceries, dining])] });
     const { getByText, getAllByText } = renderWithTheme(<DashboardScreen />);
     await waitFor(() => expect(getByText("Calendar")).toBeTruthy());
     expect(endpoints.getTransactionsCalendar).toHaveBeenCalledWith(expect.stringMatching(/^\d{4}-\d{2}$/));
@@ -374,7 +483,7 @@ describe("DashboardScreen", () => {
   });
 
   it("shows 'No recent transactions' when list is empty", async () => {
-    mockAllOk({ dash: { recentTransactions: [] }, budgets: [] });
+    mockAllOk({ dash: { recentTransactions: [] }, spending: [] });
     const { getByText } = renderWithTheme(<DashboardScreen />);
     await waitFor(() => expect(getByText("No recent transactions")).toBeTruthy());
   });

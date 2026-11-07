@@ -24,13 +24,12 @@ import {
   formatMonthLabel,
   monthKey,
   resolveSavingsRate,
-  sortBudgetsByRisk,
 } from "../lib/dashboard";
+import { budgetProgressLines, type BudgetMonth } from "../lib/budgets";
 import type {
   ApiResponse,
   DashboardData,
   HealthScoreData,
-  BudgetWithSpending,
   Transaction,
 } from "../../../shared/types";
 import type { MoreStackParamList } from "../navigation/MoreStack";
@@ -128,17 +127,19 @@ function BudgetProgressBar({
   label,
   spent,
   budget,
+  isOver,
   currency,
   colors,
 }: {
   label: string;
   spent: number;
   budget: number;
+  /** The server's verdict, so whole-unit rounding can't disagree with the Budgets screen. */
+  isOver: boolean;
   currency: string;
   colors: ThemeColors;
 }) {
-  const pct = budget > 0 ? Math.min((spent / budget) * 100, 100) : 0;
-  const isOver = spent > budget;
+  const pct = budget > 0 ? Math.min((spent / budget) * 100, 100) : isOver ? 100 : 0;
 
   return (
     <View style={budgetStyles.item}>
@@ -180,7 +181,7 @@ export default function DashboardScreen() {
 
   const [data, setData] = useState<DashboardData | null>(null);
   const [health, setHealth] = useState<HealthScoreData | null>(null);
-  const [budgets, setBudgets] = useState<BudgetWithSpending[]>([]);
+  const [budgetMonth, setBudgetMonth] = useState<BudgetMonth | null>(null);
   // True only until the FIRST load settles; later refetches (focus, pull) keep
   // the last good data on screen instead of flashing a full-screen spinner.
   const [loading, setLoading] = useState(true);
@@ -201,7 +202,7 @@ export default function DashboardScreen() {
       const [dashRes, healthRes, budgetRes] = await Promise.all([
         settle(endpoints.getDashboard()),
         settle(endpoints.getHealthScore()),
-        settle(endpoints.getBudgets(monthKey())),
+        settle(endpoints.getBudgetMonth(monthKey())),
       ]);
       if (seq !== fetchSeq.current) return;
 
@@ -215,8 +216,8 @@ export default function DashboardScreen() {
       }
       if (healthRes.success) setHealth(healthRes.data);
       else logger.warn("dashboard", "health-score fetch failed", { error: healthRes.error });
-      if (budgetRes.success) setBudgets(budgetRes.data);
-      else logger.warn("dashboard", "budgets fetch failed", { error: budgetRes.error });
+      if (budgetRes.success) setBudgetMonth(budgetRes.data ?? null);
+      else logger.warn("dashboard", "budget month fetch failed", { error: budgetRes.error });
     } finally {
       if (seq === fetchSeq.current) {
         setLoading(false);
@@ -243,10 +244,8 @@ export default function DashboardScreen() {
   const healthColor = health ? getHealthColor(health.score, colors) : colors.primary;
   const monthTitle = data?.referenceMonth ? formatMonthLabel(data.referenceMonth) : "This Month";
   const savings = resolveSavingsRate(health, data);
-  const sortedBudgets = sortBudgetsByRisk(budgets);
-  const budgetCurrency =
-    (budgets[0] as (BudgetWithSpending & { displayCurrency?: string }) | undefined)
-      ?.displayCurrency || currency;
+  const budgetLines = budgetMonth ? budgetProgressLines(budgetMonth) : [];
+  const budgetCurrency = budgetMonth?.currency || currency;
 
   const goTo = {
     categoryReports: (type: "E" | "I") =>
@@ -423,8 +422,8 @@ export default function DashboardScreen() {
               )}
             </View>
 
-            {/* Budget Progress Summary — most at-risk first */}
-            {sortedBudgets.length > 0 && (
+            {/* Budget Progress: the Budgets screen's month model, most at risk first */}
+            {budgetLines.length > 0 && (
               <TouchableOpacity
                 activeOpacity={0.8}
                 onPress={goTo.budgets}
@@ -437,19 +436,20 @@ export default function DashboardScreen() {
                   </Text>
                   <Text style={[styles.linkText, { color: colors.primary }]}>See all ›</Text>
                 </View>
-                {sortedBudgets.slice(0, BUDGET_PREVIEW_COUNT).map((b) => (
+                {budgetLines.slice(0, BUDGET_PREVIEW_COUNT).map((line) => (
                   <BudgetProgressBar
-                    key={b.id}
-                    label={safeName(b.categoryName, `Category #${b.categoryId}`)}
-                    spent={b.convertedSpent ?? 0}
-                    budget={b.convertedAmount ?? b.amount}
+                    key={line.key}
+                    label={safeName(line.name)}
+                    spent={line.spent}
+                    budget={line.available}
+                    isOver={line.status === "over"}
                     currency={budgetCurrency}
                     colors={colors}
                   />
                 ))}
-                {sortedBudgets.length > BUDGET_PREVIEW_COUNT && (
+                {budgetLines.length > BUDGET_PREVIEW_COUNT && (
                   <Text style={[styles.moreText, { color: colors.mutedForeground }]}>
-                    +{sortedBudgets.length - BUDGET_PREVIEW_COUNT} more budgets
+                    +{budgetLines.length - BUDGET_PREVIEW_COUNT} more budgets
                   </Text>
                 )}
               </TouchableOpacity>

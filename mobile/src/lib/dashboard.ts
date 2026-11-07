@@ -2,7 +2,7 @@
 // both `composeDashboard()` (api/client.ts) and DashboardScreen can use them and
 // they stay unit-testable.
 
-import type { BudgetWithSpending, HealthScoreData } from "../../../shared/types";
+import type { HealthScoreData } from "../../../shared/types";
 
 /** Default reporting currency when the server omits one. USD, never CAD (FINLYNQ-183). */
 export const DEFAULT_DISPLAY_CURRENCY = "USD";
@@ -77,26 +77,6 @@ export function formatMonthLabel(month: string): string {
   const idx = Number(m[2]) - 1;
   if (idx < 0 || idx > 11) return month;
   return `${MONTH_NAMES[idx]} ${m[1]}`;
-}
-
-/** spent / budget for a budget row (display-currency converted when present). */
-export function budgetRatio(b: BudgetWithSpending): number {
-  const spent = b.convertedSpent ?? 0;
-  const budget = b.convertedAmount ?? b.amount;
-  if (!budget || budget <= 0) return spent > 0 ? Number.POSITIVE_INFINITY : 0;
-  return spent / budget;
-}
-
-/**
- * Order budgets most-at-risk first (highest spent/budget ratio), so an
- * over-budget category is never hidden behind the "+N more" cut. Stable for
- * equal ratios (keeps server order).
- */
-export function sortBudgetsByRisk<T extends BudgetWithSpending>(budgets: ReadonlyArray<T>): T[] {
-  return budgets
-    .map((b, i) => ({ b, i, r: budgetRatio(b) }))
-    .sort((x, y) => (y.r === x.r ? x.i - y.i : y.r - x.r))
-    .map((x) => x.b);
 }
 
 export interface SavingsRateView {
