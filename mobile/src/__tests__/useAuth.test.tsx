@@ -190,6 +190,15 @@ describe("useAuth — FINLYNQ-134 biometric silent re-login + secure credential 
       expect(SECURE.deleteItemAsync).toHaveBeenCalledWith(STORED_CREDENTIALS_KEY);
     });
 
+    it("signOut removes the collapsed budget groups, which hold group names", async () => {
+      const { result } = await mountSignedIn();
+      await AsyncStorage.setItem("pf_budget_collapsed", JSON.stringify(["g:Medical"]));
+      await act(async () => {
+        await result.current.signOut();
+      });
+      expect(await AsyncStorage.getItem("pf_budget_collapsed")).toBeNull();
+    });
+
     it("(c) the wipe-account teardown (signOut) purges the stored credential", async () => {
       // The wipe-account flow's terminal action is signOut (SettingsScreen
       // runDataAction → Alert OK → signOut), which purges the credential.

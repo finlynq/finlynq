@@ -23,6 +23,7 @@ import {
 } from "../api/client";
 import { logger } from "../lib/logger";
 import { clearSnapshot as clearWidgetSnapshot } from "../../modules/finlynq-widgets";
+import { BUDGET_COLLAPSED_KEY } from "../lib/budgets";
 
 const BIOMETRIC_KEY = "pf_biometric_enabled";
 const AUTO_LOCK_KEY = "pf_auto_lock_minutes";
@@ -646,6 +647,7 @@ function useAuthEngine() {
       await purgeStoredCredentials();
       // Signing out leaves no figures on the home screen.
       await clearWidgetSnapshot();
+      await AsyncStorage.removeItem(BUDGET_COLLAPSED_KEY).catch(() => {});
     }
     setState((s) => ({
       ...s,
