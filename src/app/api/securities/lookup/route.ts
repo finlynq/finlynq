@@ -3,8 +3,9 @@
  *
  * Powers the "Add security" dialog's auto-fill so the user doesn't have to type
  * the name + currency. Crypto-aware:
- *   - crypto (the `crypto=1` flag OR a symbol CoinGecko recognizes) → resolves
- *     the coin's name via CoinGecko (e.g. BTC → "Bitcoin"), currency USD.
+ *   - crypto (the `crypto=1` flag OR a ticker always priced as a coin, see
+ *     `pricedAsCrypto`) → resolves the coin's name (e.g. BTC → "Bitcoin"),
+ *     currency USD.
  *   - otherwise → Yahoo quote (`shortName` + quote currency).
  * Returns `isCrypto` so the dialog can auto-tick the crypto box for known coins.
  *
@@ -18,6 +19,7 @@
 import { apiHandler } from "@/lib/api-handler";
 import { fetchQuoteLive } from "@/lib/price-service";
 import { symbolToCoinGeckoId, getCryptoPrice } from "@/lib/crypto-service";
+import { pricedAsCrypto } from "@/lib/fx/supported-currencies";
 import { isIsin, normalizeIsin } from "@/lib/securities/isin";
 import { resolveIsinForUser } from "@/lib/securities/isin-store";
 
@@ -47,9 +49,11 @@ export const GET = apiHandler(
       };
     }
 
-    // Crypto path — requested OR a symbol CoinGecko knows (BTC, ETH, …).
+    // Crypto path — the box is ticked, or the ticker is always priced as a
+    // coin (BTC, ETH, …). Described exactly as it will be priced, so an
+    // unticked PAXG comes back as the stock Yahoo has under that ticker.
     const cgId = symbolToCoinGeckoId(symbol);
-    if (wantCrypto || cgId) {
+    if (pricedAsCrypto(symbol, wantCrypto)) {
       if (cgId) {
         const coin = await getCryptoPrice(cgId).catch(() => null);
         if (coin) {
