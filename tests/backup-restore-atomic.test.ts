@@ -76,8 +76,12 @@ function backupWith(overrides: { account?: Record<string, unknown>; txCategoryId
       ],
       categories: [{ id: 901, type: "E", group: "", ...cat }],
       transactions: [
-        { id: 902, accountId: 900, categoryId: overrides.txCategoryId ?? 901, date: "2026-01-05", amount: -12.5, currency: "CAD", payee: "Grocer" },
-        { id: 903, accountId: 900, categoryId: null, date: "2026-01-06", amount: 100, currency: "CAD", payee: "Pay" },
+        // Timestamps arrive as ISO strings, exactly as the export writes them.
+        { id: 902, accountId: 900, categoryId: overrides.txCategoryId ?? 901, date: "2026-01-05", amount: -12.5, currency: "CAD", payee: "Grocer", createdAt: "2026-01-05T10:00:00.000Z", updatedAt: "2026-01-06T11:30:00.000Z" },
+        { id: 903, accountId: 900, categoryId: null, date: "2026-01-06", amount: 100, currency: "CAD", payee: "Pay", createdAt: "not a date" },
+      ],
+      importTemplates: [
+        { id: 904, name: "Bank CSV", fileHeaders: '["Date","Amount"]', columnMapping: '{"date":"Date","amount":"Amount"}', createdAt: "2026-01-01T00:00:00.000Z", updatedAt: "2026-01-02T00:00:00.000Z" },
       ],
     },
   };
@@ -128,6 +132,17 @@ describeDb("POST /api/data/import — a restore is all-or-nothing", () => {
     expect(await counts(userId)).toEqual({ transactions: 2, accounts: 1, staged: 0 });
     const [acct] = await db.select({ id: schema.accounts.id }).from(schema.accounts).where(eq(schema.accounts.userId, userId));
     expect(acct.id).not.toBe(oldAccountId);
+    // ISO-string timestamps survive as the same instant; an unparseable one
+    // falls back to the column default instead of failing the restore.
+    const txs = await db
+      .select({ amount: schema.transactions.amount, createdAt: schema.transactions.createdAt })
+      .from(schema.transactions)
+      .where(eq(schema.transactions.userId, userId));
+    const grocer = txs.find((t) => t.amount === -12.5);
+    expect(grocer?.createdAt?.toISOString()).toBe("2026-01-05T10:00:00.000Z");
+    expect(txs.find((t) => t.amount === 100)?.createdAt).toBeInstanceOf(Date);
+    const tpl = await db.select({ id: schema.importTemplates.id }).from(schema.importTemplates).where(eq(schema.importTemplates.userId, userId));
+    expect(tpl).toHaveLength(1);
   });
 
   it("changes nothing when the backup has a row the restore refuses", async () => {

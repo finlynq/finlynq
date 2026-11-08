@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { db, schema, withDbTransaction } from "@/db";
-import { eq, inArray } from "drizzle-orm";
+import { eq, getTableColumns, inArray, is } from "drizzle-orm";
+import { PgTimestamp, type PgTable } from "drizzle-orm/pg-core";
 import { requireEncryption } from "@/lib/auth/require-encryption";
 import { encryptField, isEncrypted } from "@/lib/crypto/envelope";
 import { invalidateUser as invalidateUserTxCache } from "@/lib/mcp/user-tx-cache";
@@ -9,6 +10,34 @@ import { coerceSourceForRestore } from "@/lib/tx-source";
 import { normalizeCategoryType } from "@/lib/categories/category-type";
 
 type Row = Record<string, unknown>;
+
+/**
+ * A backup is JSON, so every timestamp arrives as an ISO string, while a
+ * Drizzle `timestamp()` column (Date mode, all 76 in this schema) calls
+ * `.toISOString()` on whatever it is given. Inserting a backup row as-is threw
+ * "e.toISOString is not a function" before a single row reached Postgres, so
+ * every restore of a backup carrying `transactions.createdAt` failed
+ * (feedback #33, 2026-11-07). Turn the table's timestamp columns back into
+ * Dates; an unparseable value is dropped so the column default applies.
+ */
+function withDates(table: PgTable, rows: readonly Row[]): Row[] {
+  const keys = Object.entries(getTableColumns(table))
+    .filter(([, col]) => is(col, PgTimestamp))
+    .map(([key]) => key);
+  if (keys.length === 0) return [...rows];
+  return rows.map((row) => {
+    const out = { ...row };
+    for (const key of keys) {
+      const v = out[key];
+      if (typeof v === "string" || typeof v === "number") {
+        const d = new Date(v);
+        if (Number.isNaN(d.getTime())) delete out[key];
+        else out[key] = d;
+      }
+    }
+    return out;
+  });
+}
 
 /** A backup row the restore refuses (unmapped id, missing goal). Its message
  *  is written for the user and returned as-is. */
@@ -363,7 +392,7 @@ export async function POST(request: NextRequest) {
         });
         const inserted = await db
           .insert(schema.accounts)
-          .values(stripped as (typeof schema.accounts.$inferInsert)[])
+          .values(withDates(schema.accounts, stripped) as (typeof schema.accounts.$inferInsert)[])
           .returning({ id: schema.accounts.id });
         d.accounts.forEach((old, i) => {
           if (inserted[i]) accountIdMap.set(old.id as number, inserted[i].id);
@@ -385,7 +414,7 @@ export async function POST(request: NextRequest) {
         });
         const inserted = await db
           .insert(schema.categories)
-          .values(strippedCats as (typeof schema.categories.$inferInsert)[])
+          .values(withDates(schema.categories, strippedCats) as (typeof schema.categories.$inferInsert)[])
           .returning({ id: schema.categories.id });
         d.categories.forEach((old, i) => {
           if (inserted[i]) categoryIdMap.set(old.id as number, inserted[i].id);
@@ -401,7 +430,7 @@ export async function POST(request: NextRequest) {
         const stripped = strip(d.portfolioHoldings, userId, { accountIdMap }) as (typeof schema.portfolioHoldings.$inferInsert)[];
         const insertedHoldings = await db
           .insert(schema.portfolioHoldings)
-          .values(stripped)
+          .values(withDates(schema.portfolioHoldings, stripped) as typeof stripped)
           .returning({ id: schema.portfolioHoldings.id, accountId: schema.portfolioHoldings.accountId });
 
         // Bulk-insert holding_accounts using the freshly-RETURNING-ed ids and
@@ -466,7 +495,7 @@ export async function POST(request: NextRequest) {
         if (remappedBatches.length > 0) {
           const inserted = await db
             .insert(schema.bankUploadBatches)
-            .values(remappedBatches as (typeof schema.bankUploadBatches.$inferInsert)[])
+            .values(withDates(schema.bankUploadBatches, remappedBatches) as (typeof schema.bankUploadBatches.$inferInsert)[])
             .returning({ id: schema.bankUploadBatches.id });
           let outIdx = 0;
           for (const old of d.bankUploadBatches) {
@@ -549,7 +578,7 @@ export async function POST(request: NextRequest) {
         if (remapped.length > 0) {
           const inserted = await db
             .insert(schema.bankTransactions)
-            .values(remapped as (typeof schema.bankTransactions.$inferInsert)[])
+            .values(withDates(schema.bankTransactions, remapped) as (typeof schema.bankTransactions.$inferInsert)[])
             .returning({ id: schema.bankTransactions.id });
           // Walk parallel arrays — `remapped` skipped null-accountId rows so we
           // need an index that tracks the same skipping pattern on the source.
@@ -628,7 +657,7 @@ export async function POST(request: NextRequest) {
         });
         const inserted = await db
           .insert(schema.transactions)
-          .values(remapped as (typeof schema.transactions.$inferInsert)[])
+          .values(withDates(schema.transactions, remapped) as (typeof schema.transactions.$inferInsert)[])
           .returning({ id: schema.transactions.id });
         d.transactions.forEach((old, i) => {
           if (inserted[i]) txnIdMap.set(old.id as number, inserted[i].id);
@@ -829,7 +858,7 @@ export async function POST(request: NextRequest) {
         if (remapped.length) {
           await db
             .insert(schema.transactionSplits)
-            .values(remapped as (typeof schema.transactionSplits.$inferInsert)[])
+            .values(withDates(schema.transactionSplits, remapped) as (typeof schema.transactionSplits.$inferInsert)[])
             ;
         }
       }
@@ -838,20 +867,20 @@ export async function POST(request: NextRequest) {
       // can't sneak through (see strip()'s docblock for the failure mode).
       // Tables without accountId/categoryId pass an empty remap.
       if (d.budgets?.length) {
-        await db.insert(schema.budgets).values(strip(d.budgets, userId, { categoryIdMap }) as (typeof schema.budgets.$inferInsert)[]);
+        await db.insert(schema.budgets).values(withDates(schema.budgets, strip(d.budgets, userId, { categoryIdMap })) as (typeof schema.budgets.$inferInsert)[]);
       }
       if (d.budgetTemplates?.length) {
-        await db.insert(schema.budgetTemplates).values(strip(d.budgetTemplates, userId, { categoryIdMap }) as (typeof schema.budgetTemplates.$inferInsert)[]);
+        await db.insert(schema.budgetTemplates).values(withDates(schema.budgetTemplates, strip(d.budgetTemplates, userId, { categoryIdMap })) as (typeof schema.budgetTemplates.$inferInsert)[]);
       }
       if (d.loans?.length) {
-        await db.insert(schema.loans).values(strip(d.loans, userId, { accountIdMap }) as (typeof schema.loans.$inferInsert)[]);
+        await db.insert(schema.loans).values(withDates(schema.loans, strip(d.loans, userId, { accountIdMap })) as (typeof schema.loans.$inferInsert)[]);
       }
       // Insert goals, capture old→new id map for `goal_accounts` restore.
       const goalIdMap = new Map<number, number>();
       if (d.goals?.length) {
         const inserted = await db
           .insert(schema.goals)
-          .values(strip(d.goals, userId, { accountIdMap }) as (typeof schema.goals.$inferInsert)[])
+          .values(withDates(schema.goals, strip(d.goals, userId, { accountIdMap })) as (typeof schema.goals.$inferInsert)[])
           .returning({ id: schema.goals.id });
         d.goals.forEach((old, i) => {
           if (inserted[i]) goalIdMap.set(old.id as number, inserted[i].id);
@@ -862,19 +891,19 @@ export async function POST(request: NextRequest) {
       if (d.goalAccounts?.length) {
         await db
           .insert(schema.goalAccounts)
-          .values(strip(d.goalAccounts, userId, { accountIdMap, goalIdMap }) as (typeof schema.goalAccounts.$inferInsert)[]);
+          .values(withDates(schema.goalAccounts, strip(d.goalAccounts, userId, { accountIdMap, goalIdMap })) as (typeof schema.goalAccounts.$inferInsert)[]);
       }
       if (d.snapshots?.length) {
-        await db.insert(schema.snapshots).values(strip(d.snapshots, userId, { accountIdMap }) as (typeof schema.snapshots.$inferInsert)[]);
+        await db.insert(schema.snapshots).values(withDates(schema.snapshots, strip(d.snapshots, userId, { accountIdMap })) as (typeof schema.snapshots.$inferInsert)[]);
       }
       if (d.targetAllocations?.length) {
-        await db.insert(schema.targetAllocations).values(strip(d.targetAllocations, userId) as (typeof schema.targetAllocations.$inferInsert)[]);
+        await db.insert(schema.targetAllocations).values(withDates(schema.targetAllocations, strip(d.targetAllocations, userId)) as (typeof schema.targetAllocations.$inferInsert)[]);
       }
       if (d.recurringTransactions?.length) {
-        await db.insert(schema.recurringTransactions).values(strip(d.recurringTransactions, userId, { accountIdMap, categoryIdMap }) as (typeof schema.recurringTransactions.$inferInsert)[]);
+        await db.insert(schema.recurringTransactions).values(withDates(schema.recurringTransactions, strip(d.recurringTransactions, userId, { accountIdMap, categoryIdMap })) as (typeof schema.recurringTransactions.$inferInsert)[]);
       }
       if (d.subscriptions?.length) {
-        await db.insert(schema.subscriptions).values(strip(d.subscriptions, userId, { accountIdMap, categoryIdMap }) as (typeof schema.subscriptions.$inferInsert)[]);
+        await db.insert(schema.subscriptions).values(withDates(schema.subscriptions, strip(d.subscriptions, userId, { accountIdMap, categoryIdMap })) as (typeof schema.subscriptions.$inferInsert)[]);
       }
       if (d.transactionRules?.length) {
         // FINLYNQ-12 — pre-migration backups carry `isActive` as 0/1 (INTEGER);
@@ -887,16 +916,16 @@ export async function POST(request: NextRequest) {
           }
           return row;
         });
-        await db.insert(schema.transactionRules).values(stripped as (typeof schema.transactionRules.$inferInsert)[]);
+        await db.insert(schema.transactionRules).values(withDates(schema.transactionRules, stripped) as (typeof schema.transactionRules.$inferInsert)[]);
       }
       if (d.importTemplates?.length) {
-        await db.insert(schema.importTemplates).values(strip(d.importTemplates, userId) as (typeof schema.importTemplates.$inferInsert)[]);
+        await db.insert(schema.importTemplates).values(withDates(schema.importTemplates, strip(d.importTemplates, userId)) as (typeof schema.importTemplates.$inferInsert)[]);
       }
       // Restore per-user FX overrides. Both `fxOverrides` (current shape) and
       // legacy `fxRates` (pre-2026-04-27 backups carrying user-pinned rate pairs)
       // are accepted. Legacy rows are converted to USD-anchored fx_overrides.
       if (d.fxOverrides?.length) {
-        await db.insert(schema.fxOverrides).values(strip(d.fxOverrides, userId) as (typeof schema.fxOverrides.$inferInsert)[]);
+        await db.insert(schema.fxOverrides).values(withDates(schema.fxOverrides, strip(d.fxOverrides, userId)) as (typeof schema.fxOverrides.$inferInsert)[]);
       } else if (d.fxRates?.length) {
         const overrides: Array<{
           userId: string;
@@ -925,7 +954,7 @@ export async function POST(request: NextRequest) {
         }
       }
       if (d.contributionRoom?.length) {
-        await db.insert(schema.contributionRoom).values(strip(d.contributionRoom, userId) as (typeof schema.contributionRoom.$inferInsert)[]);
+        await db.insert(schema.contributionRoom).values(withDates(schema.contributionRoom, strip(d.contributionRoom, userId)) as (typeof schema.contributionRoom.$inferInsert)[]);
       }
 
       // Settings: upsert by key
