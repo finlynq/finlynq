@@ -26,6 +26,9 @@ type CurrencyContextValue = {
   displayCurrency: string;
   setDisplayCurrency: (code: string) => Promise<void>;
   isLoading: boolean;
+  /** View preference: show every FX rate as its inverse ("1 USD = 18,039 IDR"). */
+  fxRatesInverted: boolean;
+  setFxRatesInverted: (inverted: boolean) => Promise<void>;
 };
 
 const CurrencyContext = createContext<CurrencyContextValue | null>(null);
@@ -38,6 +41,7 @@ const DEFAULT_CURRENCY = "USD";
 export function CurrencyProvider({ children }: { children: ReactNode }) {
   const [displayCurrency, setDisplayCurrencyState] = useState(DEFAULT_CURRENCY);
   const [isLoading, setIsLoading] = useState(true);
+  const [fxRatesInverted, setFxRatesInvertedState] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -48,6 +52,7 @@ export function CurrencyProvider({ children }: { children: ReactNode }) {
         if (typeof data.displayCurrency === "string" && data.displayCurrency.length === 3) {
           setDisplayCurrencyState(data.displayCurrency);
         }
+        if (typeof data.fxRatesInverted === "boolean") setFxRatesInvertedState(data.fxRatesInverted);
       })
       .catch(() => {})
       .finally(() => {
@@ -79,8 +84,26 @@ export function CurrencyProvider({ children }: { children: ReactNode }) {
     }
   }, [displayCurrency]);
 
+  const setFxRatesInverted = useCallback(async (inverted: boolean) => {
+    const previous = fxRatesInverted;
+    setFxRatesInvertedState(inverted); // optimistic
+    try {
+      const res = await fetch("/api/settings/fx-rate-view", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ inverted }),
+      });
+      if (!res.ok) throw new Error(`Failed to save the rate view (HTTP ${res.status})`);
+    } catch (err) {
+      setFxRatesInvertedState(previous);
+      throw err;
+    }
+  }, [fxRatesInverted]);
+
   return (
-    <CurrencyContext.Provider value={{ displayCurrency, setDisplayCurrency, isLoading }}>
+    <CurrencyContext.Provider
+      value={{ displayCurrency, setDisplayCurrency, isLoading, fxRatesInverted, setFxRatesInverted }}
+    >
       {children}
     </CurrencyContext.Provider>
   );
@@ -98,7 +121,23 @@ export function useDisplayCurrency(): CurrencyContextValue {
         throw new Error("useDisplayCurrency called outside CurrencyProvider");
       },
       isLoading: false,
+      fxRatesInverted: false,
+      setFxRatesInverted: async () => {
+        throw new Error("setFxRatesInverted called outside CurrencyProvider");
+      },
     };
   }
   return ctx;
+}
+
+/**
+ * The "show FX rates inverted" view preference. Pair it with `formatFxRate`
+ * (lib/fx/rate-view.ts) wherever a rate is printed.
+ */
+export function useFxRatesInverted(): {
+  inverted: boolean;
+  setInverted: (inverted: boolean) => Promise<void>;
+} {
+  const { fxRatesInverted, setFxRatesInverted } = useDisplayCurrency();
+  return { inverted: fxRatesInverted, setInverted: setFxRatesInverted };
 }

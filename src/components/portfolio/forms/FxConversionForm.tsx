@@ -13,6 +13,8 @@
  */
 
 import { useEffect, useMemo, useState } from "react";
+import { formatFxRate } from "@/lib/fx/rate-view";
+import { useFxRatesInverted } from "@/components/currency-provider";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
 import {
@@ -40,6 +42,7 @@ import { useAccountHoldingSelection } from "@/lib/hooks/useAccountHoldingSelecti
 import { useSeedAccountFromParam } from "@/lib/hooks/useSeedAccountFromParam";
 
 export default function FxConversionForm() {
+  const { inverted: fxRatesInverted } = useFxRatesInverted();
   const router = useRouter();
   const { editId, isEdit } = useEditId();
 
@@ -420,7 +423,7 @@ export default function FxConversionForm() {
             <div className="rounded-md border border-border/60 bg-muted/30 px-3 py-2 text-xs text-muted-foreground">
               Inferred rate:{" "}
               <span className="font-mono text-foreground">
-                1 {fromCurrency} = {inferredRate.toFixed(6)} {toCurrency}
+                {formatFxRate(inferredRate, fromCurrency, toCurrency, fxRatesInverted)}
               </span>
             </div>
           )}

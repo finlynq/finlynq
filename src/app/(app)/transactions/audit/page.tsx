@@ -6,6 +6,8 @@ import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/com
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { formatCurrency } from "@/lib/currency";
+import { formatFxRate } from "@/lib/fx/rate-view";
+import { useFxRatesInverted } from "@/components/currency-provider";
 import { buildTxDrillUrl } from "@/lib/transactions/drill-url";
 import { ArrowLeft, AlertTriangle, RefreshCw, Check, X } from "lucide-react";
 
@@ -32,6 +34,7 @@ type PreviewState = {
 } | null;
 
 export default function CurrencyAuditPage() {
+  const { inverted: fxRatesInverted } = useFxRatesInverted();
   const [items, setItems] = useState<AuditRow[]>([]);
   const [loading, setLoading] = useState(true);
   const [includeResolved, setIncludeResolved] = useState(false);
@@ -180,7 +183,7 @@ export default function CurrencyAuditPage() {
                       <span className="font-mono">{formatCurrency(p.oldAmount, p.oldCurrency)}</span>
                       <span className="text-muted-foreground">→</span>
                       <span className="font-mono font-semibold">{formatCurrency(p.newAmount, p.newCurrency)}</span>
-                      <span className="text-muted-foreground">(rate {p.rate.toFixed(4)} · {p.source})</span>
+                      <span className="text-muted-foreground">({formatFxRate(p.rate, p.oldCurrency, p.newCurrency, fxRatesInverted)} · {p.source})</span>
                     </div>
                     <p className="text-muted-foreground">
                       Account balance will shift by {formatCurrency(p.newAmount - p.oldAmount, p.newCurrency)} if you convert.

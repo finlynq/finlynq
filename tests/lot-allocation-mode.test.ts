@@ -241,8 +241,9 @@ describe("MCP manage_lots", () => {
 
   it("is registered, counted and marked destructive", () => {
     expect(code("mcp-server/register-tools-pg.ts")).toContain("registerLotsTools(server, ctx)");
-    expect(MCP_TOOL_COUNTS.http).toBe(55);
-    expect(read("README.md")).toContain("55 HTTP / 89 stdio");
+    // 55 when manage_lots landed; 54 since add_snapshot was removed (2026-11-08).
+    expect(MCP_TOOL_COUNTS.http).toBe(54);
+    expect(read("README.md")).toContain("54 HTTP / 89 stdio");
     expect(code("mcp-server/auto-annotations.ts")).toContain("manage_lots: { destructiveHint: true }");
     expect(read("scripts/generate-mcp-tool-catalog.mjs")).toContain('"lots",');
   });

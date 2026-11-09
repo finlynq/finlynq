@@ -93,7 +93,7 @@ import {
 import { registerManageTool } from "./_consolidate";
 
 export function registerPortfolioTools(server: McpServer, ctx: PgToolContext) {
-  const { db, userId, dek, encNote } = ctx;
+  const { db, userId, dek } = ctx;
 
 
   // ── portfolio_* operation tools (canonical portfolio writes) ────────────────
@@ -184,8 +184,9 @@ export function registerPortfolioTools(server: McpServer, ctx: PgToolContext) {
   // preserved: each op still calls the sanctioned operations.ts helper
   // (recordBuy/recordSell/…) — NEVER a raw INSERT. Cash-leg sign convention,
   // DEK-gating, lot hooks, invalidateUser + markSnapshotsDirty all VERBATIM.
-  // add_snapshot stays STANDALONE (it writes portfolio_snapshots, not a ledger
-  // entry — owner decision #5).
+  // add_snapshot was REMOVED 2026-11-08: it wrote a `net_worth_snapshots`
+  // table prod no longer has (every call failed), and net-worth history is
+  // built from transactions automatically (portfolio_snapshots self-heal).
   async function opEntryBuy(argsObj: {
     account?: string;
     account_id?: number;
@@ -483,7 +484,7 @@ export function registerPortfolioTools(server: McpServer, ctx: PgToolContext) {
   registerManageTool(
     server,
     "portfolio_record_entry",
-    "Record a lot-aware portfolio ledger entry; `entry_type` selects the operation. Values: buy, sell, swap, transfer, income_expense, fx_conversion, deposit, withdrawal. Writes the canonical, sign-correct legs (stock +, cash −, sum 0) via the operations engine — cash sleeves must already exist. CREATE-ONLY (edit on the web). For a net-worth snapshot use add_snapshot.",
+    "Record a lot-aware portfolio ledger entry; `entry_type` selects the operation. Values: buy, sell, swap, transfer, income_expense, fx_conversion, deposit, withdrawal. Writes the canonical, sign-correct legs (stock +, cash −, sum 0) via the operations engine — cash sleeves must already exist. CREATE-ONLY (edit on the web).",
     z.discriminatedUnion("entry_type", [
       z.object({
         entry_type: z.literal("buy"),
@@ -621,36 +622,6 @@ export function registerPortfolioTools(server: McpServer, ctx: PgToolContext) {
     },
   );
 
-
-
-  // ── add_snapshot ───────────────────────────────────────────────────────────
-  server.tool(
-    "add_snapshot",
-    "Record a net-worth snapshot for tracking wealth over time",
-    {
-      date: ymdDate.optional().describe("YYYY-MM-DD (default: today)"),
-      note: z.string().optional(),
-    },
-    async ({ date, note }) => {
-      const snapshotDate = date ?? new Date().toISOString().split("T")[0];
-      const balances = await q(db, sql`
-        SELECT a.currency, COALESCE(SUM(t.amount), 0) as balance
-        FROM accounts a
-        LEFT JOIN transactions t ON t.account_id = a.id AND t.user_id = ${userId}
-        WHERE a.user_id = ${userId}
-        GROUP BY a.id, a.currency
-      `);
-      const totalByCurrency: Record<string, number> = {};
-      for (const b of balances) {
-        totalByCurrency[b.currency] = (totalByCurrency[b.currency] ?? 0) + Number(b.balance);
-      }
-      await db.execute(sql`
-        INSERT INTO net_worth_snapshots (user_id, date, balances, note)
-        VALUES (${userId}, ${snapshotDate}, ${JSON.stringify(totalByCurrency)}, ${encNote(note)})
-      `);
-      return text({ success: true, data: { date: snapshotDate, balances: totalByCurrency } });
-    }
-  );
 
 
   // ── op: add — lifted VERBATIM from add_portfolio_holding ───────────────────
@@ -996,7 +967,7 @@ export function registerPortfolioTools(server: McpServer, ctx: PgToolContext) {
         account: z.string().optional().describe("Brokerage account name or alias (fuzzy matched — mistyped/unmatched is REFUSED; 2+ → ambiguous). Pass this OR `account_id`. Uniqueness is scoped per (account, name)."),
         account_id: z.number().int().positive().optional().describe("Brokerage-account FK fast-path — wins over the fuzzy `account` name."),
         symbol: z.string().max(50).optional().describe("Ticker symbol (e.g. 'VEQT.TO', 'BTC')"),
-        currency: supportedCurrencyEnum.optional().describe("ISO 4217 currency (default: parent account's currency). Issue #206: full SUPPORTED_CURRENCIES list."),
+        currency: supportedCurrencyEnum.optional().describe("ISO 4217 currency (default: parent account's currency)."),
         isCrypto: z.boolean().optional().describe("Flag this holding as crypto (default: false)"),
         note: z.string().max(500).optional(),
       }),
@@ -1007,7 +978,7 @@ export function registerPortfolioTools(server: McpServer, ctx: PgToolContext) {
         name: z.string().min(1).max(200).optional().describe("New name"),
         symbol: z.string().max(50).optional().describe("New symbol (pass empty string to clear)"),
         account: z.string().optional().describe("REFUSED (issue #99): account moves create stale state. Use portfolio_record_entry (entry_type: transfer) for an in-kind move of shares between accounts."),
-        currency: supportedCurrencyEnum.optional().describe("ISO 4217 currency code (issue #206: full SUPPORTED_CURRENCIES list)."),
+        currency: supportedCurrencyEnum.optional().describe("ISO 4217 currency code."),
         isCrypto: z.boolean().optional(),
         note: z.string().max(500).optional(),
       }),

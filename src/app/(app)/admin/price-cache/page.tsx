@@ -14,6 +14,8 @@
  * refreshes today's leg.
  */
 
+import { formatRateNumber } from "@/lib/fx/rate-view";
+import { useFxRatesInverted } from "@/components/currency-provider";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -113,6 +115,7 @@ function FetchedAtCell({ iso }: { iso: string }) {
 }
 
 export default function AdminPriceCachePage() {
+  const { inverted: fxRatesInverted } = useFxRatesInverted();
   const [tab, setTab] = useState<Tab>("price");
   const [search, setSearch] = useState("");
   const [date, setDate] = useState("");
@@ -259,7 +262,19 @@ export default function AdminPriceCachePage() {
       return [
         { key: "currency", header: "Currency", accessor: (r) => (r as FxRow).currency, className: "font-mono" },
         dateCol,
-        { key: "rateToUsd", header: "Rate → USD", align: "right", accessor: (r) => (r as FxRow).rateToUsd, render: (r) => fmtNum((r as FxRow).rateToUsd) },
+        // "Show rates inverted" view: units of the currency per 1 USD.
+        fxRatesInverted
+          ? {
+              key: "rateToUsd",
+              header: "Per 1 USD",
+              align: "right",
+              accessor: (r) => {
+                const v = (r as FxRow).rateToUsd;
+                return v > 0 ? 1 / v : 0;
+              },
+              render: (r) => formatRateNumber(1 / (r as FxRow).rateToUsd),
+            }
+          : { key: "rateToUsd", header: "Rate → USD", align: "right", accessor: (r) => (r as FxRow).rateToUsd, render: (r) => formatRateNumber((r as FxRow).rateToUsd) },
         { key: "source", header: "Source", accessor: (r) => (r as FxRow).source },
         fetchedCol,
         freshCol,
@@ -276,7 +291,7 @@ export default function AdminPriceCachePage() {
       freshCol,
       actionsCol,
     ];
-  }, [tab, today]);
+  }, [tab, today, fxRatesInverted]);
 
   const total = data?.total ?? 0;
   const showingFrom = total === 0 ? 0 : offset + 1;

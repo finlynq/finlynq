@@ -519,7 +519,6 @@ const MCP_TOOLS = [
   { name: "add_goal", type: "write", description: "Create a financial goal" },
   { name: "update_goal", type: "write", description: "Update a financial goal" },
   { name: "delete_goal", type: "write", description: "Delete a financial goal" },
-  { name: "add_snapshot", type: "write", description: "Record a net worth snapshot" },
   { name: "add_account", type: "write", description: "Create a new account (optional alias for receipt/import matching)" },
   { name: "update_account", type: "write", description: "Update an account, including its alias" },
   { name: "delete_account", type: "write", description: "Delete an account" },
