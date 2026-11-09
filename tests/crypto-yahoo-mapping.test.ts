@@ -21,7 +21,28 @@ import {
   coinGeckoIdToSymbol,
   cryptoSymbolToYahooTicker,
   stripYahooCryptoNameSuffix,
+  symbolToCoinGeckoId,
 } from "@/lib/crypto-service";
+import { isCryptoSymbol } from "@/lib/fx/supported-currencies";
+
+describe("tokenized gold (GH #395)", () => {
+  it("prices PAXG and XAUT when the holding is marked crypto, with or without a pair suffix", () => {
+    expect(symbolToCoinGeckoId("PAXG")).toBe("pax-gold");
+    expect(symbolToCoinGeckoId("paxg-usd")).toBe("pax-gold");
+    expect(symbolToCoinGeckoId("XAUT")).toBe("tether-gold");
+    expect(symbolToCoinGeckoId("XAUT-USD")).toBe("tether-gold");
+  });
+
+  it("asks Yahoo for PAXG-USD / XAUT-USD", () => {
+    expect(cryptoSymbolToYahooTicker(coinGeckoIdToSymbol("pax-gold")!)).toBe("PAXG-USD");
+    expect(cryptoSymbolToYahooTicker(coinGeckoIdToSymbol("tether-gold")!)).toBe("XAUT-USD");
+  });
+
+  it("never treats them as crypto by symbol alone (a bare PAXG on Yahoo is a stock)", () => {
+    expect(isCryptoSymbol("PAXG")).toBe(false);
+    expect(isCryptoSymbol("XAUT")).toBe(false);
+  });
+});
 
 describe("coinGeckoIdToSymbol", () => {
   it("maps known coin ids back to their base symbol", () => {

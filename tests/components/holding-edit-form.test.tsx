@@ -281,6 +281,46 @@ describe("<HoldingEditForm>", () => {
     expect(postCall).toBeTruthy();
   });
 
+  it("asks again when the crypto box is ticked or unticked (GH #395)", async () => {
+    // PAXG is a stock on Yahoo and a coin (PAX Gold): the answer depends on the box.
+    fetchMock.mockImplementation((url: string) => {
+      if (url === "/api/accounts") {
+        return Promise.resolve({ ok: true, json: () => Promise.resolve([{ id: 1, name: "Brokerage", currency: "USD" }]) });
+      }
+      if (url.startsWith("/api/portfolio/symbol-info")) {
+        const asCoin = url.includes("crypto=1");
+        return Promise.resolve({
+          ok: true,
+          json: () =>
+            Promise.resolve(
+              asCoin
+                ? { symbol: "PAXG", kind: "crypto", currency: "USD", label: "PAXG — crypto, priced in USD", isCrypto: true, source: "coingecko" }
+                : { symbol: "PAXG", kind: "stock", currency: "USD", label: "PAXG — priced in USD", isCrypto: false, source: "yahoo" },
+            ),
+        });
+      }
+      return Promise.resolve({ ok: true, json: () => Promise.resolve([]) });
+    });
+
+    const { container, findByText } = render(
+      <HoldingEditForm defaultAccountId={1} onSave={() => {}} onCancel={() => {}} />,
+    );
+    const symbolInput = container.querySelector('input[placeholder*="ISIN"]') as HTMLInputElement;
+    const box = container.querySelector("#is-crypto") as HTMLInputElement;
+    fireEvent.change(symbolInput, { target: { value: "PAXG" } });
+    expect(await findByText("PAXG — priced in USD", {}, { timeout: 3000 })).toBeTruthy();
+    expect(box.checked).toBe(false);
+
+    fireEvent.click(box);
+    expect(await findByText("PAXG — crypto, priced in USD", {}, { timeout: 3000 })).toBeTruthy();
+    expect(fetchMock.mock.calls.some(([u]) => u === "/api/portfolio/symbol-info?symbol=PAXG&crypto=1")).toBe(true);
+    expect(box.checked).toBe(true);
+
+    fireEvent.click(box);
+    expect(await findByText("PAXG — priced in USD", {}, { timeout: 3000 })).toBeTruthy();
+    expect(box.checked).toBe(false);
+  });
+
   it("swaps a typed ISIN for the Yahoo symbol it resolves to (GH #365)", async () => {
     fetchMock.mockImplementation((url: string) => {
       if (url === "/api/accounts") {

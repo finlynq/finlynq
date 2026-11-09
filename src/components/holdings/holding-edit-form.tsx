@@ -157,6 +157,9 @@ export function HoldingEditForm({
   const [currencyTouched, setCurrencyTouched] = useState(
     Boolean(initialHolding?.currency),
   );
+  // The saved crypto flag is the user's choice on edit; on create the box
+  // follows the ticker until the user touches it.
+  const [cryptoTouched, setCryptoTouched] = useState(!isCreateMode);
 
   // Load accounts so we can show "Account currency" context, fall back
   // to it when the symbol isn't recognized, and populate the Account
@@ -223,6 +226,11 @@ export function HoldingEditForm({
     accounts.find((a) => a.id === accountIdNum)?.currency ?? ""
   ).toUpperCase();
 
+  // Once the user ticks the "Crypto asset" box the lookup describes the ticker
+  // as a coin, and unticking asks again, so PAXG reads as PAX Gold or as the
+  // stock Yahoo has under PAXG depending on the box (GH #395).
+  const askAsCrypto = cryptoTouched && form.isCrypto;
+
   // Symbol-info debounce — exact behavior preserved from the original
   // HoldingEditDialog (400ms, account-currency fallback for "unknown",
   // sticky user override).
@@ -245,7 +253,7 @@ export function HoldingEditForm({
     const t = setTimeout(async () => {
       try {
         const res = await fetch(
-          `/api/portfolio/symbol-info?symbol=${encodeURIComponent(sym)}`,
+          `/api/portfolio/symbol-info?symbol=${encodeURIComponent(sym)}${askAsCrypto ? "&crypto=1" : ""}`,
         );
         if (!res.ok) return;
         const info = (await res.json()) as SymbolInfo;
@@ -262,6 +270,11 @@ export function HoldingEditForm({
             name: f.name.trim() ? f.name : info.name ?? f.name,
           }));
         }
+        // The box follows the ticker until the user sets it.
+        if (!cryptoTouched) {
+          const isCrypto = Boolean(info.isCrypto);
+          setForm((f) => (f.isCrypto === isCrypto ? f : { ...f, isCrypto }));
+        }
         // Auto-fill currency: stock/etf/crypto use the detected currency;
         // unknown falls back to account currency. User overrides are sticky.
         if (!currencyTouched) {
@@ -273,13 +286,7 @@ export function HoldingEditForm({
             );
           } else if (info.currency) {
             setForm((f) =>
-              f.currency === info.currency
-                ? f
-                : {
-                    ...f,
-                    currency: info.currency!,
-                    isCrypto: Boolean(info.isCrypto),
-                  },
+              f.currency === info.currency ? f : { ...f, currency: info.currency! },
             );
           }
         }
@@ -291,7 +298,7 @@ export function HoldingEditForm({
       cancelled = true;
       clearTimeout(t);
     };
-  }, [form.symbol, accountCurrency, currencyTouched, hydrated]);
+  }, [form.symbol, accountCurrency, currencyTouched, hydrated, askAsCrypto, cryptoTouched]);
 
   // Decide whether the holding-currency input is auto-derived or user-overridden.
   const currencyAutoSource: string | null =
@@ -552,7 +559,10 @@ export function HoldingEditForm({
           type="checkbox"
           id="is-crypto"
           checked={form.isCrypto}
-          onChange={(e) => setForm({ ...form, isCrypto: e.target.checked })}
+          onChange={(e) => {
+            setCryptoTouched(true);
+            setForm({ ...form, isCrypto: e.target.checked });
+          }}
           className="h-4 w-4 rounded border-input"
         />
         <Label htmlFor="is-crypto" className="cursor-pointer">

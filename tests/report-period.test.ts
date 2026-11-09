@@ -5,8 +5,33 @@ import {
   REPORT_PERIODS,
   REPORT_PERIOD_LABELS,
   MULTI_YEAR_PRESETS,
+  ALL_TIME_START,
   isReportPeriod,
+  isReportDate,
 } from "@/lib/reports/period";
+
+// A browser date input reports every keystroke of the year: typing "2010"
+// sends 0002-01-01, 0020-01-01 and 0201-01-01 first. Each priced the whole
+// portfolio at that year (2026-11-07 daily check).
+describe("isReportDate", () => {
+  it("accepts real dates from ALL_TIME_START on", () => {
+    for (const d of [ALL_TIME_START, "2010-01-01", "2024-02-29", "2026-11-07", "2099-12-31"]) {
+      expect(isReportDate(d)).toBe(true);
+    }
+  });
+
+  it("rejects the years a half-typed date passes through", () => {
+    for (const d of ["0002-01-01", "0020-01-01", "0201-01-01", "1969-12-31"]) {
+      expect(isReportDate(d)).toBe(false);
+    }
+  });
+
+  it("rejects anything that is not a real YYYY-MM-DD date", () => {
+    for (const d of ["", "2025-02-29", "2026-13-01", "2026-04-31", "2026-1-5", "20101-01-01", "abc", null, undefined, 20260101]) {
+      expect(isReportDate(d)).toBe(false);
+    }
+  });
+});
 
 describe("report periods", () => {
   it("includes yearly", () => {

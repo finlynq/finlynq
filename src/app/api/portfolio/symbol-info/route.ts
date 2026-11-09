@@ -1,12 +1,14 @@
 /**
- * GET /api/portfolio/symbol-info?symbol=AAPL
+ * GET /api/portfolio/symbol-info?symbol=AAPL[&crypto=1]
+ *
+ * `crypto=1` = the form's "Crypto asset" box is ticked by the user.
  *
  * Inspects a symbol and reports what kind of holding it represents, so the
  * Edit Holding dialog can auto-fill the holding's currency:
  *
  *   - Stock/ETF (Yahoo recognizes it): returns price-currency from Yahoo
  *   - Currency code (matches an active fiat or crypto code): cash position
- *   - Crypto symbol (CoinGecko): treats as crypto (priced in USD via CoinGecko)
+ *   - Crypto (box ticked, or a ticker always priced as a coin): priced in USD
  *   - Unknown: caller falls back to the account's currency
  *
  * Lightweight — no DEK needed, just runs lookups against price/crypto services.
@@ -23,6 +25,7 @@ import {
   isSupportedCurrency,
   isCryptoCurrency,
   currencyLabel,
+  pricedAsCrypto,
   SUPPORTED_FIAT_CURRENCIES,
 } from "@/lib/fx/supported-currencies";
 import { db, schema } from "@/db";
@@ -100,17 +103,29 @@ export async function GET(request: NextRequest) {
     });
   }
 
-  // 1. Crypto via CoinGecko? (BTC, ETH, SOL, ...)
-  const cgId = symbolToCoinGeckoId(symbol);
-  if (cgId) {
+  // 1. Crypto? The form's box is ticked (`crypto=1`), or the ticker is always
+  //    priced as a coin (BTC, ETH, SOL, ...). Described exactly as it will be
+  //    priced, so an unticked PAXG goes on to Yahoo, where it is a stock.
+  const wantCrypto = request.nextUrl.searchParams.get("crypto") === "1";
+  if (pricedAsCrypto(symbol, wantCrypto)) {
+    if (symbolToCoinGeckoId(symbol)) {
+      return NextResponse.json<SymbolInfo>({
+        symbol,
+        kind: "crypto",
+        // CoinGecko reports prices in USD by convention — that's the price currency
+        currency: "USD",
+        label: `${symbol} — crypto, priced in USD`,
+        isCrypto: true,
+        source: "coingecko",
+      });
+    }
     return NextResponse.json<SymbolInfo>({
       symbol,
       kind: "crypto",
-      // CoinGecko reports prices in USD by convention — that's the price currency
-      currency: "USD",
-      label: `${symbol} — crypto, priced in USD`,
+      currency: null,
+      label: `${symbol} — not a coin we have prices for`,
       isCrypto: true,
-      source: "coingecko",
+      source: "none",
     });
   }
 

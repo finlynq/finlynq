@@ -137,6 +137,17 @@ export function isCryptoSymbol(symbol: string | null | undefined): boolean {
 }
 
 /**
+ * Whether a holding with this ticker is priced as a coin: its "Crypto asset"
+ * box is ticked, or its ticker is on the list above (which wins whatever the
+ * box says). The ticker lookups that fill in the Add security and holding
+ * forms describe a ticker the same way, so ticking the box on PAXG shows
+ * PAX Gold and unticking it shows the stock Yahoo has under PAXG (GH #395).
+ */
+export function pricedAsCrypto(symbol: string | null | undefined, cryptoBoxTicked: boolean): boolean {
+  return cryptoBoxTicked || isCryptoSymbol(symbol);
+}
+
+/**
  * A holding whose symbol IS a currency code (CAD, USD, EUR, XAU, …)
  * represents a foreign-cash position, NOT a stock. Yahoo would otherwise
  * return data for unrelated tickers ("CAD" -> Cadiz Inc on NASDAQ) that

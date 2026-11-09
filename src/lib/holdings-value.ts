@@ -403,11 +403,17 @@ async function valueHoldingsAtDate(
   );
   const customPriceMap = await loadCustomPriceMap(userId, manualSecurityIds);
 
+  // Only positions held on asOfDate are priced: the loop below skips the rest,
+  // and asking for them priced every holding the user ever had at dates when
+  // nothing was held (a Reports "All Time" start of 1970-01-01, a half-typed
+  // 0002-01-01), about 80 refused Yahoo calls each (2026-11-07).
+  const heldOnDate = holdings.filter((h) => isMaterialQty(qtyByHoldingId.get(h.id) ?? 0));
+
   // Price lookups — exclude currency-code symbols (CAD, USD, …) since
   // Yahoo returns unrelated stock data for those tickers, AND manual securities
   // (priced off the marks above). For asOfDate == today use the regular
   // live-quote endpoint; for past dates use the historical chart endpoint.
-  const stockSymbols = holdings
+  const stockSymbols = heldOnDate
     .filter(h => !isManual(h) && h.symbol && !isCryptoSymbol(h.symbol) && h.isCrypto !== 1 && !isCurrencyCodeSymbol(h.symbol))
     .map(h => h.symbol!);
   const quotes = stockSymbols.length > 0
@@ -425,7 +431,7 @@ async function valueHoldingsAtDate(
   // multi-day snapshot rebuild makes ~1 CoinGecko call per coin.
   const cgPairs: Array<{ coinId: string; symbol: string }> = [];
   const seenCg = new Set<string>();
-  for (const h of holdings) {
+  for (const h of heldOnDate) {
     if (isManual(h)) continue; // manual securities never hit CoinGecko
     if (h.isCrypto === 1 || isCryptoSymbol(h.symbol)) {
       const base = (h.symbol ?? "").toUpperCase().split("-")[0];

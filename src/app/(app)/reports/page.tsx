@@ -20,6 +20,7 @@ import { buildTxDrillUrl } from "@/lib/transactions/drill-url";
 import { CHART_COLORS } from "@/lib/chart-colors";
 import { todayISO } from "@/lib/utils/date";
 import { AccountFilter } from "./_components/account-filter";
+import { ReportDateInput } from "./_components/report-date-input";
 import { serializeAccountIds } from "@/lib/reports/account-filter";
 import {
   ALL_TIME_START,
@@ -450,11 +451,11 @@ export default function ReportsPage() {
             {/* Custom dates */}
             <div>
               <Label className="text-xs text-muted-foreground mb-1 block">Start</Label>
-              <Input
-                type="date"
+              <ReportDateInput
                 value={startDate}
-                onChange={(e) => {
-                  setStartDate(e.target.value);
+                aria-label="Start date"
+                onCommit={(date) => {
+                  setStartDate(date);
                   setDatePreset("custom");
                 }}
                 className="w-36"
@@ -462,11 +463,11 @@ export default function ReportsPage() {
             </div>
             <div>
               <Label className="text-xs text-muted-foreground mb-1 block">End</Label>
-              <Input
-                type="date"
+              <ReportDateInput
                 value={endDate}
-                onChange={(e) => {
-                  setEndDate(e.target.value);
+                aria-label="End date"
+                onCommit={(date) => {
+                  setEndDate(date);
                   setDatePreset("custom");
                 }}
                 className="w-36"

@@ -72,7 +72,9 @@ export function isPastGracePeriod(
  */
 export function priceCacheKeyFor(symbol: string, isCrypto: boolean): string {
   const s = symbol.trim();
-  return isCrypto || isCryptoSymbol(s) ? `CRYPTO:${s.toUpperCase()}` : s;
+  // crypto-service writes the BASE coin symbol ("BTC-USD" is cached as
+  // CRYPTO:BTC), so the pair suffix comes off here too.
+  return isCrypto || isCryptoSymbol(s) ? `CRYPTO:${s.toUpperCase().split("-")[0]}` : s;
 }
 
 /**
