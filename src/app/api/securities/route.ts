@@ -32,6 +32,22 @@ import { buildNameFields, decryptName, decryptNamedRows } from "@/lib/crypto/enc
 import { resolveOrCreateSecurity, gcOrphanSecurity } from "@/lib/securities/resolve";
 import { loadCustomPriceMap } from "@/lib/securities/custom-prices";
 import { findNeverPricedSecurityIds } from "@/lib/securities/price-coverage";
+import { isPgErrorCode, pgErrorConstraint } from "@/lib/db-utils";
+
+const HOLDING_NAME_UNIQUE = "portfolio_holdings_user_account_lookup_uniq";
+
+/** 409 for linking a security into an account that already has a position
+ *  with the same name (the per-account unique index over name_lookup). */
+function duplicateHoldingNameResponse(positionId?: number): NextResponse {
+  return NextResponse.json(
+    {
+      error:
+        "This account already has a holding with the same name. Rename one of them, or use the existing holding.",
+      ...(positionId != null ? { positionId } : {}),
+    },
+    { status: 409 },
+  );
+}
 
 interface SecurityAccountLink {
   accountId: number;
@@ -426,24 +442,53 @@ export const POST = apiHandler(
       );
     }
 
+    // Position names are unique per account (`portfolio_holdings_user_account_
+    // lookup_uniq` over name_lookup), and the new position copies the
+    // security's name. An account that already has a position with that name
+    // under another (or no) security tripped the index and the user got a raw
+    // 500 (prod diagnostics_log 2026-11-07 16:32). Refuse it plainly instead.
+    if (sec.nameLookup) {
+      const sameName = await db
+        .select({ id: schema.portfolioHoldings.id })
+        .from(schema.portfolioHoldings)
+        .where(
+          and(
+            eq(schema.portfolioHoldings.userId, userId),
+            eq(schema.portfolioHoldings.accountId, body.accountId),
+            eq(schema.portfolioHoldings.nameLookup, sec.nameLookup),
+          ),
+        )
+        .get();
+      if (sameName) return duplicateHoldingNameResponse(sameName.id);
+    }
+
     // Create the position, copying the security's ciphertext verbatim (same
     // DEK). Then the mandatory holding_accounts dual-write.
-    const inserted = await db
-      .insert(schema.portfolioHoldings)
-      .values({
-        userId,
-        accountId: body.accountId,
-        currency: sec.currency,
-        isCrypto: sec.isCrypto ?? 0,
-        isCash: sec.isCash,
-        securityId: sec.id,
-        note: "linked via securities page",
-        nameCt: sec.nameCt,
-        nameLookup: sec.nameLookup,
-        symbolCt: sec.symbolCt,
-        symbolLookup: sec.symbolLookup,
-      })
-      .returning({ id: schema.portfolioHoldings.id });
+    let inserted: { id: number }[];
+    try {
+      inserted = await db
+        .insert(schema.portfolioHoldings)
+        .values({
+          userId,
+          accountId: body.accountId,
+          currency: sec.currency,
+          isCrypto: sec.isCrypto ?? 0,
+          isCash: sec.isCash,
+          securityId: sec.id,
+          note: "linked via securities page",
+          nameCt: sec.nameCt,
+          nameLookup: sec.nameLookup,
+          symbolCt: sec.symbolCt,
+          symbolLookup: sec.symbolLookup,
+        })
+        .returning({ id: schema.portfolioHoldings.id });
+    } catch (err) {
+      // Two requests racing past the pre-check above.
+      if (isPgErrorCode(err, "23505") && pgErrorConstraint(err) === HOLDING_NAME_UNIQUE) {
+        return duplicateHoldingNameResponse();
+      }
+      throw err;
+    }
     const positionId = Array.isArray(inserted) ? inserted[0]?.id : undefined;
     if (positionId == null) {
       return NextResponse.json({ error: "Failed to create position" }, { status: 500 });
