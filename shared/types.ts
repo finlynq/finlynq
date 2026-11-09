@@ -1195,6 +1195,8 @@ export interface LoanScheduleRow {
   balance: number;
   /** True when the user set this payment's interest by hand. */
   interestOverridden?: boolean;
+  /** True when the user set this payment's amount by hand (interest stays calculated). */
+  paymentOverridden?: boolean;
 }
 
 // The schedule itself plus the figures worked out from it. Amounts are in the
@@ -1220,6 +1222,10 @@ export interface LoanScheduleState {
   manualSchedule: LoanManualRow[] | null;
   // Payment date -> interest the user set for that calculated row.
   interestOverrides: Record<string, number>;
+  // Payment date -> the whole payment the user set for that calculated row
+  // (0 = skipped); its interest stays calculated from the balance. Absent from
+  // a server older than 2026-11-09, which cannot edit a payment.
+  paymentOverrides?: Record<string, number>;
   summary: LoanSchedule;
 }
 
@@ -1234,6 +1240,9 @@ export interface LoanScheduleChange {
   // Date -> interest for calculated rows; a null amount removes that edit.
   interestOverrides?: Record<string, number | null> | null;
   clearInterestOverrides?: boolean;
+  // Date -> the whole payment for calculated rows; a null amount removes that edit.
+  paymentOverrides?: Record<string, number | null> | null;
+  clearPaymentOverrides?: boolean;
 }
 
 // One interest transaction on the loan's account (amount as stored: negative).

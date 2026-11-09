@@ -1,11 +1,13 @@
 // One loan: what is owed, its terms, and its payment schedule.
 //
 // The schedule is the one every surface shows: the server builds it from the
-// stored loan and applies the loan's own manual schedule, edited interest and
-// interest method (GET /api/loans/schedule). It can be changed here the same
-// two ways as on the web: tap a payment to set the interest the lender really
-// charged, or make the whole schedule your own and change each row. Uploading a
-// spreadsheet stays on the web app.
+// stored loan and applies the loan's own manual schedule, edited payments,
+// edited interest and interest method (GET /api/loans/schedule). It can be
+// changed here the same ways as on the web: tap a payment to set what was really
+// paid (its interest stays worked out from the balance, so later payments and
+// the end date follow) or the interest the lender really charged, or make the
+// whole schedule your own and change each row. Uploading a spreadsheet stays on
+// the web app.
 //
 // Every amount is in the LOAN's own currency.
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -60,6 +62,7 @@ type Row =
 
 const NETWORK_ERROR = "Cannot connect to server";
 const amount = (s: string) => parseFloat(s.trim().replace(",", "."));
+const cents = (n: number) => Math.round(n * 100);
 
 export default function LoanDetailScreen({ navigation, route }: Props) {
   const { colors } = useTheme();
@@ -131,7 +134,11 @@ export default function LoanDetailScreen({ navigation, route }: Props) {
 
   const schedule = state?.summary.schedule ?? [];
   const manual = (state?.mode ?? loan.scheduleMode) === "manual";
-  const editedCount = state ? Object.keys(state.interestOverrides ?? {}).length : 0;
+  const editedInterestCount = state ? Object.keys(state.interestOverrides ?? {}).length : 0;
+  const editedPaymentCount = state ? Object.keys(state.paymentOverrides ?? {}).length : 0;
+  // A server older than 2026-11-09 sends no paymentOverrides and would drop a
+  // payment edit without a word, so the payment is only offered when it does.
+  const paymentEditable = manual || state?.paymentOverrides != null;
 
   const { past, upcoming } = useMemo(() => splitSchedule(schedule, localDateISO()), [schedule]);
 
@@ -204,21 +211,60 @@ export default function LoanDetailScreen({ navigation, route }: Props) {
       // Lay this one row over the schedule; the others stay as they are.
       change = { manualSchedule: [{ date: editRow.date, payment, interest }], mergeRows: true };
     } else {
-      change = { interestOverrides: { [editRow.date]: interest } };
+      // Only what the user changed is sent: sending the payment back unchanged
+      // would pin it, and sending the interest would stop it following the
+      // balance when an earlier payment changes.
+      change = {};
+      if (paymentEditable) {
+        const payment = amount(editPayment);
+        if (!Number.isFinite(payment) || payment < 0) {
+          setEditError("Enter the payment, 0 or more (0 for a skipped payment).");
+          return;
+        }
+        if (cents(payment) !== cents(editRow.payment)) change.paymentOverrides = { [editRow.date]: payment };
+      }
+      if (cents(interest) !== cents(editRow.interest)) change.interestOverrides = { [editRow.date]: interest };
+      if (!change.paymentOverrides && !change.interestOverrides) {
+        setEditRow(null);
+        return;
+      }
     }
     setEditError(null);
     if (await applyChange(change, setEditError)) setEditRow(null);
   };
 
-  const resetEdit = async () => {
+  const resetEdit = async (field: "payment" | "interest") => {
     if (!editRow) return;
     setEditError(null);
-    if (await applyChange({ interestOverrides: { [editRow.date]: null } }, setEditError)) setEditRow(null);
+    const change =
+      field === "payment"
+        ? { paymentOverrides: { [editRow.date]: null } }
+        : { interestOverrides: { [editRow.date]: null } };
+    if (await applyChange(change, setEditError)) setEditRow(null);
   };
 
-  const resetAllEdits = () => {
+  const resetAllInterest = () => {
     setActionError(null);
     void applyChange({ clearInterestOverrides: true }, setActionError);
+  };
+
+  // Asks first: every edited payment goes back at once, and the end date moves.
+  const resetAllPayments = () => {
+    Alert.alert(
+      "Reset the edited payments?",
+      `${editedPaymentCount} edited ${editedPaymentCount === 1 ? "payment goes" : "payments go"} back to the loan's regular payment, and the interest, balances and end date are worked out again.`,
+      [
+        { text: "Cancel", style: "cancel" },
+        {
+          text: "Reset",
+          style: "destructive",
+          onPress: () => {
+            setActionError(null);
+            void applyChange({ clearPaymentOverrides: true }, setActionError);
+          },
+        },
+      ],
+    );
   };
 
   const makeOwn = () => {
@@ -328,13 +374,22 @@ export default function LoanDetailScreen({ navigation, route }: Props) {
           <Text style={[styles.note, { color: colors.mutedForeground }]}>
             {manual
               ? "These are your own rows. Tap a payment to change its amount or its interest."
-              : "Worked out from the loan's terms. Tap a payment to set the interest your lender really charged."}
+              : paymentEditable
+                ? "Worked out from the loan's terms. Tap a payment to change what you paid (more, less, or 0 for a skipped one) or the interest your lender really charged."
+                : "Worked out from the loan's terms. Tap a payment to set the interest your lender really charged."}
           </Text>
           <View style={styles.actions}>
-            {!manual && editedCount > 0 ? (
+            {!manual && editedPaymentCount > 0 ? (
               <ActionChip
-                label={`Reset ${editedCount} edited ${editedCount === 1 ? "payment" : "payments"}`}
-                onPress={resetAllEdits}
+                label={`Reset ${editedPaymentCount} edited ${editedPaymentCount === 1 ? "payment" : "payments"}`}
+                onPress={resetAllPayments}
+                disabled={busy}
+              />
+            ) : null}
+            {!manual && editedInterestCount > 0 ? (
+              <ActionChip
+                label={`Reset edited interest on ${editedInterestCount} ${editedInterestCount === 1 ? "payment" : "payments"}`}
+                onPress={resetAllInterest}
                 disabled={busy}
               />
             ) : null}
@@ -439,6 +494,11 @@ export default function LoanDetailScreen({ navigation, route }: Props) {
                 </Text>
                 <Text style={[styles.payAmount, { color: colors.foreground }]}>
                   {formatCurrency(r.payment, currency)}
+                  {r.paymentOverridden ? (
+                    <Text style={[styles.payMeta, { color: colors.mutedForeground }]}>
+                      {r.payment === 0 ? " (skipped)" : " (edited)"}
+                    </Text>
+                  ) : null}
                 </Text>
               </View>
               <Text style={[styles.payBreakdown, { color: colors.mutedForeground }]}>
@@ -471,7 +531,7 @@ export default function LoanDetailScreen({ navigation, route }: Props) {
                   </TouchableOpacity>
                 </View>
 
-                {manual ? (
+                {paymentEditable ? (
                   <>
                     <Text style={[styles.fieldLabel, { color: colors.mutedForeground }]}>PAYMENT</Text>
                     <TextInput
@@ -496,15 +556,26 @@ export default function LoanDetailScreen({ navigation, route }: Props) {
                 <Text style={[styles.note, { color: colors.mutedForeground, marginTop: 8 }]}>
                   {manual
                     ? "What is left of the payment after interest comes off the balance."
-                    : `The payment stays ${formatCurrency(editRow.payment, currency)}, so the rest comes off the balance and later payments follow.`}
+                    : paymentEditable
+                      ? "A different payment keeps its interest worked out from the balance. A different interest keeps the payment. Either way the rest comes off the balance, and later payments and the end date follow."
+                      : `The payment stays ${formatCurrency(editRow.payment, currency)}, so the rest comes off the balance and later payments follow.`}
                 </Text>
                 {editError ? <Text style={[styles.error, { color: colors.destructive }]}>{editError}</Text> : null}
 
                 <View style={styles.sheetButtons}>
+                  {!manual && editRow.paymentOverridden ? (
+                    <TouchableOpacity
+                      accessibilityRole="button"
+                      onPress={busy ? undefined : () => void resetEdit("payment")}
+                      style={[styles.secondaryBtn, { borderColor: colors.border }]}
+                    >
+                      <Text style={[styles.secondaryText, { color: colors.foreground }]}>Use the regular payment</Text>
+                    </TouchableOpacity>
+                  ) : null}
                   {!manual && editRow.interestOverridden ? (
                     <TouchableOpacity
                       accessibilityRole="button"
-                      onPress={busy ? undefined : resetEdit}
+                      onPress={busy ? undefined : () => void resetEdit("interest")}
                       style={[styles.secondaryBtn, { borderColor: colors.border }]}
                     >
                       <Text style={[styles.secondaryText, { color: colors.foreground }]}>Use the calculated interest</Text>

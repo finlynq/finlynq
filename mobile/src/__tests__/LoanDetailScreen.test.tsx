@@ -72,6 +72,7 @@ const state = (rows: LoanScheduleRow[], over: Partial<LoanScheduleState> = {}): 
     mode,
     manualSchedule: null,
     interestOverrides: {},
+    paymentOverrides: {},
     summary: { schedule: rows, totalInterest: 764.34, payoffDate: "2028-01-15", scheduleMode: mode },
     ...over,
   };
@@ -247,8 +248,9 @@ describe("LoanDetailScreen: changing the schedule", () => {
     const { findByText, getByLabelText, queryByLabelText } = render(screen());
     await findByText(/#2 · next/);
     fireEvent.press(getByLabelText("Payment on 2026-03-15"));
-    // A calculated schedule keeps its payment, so only the interest is asked for.
-    expect(queryByLabelText("Payment")).toBeNull();
+    // The payment is offered too, but left as it is it is not sent: sending it
+    // would pin a payment the user never changed.
+    expect(getByLabelText("Payment")).toBeTruthy();
     fireEvent.changeText(getByLabelText("Interest"), "82,5");
     fireEvent.press(getByLabelText("Save payment"));
 
@@ -305,7 +307,7 @@ describe("LoanDetailScreen: changing the schedule", () => {
     getSchedule.mockResolvedValue(ok(state(fourRows, edited)));
     saveSchedule.mockResolvedValue(ok(state(fourRows)));
     const { findByText } = render(screen());
-    fireEvent.press(await findByText("Reset 1 edited payment"));
+    fireEvent.press(await findByText("Reset edited interest on 1 payment"));
     await waitFor(() => expect(saveSchedule).toHaveBeenCalledWith({ loanId: 9, clearInterestOverrides: true }));
   });
 
@@ -370,5 +372,145 @@ describe("LoanDetailScreen: changing the schedule", () => {
     confirm("Go back");
     await waitFor(() => expect(saveSchedule).toHaveBeenCalledWith({ loanId: 9, manualSchedule: null }));
     expect(await findByText("Payment schedule")).toBeTruthy();
+  });
+});
+
+describe("LoanDetailScreen: editing a payment", () => {
+  const paidMore = state(
+    [
+      fourRows[0],
+      row(2, "2026-03-15", { payment: 600, principal: 540, paymentOverridden: true }),
+      ...fourRows.slice(2),
+    ],
+    { paymentOverrides: { "2026-03-15": 600 } },
+  );
+
+  // The interest stays worked out from the balance; only the payment is sent.
+  it("sets what was really paid on one payment, leaving its interest calculated", async () => {
+    getSchedule.mockResolvedValue(ok(state(fourRows)));
+    saveSchedule.mockResolvedValue(ok(paidMore));
+    const { findByText, getByLabelText, queryByLabelText } = render(screen());
+    await findByText(/#2 · next/);
+    fireEvent.press(getByLabelText("Payment on 2026-03-15"));
+    fireEvent.changeText(getByLabelText("Payment"), "600");
+    fireEvent.press(getByLabelText("Save payment"));
+
+    await waitFor(() =>
+      expect(saveSchedule).toHaveBeenCalledWith({ loanId: 9, paymentOverrides: { "2026-03-15": 600 } }),
+    );
+    expect(await findByText(/\$600\.00 \(edited\)/)).toBeTruthy();
+    await waitFor(() => expect(queryByLabelText("Payment")).toBeNull());
+  });
+
+  it("records a skipped payment as 0 and marks it skipped", async () => {
+    getSchedule.mockResolvedValue(ok(state(fourRows)));
+    saveSchedule.mockResolvedValue(
+      ok(
+        state(
+          [fourRows[0], row(2, "2026-03-15", { payment: 0, principal: -60, paymentOverridden: true }), ...fourRows.slice(2)],
+          { paymentOverrides: { "2026-03-15": 0 } },
+        ),
+      ),
+    );
+    const { findByText, getByLabelText } = render(screen());
+    await findByText(/#2 · next/);
+    fireEvent.press(getByLabelText("Payment on 2026-03-15"));
+    fireEvent.changeText(getByLabelText("Payment"), "0");
+    fireEvent.press(getByLabelText("Save payment"));
+    await waitFor(() =>
+      expect(saveSchedule).toHaveBeenCalledWith({ loanId: 9, paymentOverrides: { "2026-03-15": 0 } }),
+    );
+    expect(await findByText(/\$0\.00 \(skipped\)/)).toBeTruthy();
+  });
+
+  it("sends a changed payment and a changed interest in one change", async () => {
+    getSchedule.mockResolvedValue(ok(state(fourRows)));
+    saveSchedule.mockResolvedValue(ok(paidMore));
+    const { findByText, getByLabelText } = render(screen());
+    await findByText(/#2 · next/);
+    fireEvent.press(getByLabelText("Payment on 2026-03-15"));
+    fireEvent.changeText(getByLabelText("Payment"), "650,25");
+    fireEvent.changeText(getByLabelText("Interest"), "70");
+    fireEvent.press(getByLabelText("Save payment"));
+    await waitFor(() =>
+      expect(saveSchedule).toHaveBeenCalledWith({
+        loanId: 9,
+        paymentOverrides: { "2026-03-15": 650.25 },
+        interestOverrides: { "2026-03-15": 70 },
+      }),
+    );
+  });
+
+  it("closes without asking the server when nothing was changed", async () => {
+    getSchedule.mockResolvedValue(ok(state(fourRows)));
+    const { findByText, getByLabelText, queryByLabelText } = render(screen());
+    await findByText(/#2 · next/);
+    fireEvent.press(getByLabelText("Payment on 2026-03-15"));
+    fireEvent.press(getByLabelText("Save payment"));
+    await waitFor(() => expect(queryByLabelText("Payment")).toBeNull());
+    expect(saveSchedule).not.toHaveBeenCalled();
+  });
+
+  it("refuses a payment below 0, without asking the server", async () => {
+    getSchedule.mockResolvedValue(ok(state(fourRows)));
+    const { findByText, getByLabelText, getByText } = render(screen());
+    await findByText(/#2 · next/);
+    fireEvent.press(getByLabelText("Payment on 2026-03-15"));
+    fireEvent.changeText(getByLabelText("Payment"), "-10");
+    fireEvent.press(getByLabelText("Save payment"));
+    expect(getByText("Enter the payment, 0 or more (0 for a skipped payment).")).toBeTruthy();
+    expect(saveSchedule).not.toHaveBeenCalled();
+  });
+
+  // e.g. a payment so large that a later edited date is no longer on the schedule.
+  it("keeps the form open with the server's message when a payment is refused", async () => {
+    getSchedule.mockResolvedValue(ok(state(fourRows)));
+    const message =
+      "With these payments the loan is paid off on 2026-03-15, so 2026-05-15 is no longer on its schedule. Reset the edits on that date first.";
+    saveSchedule.mockResolvedValue({ success: false, error: message });
+    const { findByText, getByLabelText } = render(screen());
+    await findByText(/#2 · next/);
+    fireEvent.press(getByLabelText("Payment on 2026-03-15"));
+    fireEvent.changeText(getByLabelText("Payment"), "20000");
+    fireEvent.press(getByLabelText("Save payment"));
+    expect(await findByText(message)).toBeTruthy();
+    expect(getByLabelText("Payment")).toBeTruthy();
+  });
+
+  it("puts one payment back to the regular payment", async () => {
+    getSchedule.mockResolvedValue(ok(paidMore));
+    saveSchedule.mockResolvedValue(ok(state(fourRows)));
+    const { findByText, getByLabelText, getByText, queryByText } = render(screen());
+    await findByText(/\$600\.00 \(edited\)/);
+    fireEvent.press(getByLabelText("Payment on 2026-03-15"));
+    // Only the edit this payment has can be undone.
+    expect(queryByText("Use the calculated interest")).toBeNull();
+    fireEvent.press(getByText("Use the regular payment"));
+    await waitFor(() =>
+      expect(saveSchedule).toHaveBeenCalledWith({ loanId: 9, paymentOverrides: { "2026-03-15": null } }),
+    );
+  });
+
+  it("resets every edited payment after asking, apart from edited interest", async () => {
+    getSchedule.mockResolvedValue(ok(paidMore));
+    saveSchedule.mockResolvedValue(ok(state(fourRows)));
+    const { findByText, queryByText } = render(screen());
+    fireEvent.press(await findByText("Reset 1 edited payment"));
+    // No interest was edited, so that reset is not offered.
+    expect(queryByText(/Reset edited interest/)).toBeNull();
+    expect(saveSchedule).not.toHaveBeenCalled();
+    confirm("Reset");
+    await waitFor(() => expect(saveSchedule).toHaveBeenCalledWith({ loanId: 9, clearPaymentOverrides: true }));
+  });
+
+  // A server without payment editing would drop the change and answer as if saved.
+  it("does not offer the payment when the server cannot edit one", async () => {
+    getSchedule.mockResolvedValue(ok({ ...state(fourRows), paymentOverrides: undefined }));
+    const { findByText, getByLabelText, queryByLabelText, getByText } = render(screen());
+    await findByText(/#2 · next/);
+    expect(getByText(/Tap a payment to set the interest/)).toBeTruthy();
+    fireEvent.press(getByLabelText("Payment on 2026-03-15"));
+    expect(queryByLabelText("Payment")).toBeNull();
+    expect(getByLabelText("Interest")).toBeTruthy();
   });
 });
