@@ -61,7 +61,9 @@ export async function GET(request: NextRequest) {
 
   return NextResponse.json({
     from, to, date,
-    rate: Math.round(rate * 100000000) / 100000000,
+    // 10 significant digits, not 8 decimal places: 8dp left a small currency's
+    // rate with 4 digits (UZS 0.00008341), which the UI then showed and inverted.
+    rate: Number(rate.toPrecision(10)),
     source,
     amount,
     converted: amount != null ? Math.round(amount * rate * 100) / 100 : null,
