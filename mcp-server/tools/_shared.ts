@@ -15,7 +15,7 @@ import { z } from "zod";
 import { normalizeDbRows } from "../../src/lib/db-utils";
 import { decryptField } from "../../src/lib/crypto/envelope";
 import { encryptName, nameLookup } from "../../src/lib/crypto/encrypted-columns";
-import { SUPPORTED_CURRENCIES } from "../../src/lib/fx/supported-currencies";
+import { SUPPORTED_CURRENCIES, isReportableCurrency } from "../../src/lib/fx/supported-currencies";
 import { resolveOrCreateInvestmentIncomeCategory } from "../../src/lib/investment-income-category";
 import {
   pickInvestmentCategoryByPayee,
@@ -168,11 +168,27 @@ export function suggestionList(
     .join(", ");
 }
 
-// Issue #206 — currency enum widened to the full SUPPORTED_CURRENCIES list
-// (32 fiats + 4 cryptos + 4 metals). Zod requires the literal-tuple cast.
-export const supportedCurrencyEnum = z.enum(
-  SUPPORTED_CURRENCIES as unknown as [string, ...string[]]
-);
+const ENGINE_CURRENCY_SET = new Set<string>(SUPPORTED_CURRENCIES);
+
+/** True for any code the MCP tools accept as a record currency. */
+export function isAcceptedCurrencyCode(code: string): boolean {
+  return ENGINE_CURRENCY_SET.has(code) || isReportableCurrency(code);
+}
+
+/**
+ * A record currency param: the FX-engine list (fiat + crypto + metals) PLUS
+ * every currency a user can report in (146, GH #397 follow-up 2026-11-09).
+ * Was a z.enum of the 40-code engine list, so an assistant could not create a
+ * UZS account, subscription or holding the web app allows. A typed string +
+ * pattern rather than a ~150-value enum: it stays fully typed for strict
+ * clients (GH #341) without adding ~8 KB of codes to every tools/list.
+ * Cash sleeves are symbol-less (`investment-account.ts`), so a new currency
+ * here never reaches the ticker-vs-cash classification (isCurrencyCodeSymbol).
+ */
+export const supportedCurrencyEnum = z
+  .string()
+  .regex(/^[A-Z]{3,4}$/, "Use an upper-case ISO 4217 code such as USD, EUR or UZS")
+  .refine(isAcceptedCurrencyCode, { message: "Unsupported currency code" });
 
 /**
  * Fuzzy match against a row list: exact-name → exact-alias → startsWith-name →

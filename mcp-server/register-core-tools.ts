@@ -28,7 +28,7 @@ import {
   getRateMap,
   convertWithRateMap,
 } from "../src/lib/fx-service.js";
-import { SUPPORTED_CURRENCIES } from "../src/lib/fx/supported-currencies.js";
+import { supportedCurrencyEnum } from "./tools/_shared.js";
 import { resolveTxAmountsCore } from "../src/lib/currency-conversion.js";
 import {
   invalidateUser as invalidateUserTxCache,
@@ -366,11 +366,7 @@ function sqliteErr(msg: string) {
   return { content: [{ type: "text" as const, text: `Error: ${msg}` }], isError: true };
 }
 
-// Issue #206 — currency enum widened to the full SUPPORTED_CURRENCIES list
-// (32 fiats + 4 cryptos + 4 metals). Mirrors register-tools-pg.ts.
-const supportedCurrencyEnum = z.enum(
-  SUPPORTED_CURRENCIES as unknown as [string, ...string[]]
-);
+// Record-currency param shared with the HTTP tools (tools/_shared.ts).
 
 /**
  * Stream D Phase 4 refusal helper (2026-05-03).

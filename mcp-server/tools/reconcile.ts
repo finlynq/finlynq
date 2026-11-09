@@ -752,7 +752,7 @@ export function registerReconcileTools(server: McpServer, ctx: PgToolContext) {
           .number()
           .describe("The bank's reported balance on `date` (maps to the bank_daily_balances.balance column)."),
         currency: supportedCurrencyEnum.describe(
-          "ISO 4217 currency of the anchor (issue #206: full SUPPORTED_CURRENCIES list).",
+          "ISO 4217 currency of the anchor.",
         ),
       }),
       z.object({
