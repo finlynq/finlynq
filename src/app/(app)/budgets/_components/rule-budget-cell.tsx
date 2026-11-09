@@ -108,7 +108,8 @@ export function RuleBudgetCell({
         <div
           role="dialog"
           aria-label={label}
-          className="absolute right-0 top-7 z-30 w-72 space-y-2.5 rounded-lg border bg-popover p-3 text-left text-sm text-popover-foreground shadow-lg"
+          /* Phones put the cell at the left of the row, wider screens near the right. */
+          className="absolute left-0 top-7 z-30 w-72 sm:left-auto sm:right-0 space-y-2.5 rounded-lg border bg-popover p-3 text-left text-sm text-popover-foreground shadow-lg"
         >
           <div className="flex items-baseline justify-between gap-2">
             <span className="text-muted-foreground">
