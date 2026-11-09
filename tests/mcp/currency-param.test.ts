@@ -30,7 +30,7 @@ describe("supportedCurrencyEnum (record currency param)", () => {
   });
 
   it("renders as a typed string in the JSON schema (no untyped node)", () => {
-    const schema = z.toJSONSchema(z.object({ currency: supportedCurrencyEnum.optional() })) as {
+    const schema = z.toJSONSchema(z.object({ currency: supportedCurrencyEnum.optional() })) as unknown as {
       properties: { currency: { type?: string; pattern?: string } };
     };
     expect(schema.properties.currency.type).toBe("string");
