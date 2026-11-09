@@ -23,6 +23,7 @@ import {
   SUPPORTED_CURRENCIES,
   isCryptoCurrency,
   isMetalCurrency,
+  isReportableCurrency,
 } from "@/lib/fx/supported-currencies";
 
 export type RateSource = "yahoo" | "coingecko" | "stooq" | "override" | "stale" | "fallback";
@@ -79,10 +80,17 @@ const FALLBACK_CURRENCY_SET = new Set<string>(); // populated below after FALLBA
 const ISO_DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 const FX_MIN_DATE = "1970-01-01";
 
+// Accepts the FX-engine set (SUPPORTED_CURRENCIES: fiat + crypto + metals) AND
+// every currency a user can report in (REPORTABLE_FIAT_CURRENCIES, 146). Before
+// GH #397 only the first, so the MCP FX tools (get_fx_rate, convert_amount,
+// manage_fx_overrides) refused UZS while the app let users report in it, and
+// the override tool could not repair a bad UZS rate. This is a CURRENCY
+// check, not the ticker-vs-cash classification, so the reportable list is
+// safe here (the two lists stay separate everywhere else).
 export function validateCurrencyCode(code: string): string {
   const c = (code ?? "").trim().toUpperCase();
   if (!c) throw new Error("currency required");
-  if (!SUPPORTED_CURRENCY_SET.has(c) && !FALLBACK_CURRENCY_SET.has(c)) {
+  if (!SUPPORTED_CURRENCY_SET.has(c) && !FALLBACK_CURRENCY_SET.has(c) && !isReportableCurrency(c)) {
     throw new Error(`unknown currency: ${c}`);
   }
   return c;

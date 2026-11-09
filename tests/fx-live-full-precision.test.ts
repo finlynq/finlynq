@@ -30,7 +30,7 @@ vi.mock("@/db", () => {
   };
 });
 
-import { getRateToUsdDetailed, isRoundedSmallRate } from "@/lib/fx-service";
+import { getRateToUsdDetailed, isRoundedSmallRate, validateCurrencyCode } from "@/lib/fx-service";
 import { todayISO } from "@/lib/utils/date";
 
 const NOW_S = Math.floor(Date.now() / 1000);
@@ -107,6 +107,13 @@ describe("live FX rate uses the unrounded close", () => {
     for (const r of [5.543544466490857e-5, 8.340909698745236e-5, 3.79e-5, 3.197e-4, 0.001, 0.0105, 1.1197, 0, -0.0001]) {
       expect(isRoundedSmallRate(r)).toBe(false);
     }
+  });
+
+  it("the FX tools accept every reportable currency (UZS, GH #397), not just the engine list", () => {
+    for (const c of ["UZS", "uzs", "IDR", "KZT", "EUR", "BTC", "XAU"]) {
+      expect(validateCurrencyCode(c)).toBe(c.toUpperCase());
+    }
+    for (const c of ["XYZ", "", "  "]) expect(() => validateCurrencyCode(c)).toThrow();
   });
 
   it("neither close nor meta → not a yahoo rate", async () => {
