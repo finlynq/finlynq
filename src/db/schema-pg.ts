@@ -534,8 +534,13 @@ export const loans = pgTable("loans", {
   // schedule-building caller spreads into `buildLoanSchedule`.
   //   manualSchedule: a complete user-supplied schedule; REPLACES the calculation.
   //   interestOverrides: { "YYYY-MM-DD": amount } for single calculated rows.
+  //   paymentOverrides (below): the payment for single calculated rows.
   manualSchedule: jsonb("manual_schedule").$type<Array<{ date: string; payment: number; interest: number }> | null>(),
   interestOverrides: jsonb("interest_overrides").$type<Record<string, number> | null>(),
+  // 2026-11-09 — { "YYYY-MM-DD": amount }: the whole payment made on single
+  // calculated rows. Interest stays calculated, so principal and every later
+  // balance follow. Also read through `loanScheduleExtras`.
+  paymentOverrides: jsonb("payment_overrides").$type<Record<string, number> | null>(),
   // 2026-10-12 — how the interest is worked out: 'rate' (annual_rate on the
   // balance owed, the default), 'flat' (interest_amount with EVERY payment) or
   // 'total' (interest_amount over the whole loan, spread on a declining

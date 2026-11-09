@@ -4,9 +4,11 @@
  * "Table" tab of a loan's schedule panel (2026-10-12): the schedule, and the
  * two ways to make it the user's own.
  *
- *   - Calculated schedule: every row's interest can be edited on its own (what
- *     the lender actually charged that payment). The payment stays, so the
- *     principal and later balances follow.
+ *   - Calculated schedule: every row's payment and interest can be edited on
+ *     its own. A different payment (more, less, or a skipped one) keeps the
+ *     interest calculated from the balance owed; a different interest (what
+ *     the lender actually charged) keeps the payment. Either way the principal
+ *     and every later balance follow, and the payoff date moves.
  *   - Manual schedule: the user's own rows replace the calculation. They can
  *     be typed in here, or edited in a spreadsheet: "Download template" gives
  *     a CSV of the current schedule and "Upload schedule" reads it back. There
@@ -39,13 +41,16 @@ type Row = {
   interest: number;
   balance: number;
   interestOverridden?: boolean;
+  paymentOverridden?: boolean;
 };
+type Field = "payment" | "interest";
 type DraftRow = { date: string; payment: string; interest: string };
 type Pending =
   | { kind: "upload"; rows: { date: string; payment: number; interest: number }[]; file: string }
   | { kind: "to-manual" }
   | { kind: "to-calculated" }
-  | { kind: "reset-interest" };
+  | { kind: "reset-interest" }
+  | { kind: "reset-payments" };
 
 export function LoanScheduleEditor({
   loan,
@@ -64,13 +69,14 @@ export function LoanScheduleEditor({
   const [error, setError] = useState("");
   const [problems, setProblems] = useState<string[]>([]);
   const [pending, setPending] = useState<Pending | null>(null);
-  // Calculated mode: the row whose interest is being edited, and its text.
-  const [editDate, setEditDate] = useState<string | null>(null);
+  // Calculated mode: the cell (row date + field) being edited, and its text.
+  const [editing, setEditing] = useState<{ date: string; field: Field } | null>(null);
   const [editValue, setEditValue] = useState("");
   // Manual mode: local copy of the rows while they are being edited.
   const [draft, setDraft] = useState<DraftRow[] | null>(null);
 
   const overridden = schedule.filter((r) => r.interestOverridden).length;
+  const editedPayments = schedule.filter((r) => r.paymentOverridden).length;
   const fmt = (n: number) => formatCurrency(n, loan.currency);
 
   /** PUT a change; returns true when it was saved. Keeps the user's input on failure. */
@@ -135,18 +141,81 @@ export function LoanScheduleEditor({
             })
           : pending.kind === "to-calculated"
             ? await save({ manualSchedule: null })
-            : await save({ clearInterestOverrides: true });
+            : pending.kind === "reset-payments"
+              ? await save({ clearPaymentOverrides: true })
+              : await save({ clearInterestOverrides: true });
     setPending(null);
     if (ok) setDraft(null);
   }
 
-  async function saveInterest(date: string, raw: string | null) {
+  /** Save (or with `raw` null, reset) one calculated row's payment or interest. */
+  async function saveOverride(field: Field, date: string, raw: string | null) {
     const amount = raw == null ? null : parseFloat(raw);
     if (amount != null && (!Number.isFinite(amount) || amount < 0)) {
-      setError("Interest must be a number, 0 or more.");
+      setError(`${field === "payment" ? "Payment" : "Interest"} must be a number, 0 or more.`);
       return;
     }
-    if (await save({ interestOverrides: { [date]: amount } })) setEditDate(null);
+    const key = field === "payment" ? "paymentOverrides" : "interestOverrides";
+    if (await save({ [key]: { [date]: amount } })) setEditing(null);
+  }
+
+  /** A calculated row's payment or interest, with its Edit / Reset controls. */
+  function overrideCell(r: Row, field: Field) {
+    const value = r[field];
+    const edited = field === "payment" ? r.paymentOverridden : r.interestOverridden;
+    if (editing?.date === r.date && editing.field === field) {
+      return (
+        <span className="flex items-center gap-1">
+          <Input
+            type="number"
+            step="0.01"
+            min="0"
+            autoFocus
+            className="h-8 w-28"
+            aria-label={`${field === "payment" ? "Payment" : "Interest"} for ${r.date}`}
+            value={editValue}
+            onChange={(e) => setEditValue(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") void saveOverride(field, r.date, editValue);
+              if (e.key === "Escape") setEditing(null);
+            }}
+          />
+          <Button size="sm" onClick={() => void saveOverride(field, r.date, editValue)} disabled={saving}>Save</Button>
+          <Button size="sm" variant="ghost" onClick={() => setEditing(null)} disabled={saving}>Cancel</Button>
+        </span>
+      );
+    }
+    return (
+      <span className="flex items-center gap-2">
+        {fmt(value)}
+        {edited && <Badge variant="outline" className="text-[10px]">edited</Badge>}
+        {mode === "calculated" && (
+          <>
+            <Button
+              size="sm"
+              variant="ghost"
+              className="h-6 px-2 text-xs text-muted-foreground"
+              onClick={() => { setEditing({ date: r.date, field }); setEditValue(String(value)); setError(""); }}
+              aria-label={`Edit ${field} for ${r.date}`}
+            >
+              Edit
+            </Button>
+            {edited && (
+              <Button
+                size="sm"
+                variant="ghost"
+                className="h-6 px-2 text-xs text-muted-foreground"
+                onClick={() => void saveOverride(field, r.date, null)}
+                disabled={saving}
+                aria-label={`Reset ${field} for ${r.date}`}
+              >
+                Reset
+              </Button>
+            )}
+          </>
+        )}
+      </span>
+    );
   }
 
   async function saveDraft() {
@@ -190,6 +259,11 @@ export function LoanScheduleEditor({
       body: `${overridden} edited payment${overridden === 1 ? "" : "s"} will go back to the calculated interest.`,
       label: "Reset",
     },
+    "reset-payments": {
+      title: "Reset the edited payments?",
+      body: `${editedPayments} edited payment${editedPayments === 1 ? "" : "s"} will go back to the loan's regular payment, and the interest and balances are worked out again.`,
+      label: "Reset",
+    },
   };
 
   return (
@@ -198,6 +272,11 @@ export function LoanScheduleEditor({
         <Badge variant={mode === "manual" ? "default" : "secondary"}>
           {mode === "manual" ? "Manual schedule" : "Calculated schedule"}
         </Badge>
+        {mode === "calculated" && editedPayments > 0 && (
+          <span className="text-xs text-muted-foreground">
+            {editedPayments} edited payment{editedPayments === 1 ? "" : "s"}
+          </span>
+        )}
         {mode === "calculated" && overridden > 0 && (
           <span className="text-xs text-muted-foreground">
             {overridden} payment{overridden === 1 ? "" : "s"} with edited interest
@@ -213,6 +292,11 @@ export function LoanScheduleEditor({
           <input ref={fileRef} type="file" accept=".csv,text/csv" className="hidden" onChange={onFile} aria-label="Upload a schedule CSV" />
           {mode === "calculated" ? (
             <>
+              {editedPayments > 0 && (
+                <Button size="sm" variant="outline" onClick={() => setPending({ kind: "reset-payments" })} disabled={saving}>
+                  Reset edited payments
+                </Button>
+              )}
               {overridden > 0 && (
                 <Button size="sm" variant="outline" onClick={() => setPending({ kind: "reset-interest" })} disabled={saving}>
                   Reset edited interest
@@ -254,7 +338,7 @@ export function LoanScheduleEditor({
       <p className="text-xs text-muted-foreground">
         {mode === "manual"
           ? "These are your own rows. Principal and balance are worked out from each payment and its interest."
-          : "Worked out from the loan's amount, rate and term or payment. Edit a payment's interest when your lender charged something different, or switch to manual to set every row yourself."}{" "}
+          : "Worked out from the loan's amount, rate and term or payment. Edit a payment when you paid a different amount (more, less, or 0 for a skipped one): its interest is still worked out from the balance, and later rows and the payoff date follow. Edit the interest when your lender charged something different, or switch to manual to set every row yourself."}{" "}
         To work in a spreadsheet, download the template, change it, and upload it back as CSV. Keep its first line; only date, payment and interest are read.
       </p>
 
@@ -314,60 +398,9 @@ export function LoanScheduleEditor({
                   <TableRow key={r.period}>
                     <TableCell>{r.period}</TableCell>
                     <TableCell>{r.date}</TableCell>
-                    <TableCell>{fmt(r.payment)}</TableCell>
+                    <TableCell>{overrideCell(r, "payment")}</TableCell>
                     <TableCell className="text-emerald-600">{fmt(r.principal)}</TableCell>
-                    <TableCell className="text-rose-600">
-                      {mode === "calculated" && editDate === r.date ? (
-                        <span className="flex items-center gap-1">
-                          <Input
-                            type="number"
-                            step="0.01"
-                            min="0"
-                            autoFocus
-                            className="h-8 w-28"
-                            aria-label={`Interest for ${r.date}`}
-                            value={editValue}
-                            onChange={(e) => setEditValue(e.target.value)}
-                            onKeyDown={(e) => {
-                              if (e.key === "Enter") void saveInterest(r.date, editValue);
-                              if (e.key === "Escape") setEditDate(null);
-                            }}
-                          />
-                          <Button size="sm" onClick={() => void saveInterest(r.date, editValue)} disabled={saving}>Save</Button>
-                          <Button size="sm" variant="ghost" onClick={() => setEditDate(null)} disabled={saving}>Cancel</Button>
-                        </span>
-                      ) : (
-                        <span className="flex items-center gap-2">
-                          {fmt(r.interest)}
-                          {r.interestOverridden && <Badge variant="outline" className="text-[10px]">edited</Badge>}
-                          {mode === "calculated" && (
-                            <>
-                              <Button
-                                size="sm"
-                                variant="ghost"
-                                className="h-6 px-2 text-xs text-muted-foreground"
-                                onClick={() => { setEditDate(r.date); setEditValue(String(r.interest)); setError(""); }}
-                                aria-label={`Edit interest for ${r.date}`}
-                              >
-                                Edit
-                              </Button>
-                              {r.interestOverridden && (
-                                <Button
-                                  size="sm"
-                                  variant="ghost"
-                                  className="h-6 px-2 text-xs text-muted-foreground"
-                                  onClick={() => void saveInterest(r.date, null)}
-                                  disabled={saving}
-                                  aria-label={`Reset interest for ${r.date}`}
-                                >
-                                  Reset
-                                </Button>
-                              )}
-                            </>
-                          )}
-                        </span>
-                      )}
-                    </TableCell>
+                    <TableCell className="text-rose-600">{overrideCell(r, "interest")}</TableCell>
                     <TableCell className="font-mono">{fmt(r.balance)}</TableCell>
                   </TableRow>
                 ))}

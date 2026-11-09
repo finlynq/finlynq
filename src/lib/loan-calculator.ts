@@ -67,6 +67,9 @@ export type AmortizationRow = {
   // True when this row's interest came from `interestOverrides` rather than
   // the calculation. Absent on calculated rows and on manual schedules.
   interestOverridden?: boolean;
+  // True when this row's payment came from `paymentOverrides`. The interest is
+  // still calculated, so the principal and every later balance follow.
+  paymentOverridden?: boolean;
 };
 
 // One row of a user-supplied schedule. Principal (payment - interest) and the
@@ -129,6 +132,13 @@ export type LoanScheduleOptions = {
   // the payment is unchanged, so the principal and every later balance follow.
   // Ignored when `manualSchedule` is set.
   interestOverrides?: Record<string, number> | null;
+  // The payment actually made on specific payment dates (YYYY-MM-DD -> the
+  // whole payment for that row, any extra payment included). The interest is
+  // still calculated from the balance owed, so the principal and every later
+  // balance follow: a bigger payment shortens the loan, a smaller one (or 0, a
+  // skipped payment) adds the unpaid interest to the balance. Ignored when
+  // `manualSchedule` is set.
+  paymentOverrides?: Record<string, number> | null;
   // A complete user-supplied schedule. When non-empty it REPLACES the
   // calculation: rate, term and payment are not used to build rows.
   manualSchedule?: readonly ManualScheduleRow[] | null;
@@ -258,15 +268,14 @@ export function normalizeManualSchedule(input: unknown): ManualScheduleRow[] {
   return rows;
 }
 
-/** Validate a date -> interest override map. Same error contract as above. */
-export function normalizeInterestOverrides(input: unknown): Record<string, number> {
+function normalizeDateAmountMap(input: unknown, what: "Interest" | "Payment"): Record<string, number> {
   if (input == null) return {};
   if (typeof input !== "object" || Array.isArray(input)) {
-    throw new LoanValidationError("Interest overrides must be a date to amount map");
+    throw new LoanValidationError(`${what} overrides must be a date to amount map`);
   }
   const entries = Object.entries(input as Record<string, unknown>);
   if (entries.length > MAX_SCHEDULE_ROWS) {
-    throw new LoanValidationError(`At most ${MAX_SCHEDULE_ROWS} interest overrides`);
+    throw new LoanValidationError(`At most ${MAX_SCHEDULE_ROWS} ${what.toLowerCase()} overrides`);
   }
   const out: Record<string, number> = {};
   for (const [date, raw] of entries) {
@@ -275,11 +284,21 @@ export function normalizeInterestOverrides(input: unknown): Record<string, numbe
       throw new LoanValidationError(`${date} is not a real date in YYYY-MM-DD form`);
     }
     if (!Number.isFinite(amount) || amount < 0) {
-      throw new LoanValidationError(`Interest for ${date} must be 0 or more`);
+      throw new LoanValidationError(`${what} for ${date} must be 0 or more`);
     }
     out[date] = round2(amount);
   }
   return out;
+}
+
+/** Validate a date -> interest override map. Same error contract as above. */
+export function normalizeInterestOverrides(input: unknown): Record<string, number> {
+  return normalizeDateAmountMap(input, "Interest");
+}
+
+/** Validate a date -> payment override map. Same error contract as above. */
+export function normalizePaymentOverrides(input: unknown): Record<string, number> {
+  return normalizeDateAmountMap(input, "Payment");
 }
 
 /**
@@ -293,7 +312,10 @@ export function normalizeInterestOverrides(input: unknown): Record<string, numbe
  */
 export function loanScheduleExtras(
   row: object,
-): Pick<LoanScheduleOptions, "manualSchedule" | "interestOverrides" | "interestMethod" | "interestAmount"> {
+): Pick<
+  LoanScheduleOptions,
+  "manualSchedule" | "interestOverrides" | "paymentOverrides" | "interestMethod" | "interestAmount"
+> {
   const r = row as Record<string, unknown>;
   const parse = (v: unknown): unknown => {
     if (typeof v !== "string") return v ?? null;
@@ -305,13 +327,14 @@ export function loanScheduleExtras(
   };
   const manual = parse(r.manualSchedule ?? r.manual_schedule);
   const overrides = parse(r.interestOverrides ?? r.interest_overrides);
+  const payments = parse(r.paymentOverrides ?? r.payment_overrides);
+  const isMap = (v: unknown): v is Record<string, number> =>
+    !!v && typeof v === "object" && !Array.isArray(v);
   return {
     manualSchedule:
       Array.isArray(manual) && manual.length ? (manual as ManualScheduleRow[]) : null,
-    interestOverrides:
-      overrides && typeof overrides === "object" && !Array.isArray(overrides)
-        ? (overrides as Record<string, number>)
-        : null,
+    interestOverrides: isMap(overrides) ? overrides : null,
+    paymentOverrides: isMap(payments) ? payments : null,
     interestMethod: normalizeInterestMethod((r.interestMethod ?? r.interest_method) as string | null),
     interestAmount: toAmount(r.interestAmount ?? r.interest_amount),
   };
@@ -439,6 +462,7 @@ export function calculatePeriodPayment(
 export function buildLoanSchedule(opts: LoanScheduleOptions): LoanSummary {
   if (opts.manualSchedule && opts.manualSchedule.length) return buildManualSchedule(opts);
   const overrides = opts.interestOverrides ?? null;
+  const paymentOverrides = opts.paymentOverrides ?? null;
   const freq = normalizeFrequency(opts.paymentFrequency);
   const periodsPerYear = PERIODS_PER_YEAR[freq];
   const method = normalizeInterestMethod(opts.interestMethod);
@@ -540,7 +564,13 @@ export function buildLoanSchedule(opts: LoanScheduleOptions): LoanSummary {
     const override = overrides ? overrides[ymd(date)] : undefined;
     const overridden = typeof override === "number" && Number.isFinite(override) && override >= 0;
     const interest = overridden ? override : method === "flat" ? flat : balance * r;
-    let principalPortion = payment - interest + extra;
+    // A payment the user set for this date replaces the regular payment AND
+    // the extra payment; the interest above is still the calculated one, so
+    // what is left over is principal (negative when it did not cover the
+    // interest, which then adds to the balance).
+    const paid = paymentOverrides ? paymentOverrides[ymd(date)] : undefined;
+    const paymentOverridden = typeof paid === "number" && Number.isFinite(paid) && paid >= 0;
+    let principalPortion = paymentOverridden ? paid - interest : payment - interest + extra;
     if (principalPortion > balance - residual) principalPortion = balance - residual;
 
     const actualPayment = interest + principalPortion;
@@ -557,9 +587,10 @@ export function buildLoanSchedule(opts: LoanScheduleOptions): LoanSummary {
       payment: round2(actualPayment),
       principal: round2(principalPortion),
       interest: round2(interest),
-      extraPayment: round2(Math.min(extra, Math.max(principalPortion, 0))),
+      extraPayment: paymentOverridden ? 0 : round2(Math.min(extra, Math.max(principalPortion, 0))),
       balance: round2(Math.max(balance, 0)),
       ...(overridden ? { interestOverridden: true } : {}),
+      ...(paymentOverridden ? { paymentOverridden: true } : {}),
     });
   }
 

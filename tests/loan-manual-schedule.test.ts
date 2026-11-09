@@ -365,6 +365,7 @@ describe("every surface applies the loan's own schedule (static wiring)", () => 
       for (const q of scheduleSelects) {
         expect(q, `${file}: ${q.slice(0, 60)}`).toContain("manual_schedule");
         expect(q, `${file}: ${q.slice(0, 60)}`).toContain("interest_overrides");
+        expect(q, `${file}: ${q.slice(0, 60)}`).toContain("payment_overrides");
         expect(q, `${file}: ${q.slice(0, 60)}`).toContain("interest_method");
         expect(q, `${file}: ${q.slice(0, 60)}`).toContain("interest_amount");
       }

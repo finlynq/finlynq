@@ -210,17 +210,21 @@ return `interestMethod` and `effectiveAnnualRate`.
 ## The loan's own schedule (2026-10-12)
 
 A schedule is calculated from the loan's terms unless the user says otherwise.
-Two ways to say otherwise, both stored on the loan row:
+Three ways to say otherwise, all stored on the loan row:
 
 | Column | Shape | Effect |
 |---|---|---|
 | `loans.interest_overrides` | `{ "YYYY-MM-DD": amount }` | Replaces the calculated interest for that payment date only. The payment is unchanged, so the principal and every later balance follow. Ignored when a manual schedule exists. |
+| `loans.payment_overrides` (2026-11-09) | `{ "YYYY-MM-DD": amount }` | Replaces the WHOLE payment for that payment date (regular payment and any extra payment). The interest is still calculated from the balance owed, so principal = payment - interest, and every later row and the payoff date follow: a bigger payment shortens the loan, a smaller one or 0 (a skipped payment) adds the unpaid interest to the balance. Combines with an interest override on the same row. Ignored when a manual schedule exists. |
 | `loans.manual_schedule` | `[{ date, payment, interest }]` | REPLACES the calculation. Principal (`payment - interest`, negative when a payment did not cover its interest) and the running balance are derived, never stored. |
 
-Both are nullable and NULL means calculated, so existing loans are untouched.
+All are nullable and NULL means calculated, so existing loans are untouched.
 
-**One rule for readers.** `buildLoanSchedule` takes `interestOverrides` and
-`manualSchedule` as options, and the pure `loanScheduleExtras(row)`
+Edited payments exist so that a different payment no longer means switching to
+a manual schedule and typing every row's interest by hand.
+
+**One rule for readers.** `buildLoanSchedule` takes `interestOverrides`,
+`paymentOverrides` and `manualSchedule` as options, and the pure `loanScheduleExtras(row)`
 ([loan-calculator.ts](../src/lib/loan-calculator.ts)) turns a stored loan row
 (Drizzle or raw-SQL shape, JSON as object or text) into those options. **Every
 caller that builds a schedule from a stored loan spreads it in**: `GET
@@ -238,14 +242,19 @@ raw SELECT column lists.
 ([schedule-store.ts](../src/lib/loans/schedule-store.ts), SERVER ONLY) serves
 REST `GET/PUT /api/loans/schedule` and the MCP ops. It validates by BUILDING
 the resulting schedule, so nothing that cannot be scheduled is stored, and it
-refuses an interest override for a date that is not a payment date (it would
-be stored and never applied). Setting a manual schedule drops the overrides.
+refuses an interest or payment override for a date that is not a payment date
+(it would be stored and never applied). Edited payments can move the payoff
+date, so an edit left on a date after the new payoff is refused by name ("paid
+off on X, so Y is no longer on its schedule"); reset it first. Setting a manual
+schedule drops both kinds of override. `tests/loan-payment-overrides.test.ts`
+pins the calculator and the store.
 
 Surfaces:
 
 - **UI** — the schedule panel's **Table** tab is now an editor
   ([_components/schedule-editor.tsx](<../src/app/(app)/loans/_components/schedule-editor.tsx>)).
-  Calculated: edit or reset any row's interest, or "Switch to manual" (keeps
+  Calculated: edit or reset any row's payment (interest recalculated) or
+  interest, "Reset edited payments" / "Reset edited interest", or "Switch to manual" (keeps
   the current rows as the starting point). Manual: "Edit rows" (date, payment,
   interest, add, remove), "Back to calculated". Both: **Download template** and
   **Upload schedule**.
@@ -263,7 +272,14 @@ Surfaces:
 - **MCP HTTP** — `manage_loans(op:"set_schedule", loan_id, rows, merge?)`
   (replace, or lay rows over the current schedule by date),
   `op:"set_interest", loan_id, overrides:[{date, interest|null}]`,
-  `op:"reset_schedule", loan_id`.
+  `op:"set_payment", loan_id, overrides:[{date, payment|null}]`,
+  `op:"reset_schedule", loan_id` (drops the manual schedule and both kinds of
+  override).
+- **REST** — `PUT /api/loans/schedule` takes `paymentOverrides` (date -> amount,
+  `null` removes one) and `clearPaymentOverrides`; `GET` returns
+  `paymentOverrides`. Schedule rows carry `paymentOverridden: true`, and
+  `GET /api/loans` adds `paymentOverrideCount`.
+- **Mobile** — not yet: the phone's schedule screen still edits interest only.
 
 The rate suggestion on the Interest entries tab is not offered for a manual
 schedule, since its interest is not derived from the rate.

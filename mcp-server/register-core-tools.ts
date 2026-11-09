@@ -2006,7 +2006,7 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
     async ({ loan_id, as_of_date, reportingCurrency }) => {
       const reporting = await resolveReportingCurrencyStdio(sqlite, userId, reportingCurrency);
       const loan = await sqlite.prepare(
-        `SELECT id, principal, annual_rate, term_months, start_date, payment_amount, payment_frequency, extra_payment, residual_value, manual_schedule, interest_overrides, interest_method, interest_amount, currency FROM loans WHERE id = ? AND user_id = ?`
+        `SELECT id, principal, annual_rate, term_months, start_date, payment_amount, payment_frequency, extra_payment, residual_value, manual_schedule, interest_overrides, payment_overrides, interest_method, interest_amount, currency FROM loans WHERE id = ? AND user_id = ?`
       ).get(loan_id, userId) as SqliteRow | undefined;
       if (!loan) return sqliteErr(`Loan #${loan_id} not found`);
       // Issue #213 — guard against legacy bad start_date so this tool no
@@ -2086,7 +2086,7 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
     async ({ strategy, extra_payment, reportingCurrency }) => {
       const reporting = await resolveReportingCurrencyStdio(sqlite, userId, reportingCurrency);
       const loans = await sqlite.prepare(
-        `SELECT id, principal, annual_rate, term_months, start_date, payment_amount, payment_frequency, extra_payment, residual_value, manual_schedule, interest_overrides, interest_method, interest_amount, currency FROM loans WHERE user_id = ?`
+        `SELECT id, principal, annual_rate, term_months, start_date, payment_amount, payment_frequency, extra_payment, residual_value, manual_schedule, interest_overrides, payment_overrides, interest_method, interest_amount, currency FROM loans WHERE user_id = ?`
       ).all(userId) as SqliteRow[];
       if (!loans.length) return txt({ success: true, data: { message: "No loans found", strategies: {} } });
       // FINLYNQ-123: snowball ranks by balance and the extra_payment budget is

@@ -1,14 +1,17 @@
 /**
  * /api/loans/schedule — a loan's own schedule.
  *
- *   GET ?loanId=N → { mode, manualSchedule, interestOverrides, summary }
- *   PUT { loanId, manualSchedule?, mergeRows?, interestOverrides?, clearInterestOverrides? }
+ *   GET ?loanId=N → { mode, manualSchedule, interestOverrides, paymentOverrides, summary }
+ *   PUT { loanId, manualSchedule?, mergeRows?, interestOverrides?, clearInterestOverrides?,
+ *         paymentOverrides?, clearPaymentOverrides? }
  *       → the same shape, after the change
  *
  * `manualSchedule`: rows `{ date, payment, interest }` that replace the
  * calculation (`null` goes back to calculated; `mergeRows` lays them over the
  * current schedule by date instead of replacing it). `interestOverrides`: a
  * date -> amount map for single calculated rows (`null` amount removes one).
+ * `paymentOverrides`: the same for the payment of single calculated rows; the
+ * interest stays calculated, so principal and later balances follow.
  *
  * Everything is validated in `saveLoanSchedule` by building the resulting
  * schedule, so a change that cannot be scheduled is refused with a message and
@@ -41,6 +44,8 @@ const putSchema = z.object({
   mergeRows: z.boolean().optional(),
   interestOverrides: z.record(z.string(), z.number().nullable()).nullable().optional(),
   clearInterestOverrides: z.boolean().optional(),
+  paymentOverrides: z.record(z.string(), z.number().nullable()).nullable().optional(),
+  clearPaymentOverrides: z.boolean().optional(),
 });
 
 export const PUT = apiHandler({ auth: "auth", body: putSchema }, async ({ userId, body }) => {
