@@ -51,6 +51,8 @@ import { Combobox, type ComboboxItemShape } from "@/components/ui/combobox";
 import { Badge } from "@/components/ui/badge";
 import { useDropdownOrder } from "@/components/dropdown-order-provider";
 import { formatCurrency, formatDate } from "@/lib/currency";
+import { formatFxRate } from "@/lib/fx/rate-view";
+import { useFxRatesInverted } from "@/components/currency-provider";
 import { useActiveCurrencies } from "@/lib/hooks/useActiveCurrencies";
 import {
   ArrowRightLeft,
@@ -242,7 +244,7 @@ type DialogMode = "transaction" | "transfer";
 type FxPreview =
   | { state: "idle" }
   | { state: "loading" }
-  | { state: "ok"; rate: number; source: string; converted: number; date: string; to: string }
+  | { state: "ok"; rate: number; source: string; converted: number; date: string; from: string; to: string }
   | { state: "needs-override" }
   | { state: "error"; message: string };
 
@@ -324,6 +326,7 @@ export function TransactionDialog({
   const [form, setForm] = useState<TransactionFormValues>(FORM_DEFAULTS);
   // Currency options: built-in fiat UNION the user's active currencies (#291).
   const currencyOptions = useActiveCurrencies(form.currency);
+  const { inverted: fxRatesInverted } = useFxRatesInverted();
   const [showAdvanced, setShowAdvanced] = useState(false);
   const [showSplits, setShowSplits] = useState(false);
   const [splitRows, setSplitRows] = useState<SplitRow[]>([emptySplitRow(), emptySplitRow()]);
@@ -657,6 +660,7 @@ export function TransactionDialog({
             source: String(d.source ?? "—"),
             converted: sign * Number(d.converted ?? 0),
             date: String(d.date ?? form.date),
+            from: form.currency,
             to: accountCurrency,
           });
         })
@@ -714,6 +718,7 @@ export function TransactionDialog({
             source: String(d.source ?? "—"),
             converted,
             date: String(d.date ?? transferForm.date),
+            from: fromAcct.currency,
             to: toAcct.currency,
           });
           if (!transferReceivedTouched) {
@@ -1270,7 +1275,7 @@ export function TransactionDialog({
                       {formatCurrency(fxPreview.converted, fxPreview.to)}
                     </span>
                     <span className="ml-1.5 opacity-70">
-                      (rate {fxPreview.rate} · {fxPreview.source} · {fxPreview.date})
+                      ({formatFxRate(fxPreview.rate, fxPreview.from, fxPreview.to, fxRatesInverted)} · {fxPreview.source} · {fxPreview.date})
                     </span>
                   </span>
                 )}
@@ -2119,13 +2124,13 @@ export function TransactionDialog({
                     <Label className="text-xs">Amount received ({toAcct!.currency})</Label>
                     {impliedRate != null ? (
                       <span className="text-[11px] text-muted-foreground">
-                        rate {impliedRate.toFixed(6)} · {rateSource}
+                        {formatFxRate(impliedRate, fromAcct!.currency, toAcct!.currency, fxRatesInverted)} · {rateSource}
                       </span>
                     ) : transferFxPreview.state === "loading" ? (
                       <span className="text-[11px] text-muted-foreground">Calculating…</span>
                     ) : transferFxPreview.state === "ok" ? (
                       <span className="text-[11px] text-muted-foreground">
-                        rate {transferFxPreview.rate.toFixed(6)} · {transferFxPreview.source}
+                        {formatFxRate(transferFxPreview.rate, fromAcct!.currency, toAcct!.currency, fxRatesInverted)} · {transferFxPreview.source}
                       </span>
                     ) : null}
                   </div>
@@ -2150,7 +2155,7 @@ export function TransactionDialog({
                   {showMarketRef && transferFxPreview.state === "ok" && (
                     <p className="text-[11px] text-muted-foreground">
                       Market rate on {formatDate(transferFxPreview.date)}:{" "}
-                      {transferFxPreview.rate.toFixed(6)} ({transferFxPreview.source}) →{" "}
+                      {formatFxRate(transferFxPreview.rate, fromAcct!.currency, toAcct!.currency, fxRatesInverted)} ({transferFxPreview.source}) →{" "}
                       {formatCurrency(transferFxPreview.converted, transferFxPreview.to)}
                     </p>
                   )}

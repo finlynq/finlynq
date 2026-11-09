@@ -1,6 +1,8 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
+import { formatFxRate } from "@/lib/fx/rate-view";
+import { useFxRatesInverted } from "@/components/currency-provider";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -51,6 +53,7 @@ function sourceLabel(source: string): string {
 }
 
 export function ActiveCurrenciesSection() {
+  const { inverted: fxRatesInverted } = useFxRatesInverted();
   const [active, setActive] = useState<string[]>([]);
   const [source, setSource] = useState<"derived" | "saved">("derived");
   const [loading, setLoading] = useState(true);
@@ -237,7 +240,7 @@ export function ActiveCurrenciesSection() {
                       <span className="block text-muted-foreground mt-0.5">
                         {lookup.code === "USD"
                           ? "Anchor currency."
-                          : `1 ${lookup.code} ≈ ${lookup.rate.toFixed(4)} USD · ${sourceLabel(lookup.source)}`}
+                          : `${formatFxRate(lookup.rate, lookup.code, "USD", fxRatesInverted)} · ${sourceLabel(lookup.source)}`}
                       </span>
                     </div>
                     <Button size="sm" onClick={() => addCode(lookup.code)} disabled={saving}>Add</Button>

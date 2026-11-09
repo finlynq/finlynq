@@ -11,6 +11,7 @@ import { requireAuth } from "@/lib/auth";
 import { db, getDialect, schema } from "@/db";
 import { getUserById } from "@/lib/auth/queries";
 import { and, eq } from "drizzle-orm";
+import { getFxRatesInverted } from "@/lib/settings/fx-rate-view";
 
 export async function GET(request: NextRequest) {
   const auth = await requireAuth(request);
@@ -30,6 +31,7 @@ export async function GET(request: NextRequest) {
   let email: string | null = null;
   let displayName: string | null = null;
   let displayCurrency = "USD";
+  let fxRatesInverted = false;
   if (getDialect() === "postgres" && auth.context.userId) {
     const user = await getUserById(auth.context.userId).catch(() => null);
     onboardingComplete = Boolean(user?.onboardingComplete);
@@ -51,6 +53,10 @@ export async function GET(request: NextRequest) {
       .limit(1)
       .catch(() => []);
     if (row[0]?.value) displayCurrency = row[0].value;
+
+    // View preference: show FX rates inverted. Read here so the first paint
+    // already uses it; a failed read keeps the default (not inverted).
+    fxRatesInverted = await getFxRatesInverted(auth.context.userId).catch(() => false);
   }
 
   return NextResponse.json({
@@ -72,5 +78,6 @@ export async function GET(request: NextRequest) {
     email,
     displayName,
     displayCurrency,
+    fxRatesInverted,
   });
 }

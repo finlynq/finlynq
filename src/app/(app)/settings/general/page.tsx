@@ -34,7 +34,7 @@ import { ActiveCurrenciesSection } from "@/components/active-currencies-section"
 type RecomputeState = { active: boolean; target: string; done: number; total: number; finished: boolean };
 
 export default function GeneralSettingsPage() {
-  const { displayCurrency, setDisplayCurrency } = useDisplayCurrency();
+  const { displayCurrency, setDisplayCurrency, fxRatesInverted, setFxRatesInverted } = useDisplayCurrency();
   const currencyOptions = useDisplayCurrencyOptions(displayCurrency);
   const { font, setFont } = useFont();
   const [currencyError, setCurrencyError] = useState("");
@@ -151,6 +151,30 @@ export default function GeneralSettingsPage() {
                     {o.label}
                   </SelectItem>
                 ))}
+              </SelectContent>
+            </Select>
+          </div>
+
+          <div className="flex items-center justify-between">
+            <div>
+              <Label>Exchange rates</Label>
+              <p className="text-xs text-muted-foreground">
+                How rates are written across the app: as quoted (1 IDR = 0.0000554 USD) or
+                inverted (1 USD = 18,039 IDR). A view only: amounts and stored rates don&apos;t change.
+              </p>
+            </div>
+            <Select
+              value={fxRatesInverted ? "inverted" : "direct"}
+              onValueChange={(v) => {
+                setFxRatesInverted(v === "inverted").catch(() =>
+                  setCurrencyError("Couldn't save the exchange-rate view. Try again."),
+                );
+              }}
+            >
+              <SelectTrigger className="w-48"><SelectValue /></SelectTrigger>
+              <SelectContent>
+                <SelectItem value="direct">As quoted</SelectItem>
+                <SelectItem value="inverted">Inverted</SelectItem>
               </SelectContent>
             </Select>
           </div>

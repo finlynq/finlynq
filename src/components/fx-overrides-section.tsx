@@ -1,6 +1,8 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import { formatFxRate } from "@/lib/fx/rate-view";
+import { useFxRatesInverted } from "@/components/currency-provider";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -27,6 +29,7 @@ type Override = {
 };
 
 export function FxOverridesSection() {
+  const { inverted: fxRatesInverted } = useFxRatesInverted();
   const [overrides, setOverrides] = useState<Override[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
@@ -43,7 +46,9 @@ export function FxOverridesSection() {
   const [form, setForm] = useState({
     currency: "EUR",
     rateInput: "",
-    rateMode: "to-usd" as "to-usd" | "from-usd",
+    // The rate input follows the "show rates inverted" view by default; the
+    // direction picker beside it still switches either way.
+    rateMode: (fxRatesInverted ? "from-usd" : "to-usd") as "to-usd" | "from-usd",
     dateFrom: todayISO(),
     dateTo: "",
     note: "",
@@ -139,7 +144,7 @@ export function FxOverridesSection() {
             <CardTitle className="text-base">Custom exchange rates</CardTitle>
             <CardDescription>
               Pin your own FX rate when the market rate doesn&apos;t match what your bank charged,
-              or for currencies we don&apos;t auto-fetch. Stored as <code>1 USD = N currency</code>.
+              or for currencies we don&apos;t auto-fetch. Enter it in either direction (<code>1 currency = N USD</code> or <code>1 USD = N currency</code>).
             </CardDescription>
           </div>
         </div>
@@ -158,7 +163,7 @@ export function FxOverridesSection() {
                 <div className="flex items-center gap-3 min-w-0">
                   <span className="font-mono text-xs font-semibold w-12">{o.currency}</span>
                   <span className="font-mono text-xs">
-                    1 {o.currency} = {o.rateToUsd.toFixed(6)} USD
+                    {formatFxRate(o.rateToUsd, o.currency, "USD", fxRatesInverted)}
                   </span>
                   <span className="text-xs text-muted-foreground">
                     {o.dateFrom}{o.dateTo ? ` → ${o.dateTo}` : " (open-ended)"}

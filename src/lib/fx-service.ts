@@ -303,14 +303,17 @@ async function fetchYahooChartRateToUsd(symbol: string, date: string): Promise<n
       // indexed by the timestamp[] array. Pick the latest close <= the requested date.
       return latestPositiveClose(result, new Date(`${date}T23:59:59Z`).getTime());
     }
-    // Latest branch — meta.regularMarketPrice is normally correct here, but Yahoo
-    // rounds it to 4dp, so any currency worth < 0.00005 USD (VND, LBP…) reports a
-    // literal 0.0 and would otherwise be treated as an outright fetch failure —
-    // negative-cached every 10 min, forever, since it can never succeed. Fall back
-    // to the full-precision close[] before giving up.
+    // Latest branch — read the full-precision close[] FIRST. Yahoo rounds
+    // meta.regularMarketPrice to 4 decimal places for every currency quote, and
+    // has since the first live rate we stored (May 2026): IDR (≈0.0000554 USD)
+    // and UZS (≈0.0000834) came back as 0.0001, i.e. 80% and 20% too high, and
+    // VND (≈0.000038) as a literal 0.0. close[] carries the same quote unrounded
+    // and is what the historical branch above has always read. meta is kept only
+    // as a fallback for a payload whose close[] is empty.
+    const close = latestPositiveClose(result);
+    if (close != null) return close;
     const rate = result.meta?.regularMarketPrice;
-    if (typeof rate === "number" && rate > 0) return rate;
-    return latestPositiveClose(result);
+    return typeof rate === "number" && rate > 0 ? rate : null;
   } catch {
     return null;
   }
@@ -388,6 +391,20 @@ async function findOverride(
 
 // ─── Cache lookup + write ───────────────────────────────────────────────
 
+/**
+ * A cached rate under 0.001 USD that sits exactly on 4 decimal places is
+ * Yahoo's rounded `meta.regularMarketPrice` (0.0001 for IDR/UZS, 0.0003 for
+ * COP…), never a real close — those carry full float precision. Such a row was
+ * written by the live branch before it read close[] (GH #397); treat it as a
+ * miss so it is refetched and overwritten. This also heals a row the OLD code
+ * wrote between the cleanup migration and the restart in a deploy.
+ */
+export function isRoundedSmallRate(rate: number): boolean {
+  if (!(rate > 0 && rate < 0.001)) return false;
+  const scaled = rate * 10_000;
+  return Math.abs(scaled - Math.round(scaled)) < 1e-9;
+}
+
 async function findCached(
   currency: string,
   date: string
@@ -397,7 +414,9 @@ async function findCached(
     .from(schema.fxRates)
     .where(and(eq(schema.fxRates.currency, currency), eq(schema.fxRates.date, date)))
     .limit(1);
-  if (exact[0]) return { rate: exact[0].rateToUsd, effectiveDate: exact[0].date };
+  if (exact[0] && !isRoundedSmallRate(exact[0].rateToUsd)) {
+    return { rate: exact[0].rateToUsd, effectiveDate: exact[0].date };
+  }
   return null;
 }
 
