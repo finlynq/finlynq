@@ -99,6 +99,7 @@ export type DebtServiceLoan = {
   // The loan's own schedule, when it has one (see `loanScheduleExtras`).
   manualSchedule?: LoanScheduleOptions["manualSchedule"];
   interestOverrides?: LoanScheduleOptions["interestOverrides"];
+  paymentOverrides?: LoanScheduleOptions["paymentOverrides"];
 };
 
 /**

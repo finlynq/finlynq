@@ -289,7 +289,7 @@ export async function calculateFinancialHealth(
   const loanRows = asRows(await db.execute(sql`
     SELECT id, account_id, currency, principal, annual_rate, term_months,
            start_date, payment_amount, payment_frequency, extra_payment,
-           residual_value, manual_schedule, interest_overrides,
+           residual_value, manual_schedule, interest_overrides, payment_overrides,
            interest_method, interest_amount
     FROM loans
     WHERE user_id = ${userId}

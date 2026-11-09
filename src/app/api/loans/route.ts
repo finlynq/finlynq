@@ -113,6 +113,7 @@ export async function GET(request: NextRequest) {
       note: schema.loans.note,
       manualSchedule: schema.loans.manualSchedule,
       interestOverrides: schema.loans.interestOverrides,
+      paymentOverrides: schema.loans.paymentOverrides,
       interestMethod: schema.loans.interestMethod,
       interestAmount: schema.loans.interestAmount,
     })
@@ -153,9 +154,15 @@ export async function GET(request: NextRequest) {
     // The stored schedule rows feed the calculator but are NOT part of the
     // list response (a 30-year manual schedule is 360 rows per loan); the
     // schedule panel fetches them from /api/loans/schedule.
-    const { manualSchedule: _manual, interestOverrides: _overrides, ...loan } = rawLoan;
+    const {
+      manualSchedule: _manual,
+      interestOverrides: _overrides,
+      paymentOverrides: _payments,
+      ...loan
+    } = rawLoan;
     void _manual;
     void _overrides;
+    void _payments;
     const extras = loanScheduleExtras(rawLoan);
     const integrityRow = (error: string, value: unknown) => ({
       ...loan,
@@ -258,6 +265,7 @@ export async function GET(request: NextRequest) {
       scheduleMode: summary.scheduleMode,
       effectiveAnnualRate: summary.effectiveAnnualRate,
       interestOverrideCount: Object.keys(extras.interestOverrides ?? {}).length,
+      paymentOverrideCount: Object.keys(extras.paymentOverrides ?? {}).length,
       // Additive reporting-currency companions — the native fields above are
       // untouched, so nothing that already read this response changes.
       displayCurrency,
@@ -295,6 +303,7 @@ export async function POST(request: NextRequest) {
           .select({
             manualSchedule: schema.loans.manualSchedule,
             interestOverrides: schema.loans.interestOverrides,
+            paymentOverrides: schema.loans.paymentOverrides,
             interestMethod: schema.loans.interestMethod,
             interestAmount: schema.loans.interestAmount,
           })

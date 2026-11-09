@@ -51,7 +51,7 @@ type Loan = {
   monthlyEquivalentPaymentDisplay: number | null;
   totalInterestDisplay: number | null;
 };
-type AmortRow = { period: number; date: string; payment: number; principal: number; interest: number; balance: number; interestOverridden?: boolean };
+type AmortRow = { period: number; date: string; payment: number; principal: number; interest: number; balance: number; interestOverridden?: boolean; paymentOverridden?: boolean };
 type AccrualRow = { month: string; interest: number };
 type AmortResult = { monthlyPayment: number; totalPayments: number; totalInterest: number; payoffDate: string; residualValue: number; schedule: AmortRow[]; monthlyAccrual: AccrualRow[]; scheduleMode?: "calculated" | "manual" };
 
