@@ -24,6 +24,7 @@ import { FillDialog, type FillScope } from "./_components/fill-dialog";
 import { BudgetSettingsDialog } from "./_components/budget-settings-dialog";
 import { CarryoverDialog } from "./_components/carryover-dialog";
 import { MonthSummary } from "./_components/month-summary";
+import { RulesDialog } from "./_components/rules-dialog";
 
 const COLLAPSED_KEY = "pf-budget-collapsed";
 
@@ -48,6 +49,7 @@ export default function BudgetsPage() {
   const [collapsed, setCollapsed] = useState<Set<string>>(() => new Set());
   const [fill, setFill] = useState<{ scope: FillScope; section: "spending" | "income" } | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [rulesTarget, setRulesTarget] = useState<{ key: string; name: string } | null>(null);
   const [carryTarget, setCarryTarget] = useState<{ key: string; name: string; carriedIn: number } | null>(null);
   const [groupToMerge, setGroupToMerge] = useState<{ group: string; label: string } | null>(null);
   const [merging, setMerging] = useState(false);
@@ -129,6 +131,11 @@ export default function BudgetsPage() {
     editCarry: (key, name, carriedIn) => setCarryTarget({ key, name, carriedIn }),
     openFill: (scope, section) => setFill({ scope, section }),
     openSettings: () => setSettingsOpen(true),
+    adjust: async (key, change) => {
+      await budgetApi.adjust(key, month, change);
+      await reload(true);
+    },
+    openRules: (key, name) => setRulesTarget({ key, name }),
   };
 
   async function confirmMerge() {
@@ -272,8 +279,8 @@ export default function BudgetsPage() {
           currency={cur}
           scope={fill.scope}
           section={fill.section}
-          onDone={(n) => {
-            setNotice(n ? `Saved ${n} budget${n === 1 ? "" : "s"}.` : "Nothing to fill.");
+          onDone={(message) => {
+            setNotice(message);
             void reload(true);
           }}
         />
@@ -285,6 +292,7 @@ export default function BudgetsPage() {
         month={month}
         onChanged={() => void reload(true)}
       />
+      <RulesDialog target={rulesTarget} month={month} onClose={() => setRulesTarget(null)} onChanged={() => void reload(true)} />
       <CarryoverDialog
         target={carryTarget}
         month={month}

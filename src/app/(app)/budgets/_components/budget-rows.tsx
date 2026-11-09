@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { ChevronDown, ChevronRight, MoreHorizontal, Repeat2, CalendarClock } from "lucide-react";
+import { ChevronDown, ChevronRight, MoreHorizontal, Repeat2, CalendarClock, ListOrdered } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
   DropdownMenu,
@@ -16,9 +16,10 @@ import {
 import { formatCurrency } from "@/lib/currency";
 import { buildTxDrillUrl } from "@/lib/transactions/drill-url";
 import { loanHref } from "@/lib/hooks/useLinkedLoans";
-import type { BudgetGroup, BudgetLine, BudgetMonth, DebtLine } from "@/lib/budgets/month";
+import type { BudgetGroup, BudgetLine, BudgetMonth, DebtLine, LinePlan } from "@/lib/budgets/month";
 import { monthEndDate, monthStartDate } from "@/lib/budgets/lines";
 import { BudgetCell } from "./budget-cell";
+import { RuleBudgetCell } from "./rule-budget-cell";
 
 export type BudgetFilter = "all" | "unbudgeted" | "over" | "upcoming";
 
@@ -30,6 +31,64 @@ export interface RowActions {
   editCarry: (key: string, name: string, carriedIn: number) => void;
   openFill: (scope: { kind: "keys"; keys: string[]; label: string } | { kind: "group"; group: string; label: string }, section: "spending" | "income") => void;
   openSettings: () => void;
+  /** The cell of an open month on a line with rules. */
+  adjust: (key: string, change: { adjustment?: number | null; override?: number | null }) => Promise<void>;
+  openRules: (key: string, name: string) => void;
+}
+
+/** Whether rules make the month's cell (an open month a rule covers, or one set to "only this amount"). */
+const ruleMade = (plan: LinePlan | null | undefined): plan is LinePlan => !!plan?.open && (plan.fromRules != null || plan.override);
+
+/** The budget cell: the rules' panel when rules make the month, else the plain typed cell. */
+function LineBudgetCell({
+  lineKey,
+  name,
+  value,
+  plan,
+  currency,
+  hint,
+  label,
+  actions,
+}: {
+  lineKey: string;
+  name: string;
+  value: number | null;
+  plan: LinePlan | null | undefined;
+  currency: string;
+  hint?: number | null;
+  label: string;
+  actions: RowActions;
+}) {
+  if (ruleMade(plan)) {
+    return (
+      <RuleBudgetCell
+        value={value}
+        plan={plan}
+        currency={currency}
+        label={label}
+        onSave={(change) => actions.adjust(lineKey, change)}
+        onOpenRules={() => actions.openRules(lineKey, name)}
+      />
+    );
+  }
+  return <BudgetCell value={value} currency={currency} hint={hint} label={label} onSave={(v) => actions.setLine(lineKey, v)} />;
+}
+
+/** A small button next to a name: the line has rules. */
+function RulesMarker({ plan, lineKey, name, actions }: { plan: LinePlan | null | undefined; lineKey: string; name: string; actions: RowActions }) {
+  if (!plan?.ruleCount) return null;
+  const n = plan.ruleCount;
+  return (
+    <button
+      type="button"
+      onClick={() => actions.openRules(lineKey, name)}
+      className="shrink-0 text-muted-foreground hover:text-primary"
+      aria-label={`${n} budget rule${n === 1 ? "" : "s"} for ${name}`}
+      title={`${n} budget rule${n === 1 ? "" : "s"}`}
+    >
+      <ListOrdered className="h-3 w-3" />
+    </button>
+  );
 }
 
 // Below `sm` the name takes its own line and budget | left | menu sit under it.
@@ -229,6 +288,7 @@ function SpendingLineRow({
             <span className="truncate text-sm">{line.name}</span>
           )}
           {line.rollover && <Repeat2 className="h-3 w-3 shrink-0 text-muted-foreground" aria-label="Rolls over" />}
+          {!inGroupBudget && <RulesMarker plan={line.plan} lineKey={line.key} name={line.name} actions={actions} />}
           {line.upcoming > 0 && <CalendarClock className="h-3 w-3 shrink-0 text-muted-foreground" aria-label="Payments due later this month" />}
         </div>
         <SubText line={line} currency={cur} showSpent={!inGroupBudget} />
@@ -239,12 +299,15 @@ function SpendingLineRow({
         {inGroupBudget ? (
           <span className="block text-right text-xs text-muted-foreground">in group</span>
         ) : (
-          <BudgetCell
+          <LineBudgetCell
+            lineKey={line.key}
+            name={line.name}
             value={line.budgeted}
+            plan={line.plan}
             currency={cur}
             hint={line.average3}
             label={`Budget for ${line.name}`}
-            onSave={(v) => actions.setLine(line.key, v)}
+            actions={actions}
           />
         )}
       </div>
@@ -278,8 +341,13 @@ function SpendingLineRow({
               <DropdownMenuItem onClick={() => actions.openFill({ kind: "keys", keys: [line.key], label: line.name }, "spending")}>
                 Fill this and later months…
               </DropdownMenuItem>
+              <DropdownMenuItem onClick={() => actions.openRules(line.key, line.name)}>
+                Rules{line.plan?.ruleCount ? ` (${line.plan.ruleCount})` : ""}…
+              </DropdownMenuItem>
               {line.budgeted != null && (
-                <DropdownMenuItem onClick={() => void actions.setLine(line.key, null)}>Clear this month&apos;s budget</DropdownMenuItem>
+                <DropdownMenuItem onClick={() => void actions.setLine(line.key, null)}>
+                  {ruleMade(line.plan) ? "Clear what is typed this month" : <>Clear this month&apos;s budget</>}
+                </DropdownMenuItem>
               )}
             </DropdownMenuGroup>
           )}
@@ -354,6 +422,7 @@ function SpendingGroupBlock({
             {collapsed ? <ChevronRight className="h-3.5 w-3.5 shrink-0 text-muted-foreground" /> : <ChevronDown className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />}
             <span className="truncate text-sm font-semibold">{group.name}</span>
             {group.byGroup && <span className="shrink-0 rounded bg-primary/10 px-1.5 text-[10px] font-medium text-primary">one budget</span>}
+            {group.byGroup && group.plan?.ruleCount ? <ListOrdered className="h-3 w-3 shrink-0 text-muted-foreground" aria-label="Has budget rules" /> : null}
             {group.rollover && <Repeat2 className="h-3 w-3 shrink-0 text-muted-foreground" aria-label="Rolls over" />}
             {collapsed && (
               <span className="shrink-0 text-xs text-muted-foreground">
@@ -367,12 +436,15 @@ function SpendingGroupBlock({
         <BarColumn bar={bar} />
         <div>
           {group.byGroup ? (
-            <BudgetCell
+            <LineBudgetCell
+              lineKey={group.key}
+              name={group.name}
               value={group.budgeted}
+              plan={group.plan}
               currency={cur}
               hint={group.average3}
               label={`Budget for the ${group.name} group`}
-              onSave={(v) => actions.setLine(group.key, v)}
+              actions={actions}
             />
           ) : (
             <span className={`block pr-2 text-right font-medium ${NUM}`}>
@@ -409,6 +481,11 @@ function SpendingGroupBlock({
               <DropdownMenuItem onClick={() => actions.openFill({ kind: "group", group: rawName, label: group.name }, "spending")}>
                 Fill this group…
               </DropdownMenuItem>
+              {group.byGroup && (
+                <DropdownMenuItem onClick={() => actions.openRules(group.key, group.name)}>
+                  Rules{group.plan?.ruleCount ? ` (${group.plan.ruleCount})` : ""}…
+                </DropdownMenuItem>
+              )}
             </DropdownMenuGroup>
             {group.byGroup && (
               <>
@@ -498,11 +575,22 @@ export function IncomeSection({ data, actions }: { data: BudgetMonth; actions: R
             return (
               <div key={l.key} className={ROW}>
                 <div className={NAME}>
-                  <span className="block truncate text-sm">{l.name}</span>
+                  <div className="flex min-w-0 items-center gap-1.5">
+                    <span className="truncate text-sm">{l.name}</span>
+                    <RulesMarker plan={l.plan} lineKey={l.key} name={l.name} actions={actions} />
+                  </div>
                   <InlineBar bar={bar} />
                 </div>
                 <BarColumn bar={bar} />
-                <BudgetCell value={l.budgeted} currency={cur} label={`Expected income from ${l.name}`} onSave={(v) => actions.setLine(l.key, v)} />
+                <LineBudgetCell
+                  lineKey={l.key}
+                  name={l.name}
+                  value={l.budgeted}
+                  plan={l.plan}
+                  currency={cur}
+                  label={`Expected income from ${l.name}`}
+                  actions={actions}
+                />
                 <span className={`hidden sm:block text-right ${NUM}`}>{formatCurrency(l.actual, cur)}</span>
                 <span className="text-right">
                   {l.budgeted == null ? (
@@ -519,6 +607,9 @@ export function IncomeSection({ data, actions }: { data: BudgetMonth; actions: R
                     <DropdownMenuGroup>
                       <DropdownMenuItem onClick={() => actions.openFill({ kind: "keys", keys: [l.key], label: l.name }, "income")}>
                         Fill this and later months…
+                      </DropdownMenuItem>
+                      <DropdownMenuItem onClick={() => actions.openRules(l.key, l.name)}>
+                        Rules{l.plan?.ruleCount ? ` (${l.plan.ruleCount})` : ""}…
                       </DropdownMenuItem>
                       {l.categoryId && (
                         <DropdownMenuItem onClick={() => actions.categorySettings(l.categoryId!, { excluded: true })}>

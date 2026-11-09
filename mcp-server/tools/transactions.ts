@@ -15,6 +15,7 @@ import {
   updateLineSettings,
 } from "../../src/lib/budgets/write";
 import { fillBodySchema } from "../../src/lib/budgets/schemas";
+import { loadMoneyCtx, recomputeRuleLines } from "../../src/lib/budgets/rule-store";
 import type { BudgetRole } from "../../src/lib/budgets/lines";
 import { getDisplayCurrency } from "../../src/lib/fx-service";
 import {
@@ -270,6 +271,12 @@ export function registerTransactionsTools(server: McpServer, ctx: PgToolContext)
     if (!existing.length) return err(`No budget found for "${cat.name ?? `category #${cat.id}`}" in ${month}`);
 
     await db.execute(sql`DELETE FROM budgets WHERE id = ${existing[0].id} AND user_id = ${userId}`);
+    // A current-or-later month a budget rule covers keeps the rules' amount:
+    // only what was typed goes (plan/budget-rules.md).
+    const hasRules = await q(db, sql`SELECT id FROM budget_rules WHERE user_id = ${userId} AND category_id = ${cat.id} LIMIT 1`);
+    if (hasRules.length) {
+      await recomputeRuleLines(userId, await loadMoneyCtx(userId), { keys: [`c:${cat.id}`], from: month, to: month });
+    }
     // Issue #211: budgets are per-tx-cache-irrelevant but invalidate for
     // any future budget-aware tx surface.
     invalidateUserTxCache(userId);
@@ -289,7 +296,8 @@ export function registerTransactionsTools(server: McpServer, ctx: PgToolContext)
         month: ymPeriod.describe("Month (YYYY-MM)"),
         amount: z.number().nonnegative().describe("Budget amount in the display currency"),
       }),
-      fillBodySchema.extend({
+      // `mode` / `noEnd` (rule-making fill) stay web-only until MCP gets rule ops.
+      fillBodySchema.omit({ mode: true, noEnd: true }).extend({
         op: z.literal("fill"),
         preview: z.boolean().default(true).describe("true (default) returns the rows without saving."),
       }),

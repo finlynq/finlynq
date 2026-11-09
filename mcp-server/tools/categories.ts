@@ -470,8 +470,11 @@ export function registerCategoriesTools(server: McpServer, ctx: PgToolContext) {
             AND t.user_id = s.user_id AND t.category_id = ${tgtId} AND t.month = s.month
           RETURNING s.month
         `);
+        // A moved month keeps its whole amount as typed: the source's budget
+        // rules go with the source category (ON DELETE CASCADE), so nothing
+        // would recompute their part on the target.
         const budgetsMoved = await q(tx, sql`
-          UPDATE budgets SET category_id = ${tgtId}
+          UPDATE budgets SET category_id = ${tgtId}, rules_amount = NULL
           WHERE user_id = ${userId} AND category_id = ${srcId}
           RETURNING id
         `);
