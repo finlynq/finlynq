@@ -1,0 +1,130 @@
+/* GENERATED LIST, edit with care. See ./README.md.
+   Joins each font's per-subset families (declared in ./fonts.ts) into the CSS
+   variable the app reads, latin first like Google's own CSS, then a local
+   fallback with the metrics next/font/google computed, so text doesn't jump
+   when the web font arrives. The per-subset variables are set by classes on
+   <html>, which is also :root. */
+
+@font-face {
+  font-family: "Geist Fallback";
+  src: local("Arial");
+  ascent-override: 95.94%;
+  descent-override: 28.16%;
+  line-gap-override: 0%;
+  size-adjust: 104.76%;
+}
+
+/* Geist: latin, latin-ext, vietnamese, cyrillic, cyrillic-ext, then the fallback. */
+
+:root {
+  --font-geist-sans:
+    var(--font-geist-sans-latin),
+    var(--font-geist-sans-latin-ext),
+    var(--font-geist-sans-vietnamese),
+    var(--font-geist-sans-cyrillic),
+    var(--font-geist-sans-cyrillic-ext),
+    "Geist Fallback";
+}
+
+@font-face {
+  font-family: "Geist Mono Fallback";
+  src: local("Arial");
+  ascent-override: 74.67%;
+  descent-override: 21.92%;
+  line-gap-override: 0%;
+  size-adjust: 134.59%;
+}
+
+/* Geist Mono: latin, latin-ext, vietnamese, symbols2, cyrillic, cyrillic-ext, then the fallback. */
+
+:root {
+  --font-geist-mono:
+    var(--font-geist-mono-latin),
+    var(--font-geist-mono-latin-ext),
+    var(--font-geist-mono-vietnamese),
+    var(--font-geist-mono-symbols2),
+    var(--font-geist-mono-cyrillic),
+    var(--font-geist-mono-cyrillic-ext),
+    "Geist Mono Fallback";
+}
+
+@font-face {
+  font-family: "Instrument Serif Fallback";
+  src: local("Times New Roman");
+  ascent-override: 117.94%;
+  descent-override: 36.93%;
+  line-gap-override: 0%;
+  size-adjust: 83.94%;
+}
+
+/* Instrument Serif: latin, latin-ext, then the fallback. */
+
+:root {
+  --font-instrument-serif:
+    var(--font-instrument-serif-latin),
+    var(--font-instrument-serif-latin-ext),
+    "Instrument Serif Fallback";
+}
+
+@font-face {
+  font-family: "Inter Fallback";
+  src: local("Arial");
+  ascent-override: 90.44%;
+  descent-override: 22.52%;
+  line-gap-override: 0%;
+  size-adjust: 107.12%;
+}
+
+/* Inter: latin, latin-ext, vietnamese, greek, greek-ext, cyrillic, cyrillic-ext, then the fallback. */
+
+:root {
+  --font-inter:
+    var(--font-inter-latin),
+    var(--font-inter-latin-ext),
+    var(--font-inter-vietnamese),
+    var(--font-inter-greek),
+    var(--font-inter-greek-ext),
+    var(--font-inter-cyrillic),
+    var(--font-inter-cyrillic-ext),
+    "Inter Fallback";
+}
+
+@font-face {
+  font-family: "IBM Plex Sans Fallback";
+  src: local("Arial");
+  ascent-override: 101.32%;
+  descent-override: 27.18%;
+  line-gap-override: 0%;
+  size-adjust: 101.17%;
+}
+
+/* IBM Plex Sans: latin, latin-ext, vietnamese, greek, cyrillic, cyrillic-ext, then the fallback. */
+
+:root {
+  --font-ibm-plex-sans:
+    var(--font-ibm-plex-sans-latin),
+    var(--font-ibm-plex-sans-latin-ext),
+    var(--font-ibm-plex-sans-vietnamese),
+    var(--font-ibm-plex-sans-greek),
+    var(--font-ibm-plex-sans-cyrillic),
+    var(--font-ibm-plex-sans-cyrillic-ext),
+    "IBM Plex Sans Fallback";
+}
+
+@font-face {
+  font-family: "Atkinson Hyperlegible Fallback";
+  src: local("Arial");
+  ascent-override: 95.6%;
+  descent-override: 29.18%;
+  line-gap-override: 0%;
+  size-adjust: 99.37%;
+}
+
+/* Atkinson Hyperlegible: latin, latin-ext, then the fallback. */
+
+:root {
+  --font-atkinson:
+    var(--font-atkinson-latin),
+    var(--font-atkinson-latin-ext),
+    "Atkinson Hyperlegible Fallback";
+}
