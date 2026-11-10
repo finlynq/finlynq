@@ -38,11 +38,92 @@ export type Release = {
 
 export const RELEASES: Release[] = [
   {
+    version: "3.6.0",
+    slug: "v3.6.0",
+    name: "Finlynq v3.6.0",
+    date: "2026-11-10",
+    current: true,
+    tagline:
+      "Finlynq v3.6.0 rebuilds Budgets as a cash-flow plan with rules that fill future months, adds phone widgets, and makes small-currency rates exact.",
+    summary: [
+      "Finlynq v3.6.0 collects everything shipped since v3.5.0. The headline is Budgets: rebuilt as a plan for the whole month's money in and out, and now able to follow a formula into the months ahead without ever rewriting the months behind you.",
+      "Finlynq is an open-source (AGPL v3) personal finance app with a first-party Model Context Protocol (MCP) server, so you can track your money in the app and analyze it from Claude, ChatGPT, Cursor, or any MCP-compatible assistant.",
+    ],
+    sections: [
+      {
+        heading: "Budgets",
+        items: [
+          "Budgets is now a cash-flow plan. Every income and spending category is listed, budgeted or not, next to your loan payments, so you can see what is left to plan for the month.",
+          "Budget a whole category group as one line, roll leftover money into next month, and fill budgets from last month, an average or the same month last year.",
+          "New: budget rules. Give a budget a formula, such as $400 a month rising 3% every January, from a start month to an end month or with no end. Several rules can add up on one budget.",
+          "Adjust any month on top of its rules, up or down, or use one amount for a month and ignore the rules there.",
+          "Months that have ended keep their budgets. Rules fill this month and later, so changing or deleting a rule never rewrites your history.",
+          "Fill budgets now offers Only this month, or This and future months, which adds a rule to each budget and tells you which existing rules it ends.",
+        ],
+      },
+      {
+        heading: "Mobile apps",
+        items: [
+          "Home-screen widgets on Android and iOS: Left to spend, Upcoming payments, Net worth and Add transaction. They show what the app last loaded and never hold your sign-in.",
+          "Budgets on Android follows the new Budgets page: every category, loan payments, carryover and Fill.",
+          "Read your feedback threads and our replies in the app. On Android, Home tells you when a newer version is in the store.",
+          "Review and record emailed bank alerts from your phone, and pick dates from a calendar.",
+          "Budget rules on the phone and editing a payment on a loan schedule are in version 1.0.32, in Google Play review and on its way to the App Store as of this release.",
+        ],
+      },
+      {
+        heading: "Loans",
+        items: [
+          "Loans are a sortable list instead of cards, which helps once you track more than a few.",
+          "Change a payment on a loan's schedule, more, less or skipped, and the interest and payoff date follow.",
+        ],
+      },
+      {
+        heading: "Investing",
+        items: [
+          "Portfolio performance leaves new money out. Deposits and transfers in no longer count as returns, in both the time-weighted and money-weighted figures, across your whole history.",
+          "Cost basis over time uses the exchange rate of each purchase, so the cost line on the performance chart no longer moves with currency swings.",
+          "An investment account you emptied reads zero in your net worth history instead of carrying its last value.",
+          "Rounding leftovers from fund sales count as closed positions, and every fund shows its name on All Holdings.",
+          "PAX Gold and Tether Gold are priced when the holding is marked as crypto, and securities that changed ticker suggest their new symbol.",
+        ],
+      },
+      {
+        heading: "Currencies",
+        items: [
+          "Today's exchange rate is read at full precision. Small currencies were converted at a rounded rate: the Indonesian rupiah and Uzbek som read as 10,000 to the dollar instead of about 18,000 and 12,000, and the Korean won and Colombian peso were 5 to 8% off. Amounts already converted with the rounded rate are recalculated.",
+          "Show exchange rates inverted (1 USD = 18,039 IDR) wherever a rate appears, from Settings, General.",
+          "A currency you switch your reports to can be picked for accounts and other records straight away.",
+        ],
+      },
+      {
+        heading: "Imports and everyday fixes",
+        items: [
+          "Searching transactions covers your whole history, not only the newest 1,000 rows.",
+          "Emailed bank alerts are recorded under the merchant, and an email a rule matched but held back says why and can be recorded with one click.",
+          "A sign that looks unusual for a category is a heads-up, never a refusal, wherever a transaction is booked.",
+          "Booking a bank row as a transfer keeps its date, amount and accounts.",
+          "Restoring a backup either completes or changes nothing. A failed restore no longer empties your account.",
+          "Problems a bank feed reports during a sync are listed in Settings, Bank feeds.",
+        ],
+      },
+      {
+        heading: "AI assistants (MCP)",
+        items: [
+          "manage_budgets can list, add, change and delete budget rules, adjust a month, and fill with rules. get_budget_summary shows how each budget is made up.",
+          "An assistant can create an account, subscription or holding in any currency you can report in.",
+          "54 tools: the broken add_snapshot tool is gone, since net worth history is built from your transactions automatically.",
+        ],
+      },
+    ],
+    githubUrl: "https://github.com/finlynq/finlynq/releases/tag/v3.6.0",
+  },
+  {
     version: "3.5.0",
     slug: "v3.5.0",
     name: "Finlynq v3.5.0",
     date: "2026-10-13",
-    current: true,
+    current: false,
     tagline:
       "Finlynq v3.5.0 adds loans with real interest handling, a cost basis method you choose, reports by year, by category and on a calendar, and a merged Subscriptions page.",
     summary: [
