@@ -27,9 +27,12 @@ export function getUploadsBaseDir(): string {
 
   const cwd = process.cwd();
   const normalized = cwd.replace(/\\/g, "/").replace(/\/+$/, "");
+  // turbopackIgnore on both joins: runtime data, not a build input (see
+  // next.config.ts outputFileTracingExcludes, which keeps uploads/ out of the
+  // build output even if a new caller forgets the hint).
   if (normalized.endsWith("/.next/standalone")) {
     // <root>/.next/standalone → <root>/uploads (sibling of .next).
-    return path.join(cwd, "..", "..", "uploads");
+    return path.join(/* turbopackIgnore: true */ cwd, "..", "..", "uploads");
   }
-  return path.join(cwd, "uploads");
+  return path.join(/* turbopackIgnore: true */ cwd, "uploads");
 }

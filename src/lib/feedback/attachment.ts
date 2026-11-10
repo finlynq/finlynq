@@ -147,12 +147,17 @@ export function validateFeedbackAttachment(input: {
  * `<base>/feedback/<userId>/<uuid>.<ext>`. The directory is keyed on the thread
  * OWNER's userId for ALL messages (seed + user + admin replies), so a wipe can
  * find every file by owner; authorship is tracked in the DB row, not the path.
+ *
+ * `turbopackIgnore`: a runtime data path, not a build input. Without the hint
+ * the bundler globs the project root for `*feedback*` and traces source files,
+ * migrations and every stored upload into the build output (next.config.ts
+ * `outputFileTracingExcludes` is the guard for uploads/ itself).
  */
 export function feedbackAttachmentPath(
   userId: string,
   id: string,
   ext: string,
 ): { dir: string; file: string } {
-  const dir = path.join(getUploadsBaseDir(), "feedback", userId);
-  return { dir, file: path.join(dir, `${id}.${ext}`) };
+  const dir = path.join(/* turbopackIgnore: true */ getUploadsBaseDir(), "feedback", userId);
+  return { dir, file: path.join(/* turbopackIgnore: true */ dir, `${id}.${ext}`) };
 }

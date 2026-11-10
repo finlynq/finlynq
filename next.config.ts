@@ -55,6 +55,20 @@ const nextConfig: NextConfig = {
     ignoreBuildErrors: false,
   },
   serverExternalPackages: ["pg", "pdf-parse", "@napi-rs/canvas"],
+  // Keep runtime data out of the build output (2026-11-10). File tracing can't
+  // resolve the dynamic paths built from getUploadsBaseDir() (feedback
+  // attachments) or server-logger's pf-server.log, so it globbed the project
+  // root and listed every user upload under uploads/feedback/** in the route
+  // traces; the standalone step then copied real users' attachments into
+  // .next/standalone/uploads on every build. The app never reads that copy
+  // (it uses <root>/uploads, or PF_UPLOADS_DIR). Turbopack honours this key for
+  // route traces (measured on 16.2.12); the instrumentation hook's trace is not
+  // route-keyed and still lists pf-server.log. The turbopackIgnore hints in
+  // uploads-dir.ts / feedback/attachment.ts stop the glob itself.
+  // Pinned by tests/build-trace-excludes.test.ts.
+  outputFileTracingExcludes: {
+    "*": ["uploads/**", "pf-server.log"],
+  },
   // Compile .ts workspace packages directly (they ship source, not dist).
   transpilePackages: ["@finlynq/import-connectors"],
   distDir: process.env.NEXT_DIST_DIR || ".next",
