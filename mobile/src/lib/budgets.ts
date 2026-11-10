@@ -15,7 +15,24 @@ export type BudgetLineStatus = "unbudgeted" | "ok" | "warn" | "over" | "received
 export type DebtStatus = "paid" | "due" | "late" | "none";
 export type RolloverNegative = "carry" | "reset";
 
+/**
+ * A line's budget rules for the month (web `month.ts` LinePlan). `open` = the
+ * current month or later; a month that has ended is a plain value. Absent on a
+ * server without budget rules.
+ */
+export interface LinePlan {
+  ruleCount: number;
+  /** What the rules active this month add up to; null when none is. */
+  fromRules: number | null;
+  /** Typed on top of the rules (negative takes off). */
+  adjustment: number;
+  /** "Use only this amount": the rules are ignored this month. */
+  override: boolean;
+  open: boolean;
+}
+
 export interface BudgetLine {
+  plan?: LinePlan | null;
   /** `c:<categoryId>`: what the write routes take. */
   key: string;
   categoryId: number | null;
@@ -35,6 +52,7 @@ export interface BudgetLine {
 }
 
 export interface BudgetGroup {
+  plan?: LinePlan | null;
   /** `g:<group>`; the name part is what the write routes take, `name` is only its label. */
   key: string;
   name: string;
@@ -405,6 +423,7 @@ export interface BudgetTarget {
   carriedIn: number | null;
   rollover: boolean;
   rolloverNegative: RolloverNegative;
+  plan: LinePlan | null;
 }
 
 const lineTarget = (line: BudgetLine, section: "income" | "spending", inGroupBudget: boolean): BudgetTarget => ({
@@ -420,6 +439,7 @@ const lineTarget = (line: BudgetLine, section: "income" | "spending", inGroupBud
   carriedIn: line.carriedIn,
   rollover: line.rollover,
   rolloverNegative: line.rolloverNegative,
+  plan: line.plan ?? null,
 });
 
 /**
@@ -445,6 +465,7 @@ export function findBudgetTarget(month: BudgetMonth, key: string): BudgetTarget 
         carriedIn: g.carriedIn,
         rollover: g.rollover,
         rolloverNegative: g.rolloverNegative,
+        plan: g.plan ?? null,
       };
     }
     for (const l of g.lines) if (l.key === key) return lineTarget(l, "spending", g.byGroup);
@@ -597,3 +618,90 @@ export function debtView(d: DebtLine, today: string, currency: string): RowView 
 export const isMissingRoute = (error: string | undefined) => error === "HTTP 404";
 export const BUDGET_ROUTE_MISSING =
   "Budgets need a newer Finlynq server. Update the server this app connects to, then try again.";
+
+// ─── Budget rules (web plan/budget-rules.md) ─────────────────────────────────
+// Mirrors pf-app `src/lib/budgets/rules.ts` (describeIncrease) and the web
+// budget-rows `ruleMade`; keep them in sync. The server works out every amount.
+
+export interface RuleIncrease {
+  mode: "percent" | "amount";
+  value: number;
+  every: "month" | "year";
+  stepMonth?: number;
+}
+
+export interface BudgetRule {
+  id: number;
+  key: string;
+  amount: number;
+  currency: string;
+  startMonth: string;
+  endMonth: string | null;
+  increase: RuleIncrease | null;
+  /** The rule's amount in the first month shown, in the display currency. */
+  fromMonthAmount: number | null;
+}
+
+/** GET /api/budgets/rules?key=&month= */
+export interface LineRulesView {
+  key: string;
+  currency: string;
+  /** The first month shown: the month asked for, or this month when that has ended. */
+  from: string;
+  rules: BudgetRule[];
+  months: Array<{ month: string; fromRules: number; adjustment: number; override: boolean; total: number | null }>;
+}
+
+export interface BudgetRuleInput {
+  amount: number;
+  startMonth: string;
+  endMonth: string | null;
+  increase: RuleIncrease | null;
+}
+
+/** Rules make the month's budget: an open month a rule covers, or one set to "only this amount". */
+export function ruleMade(plan: LinePlan | null | undefined): plan is LinePlan {
+  return !!plan?.open && (plan.fromRules != null || plan.override);
+}
+
+const MONTH_NAMES = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
+export const monthName = (n: number) => MONTH_NAMES[(((n - 1) % 12) + 12) % 12];
+
+/** "+3% every January", "\u2212$25 every month", or "" for no increase. */
+export function describeIncrease(inc: RuleIncrease | null, formatAmount: (n: number) => string): string {
+  if (!inc || !inc.value) return "";
+  const sign = inc.value > 0 ? "+" : "\u2212";
+  const size = inc.mode === "percent" ? `${Math.abs(inc.value)}%` : formatAmount(Math.abs(inc.value));
+  const when = inc.every === "month" ? "every month" : `every ${monthName(inc.stepMonth ?? 1)}`;
+  return `${sign}${size} ${when}`;
+}
+
+export function shortMonth(month: string): string {
+  const [year, m] = month.split("-").map(Number);
+  return `${MONTH_NAMES[m - 1].slice(0, 3)} ${year}`;
+}
+
+/** "Oct 2026 to Jul 2027" or "from Oct 2026, no end". */
+export function ruleRange(startMonth: string, endMonth: string | null): string {
+  return endMonth ? `${shortMonth(startMonth)} to ${shortMonth(endMonth)}` : `from ${shortMonth(startMonth)}, no end`;
+}
+
+/** `YYYY-MM` shifted by n months. */
+export function addMonths(month: string, n: number): string {
+  const [y, m] = month.split("-").map(Number);
+  const t = y * 12 + (m - 1) + n;
+  return `${Math.floor(t / 12)}-${String((t % 12) + 1).padStart(2, "0")}`;
+}
+
+/**
+ * A typed amount that may be negative (an adjustment): a number, empty for
+ * none, "invalid" otherwise. Same comma rule as parseBudgetAmount.
+ */
+export function parseSignedAmount(text: string): number | null | "invalid" {
+  const trimmed = text.trim();
+  const negative = /^[-\u2212]/.test(trimmed);
+  const parsed = parseBudgetAmount(negative ? trimmed.slice(1) : trimmed);
+  if (parsed === "invalid") return "invalid";
+  if (parsed == null) return negative ? "invalid" : null;
+  return negative ? -parsed : parsed;
+}

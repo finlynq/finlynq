@@ -24,6 +24,7 @@ jest.mock("../api/client", () => ({
     setBudgetCarryover: jest.fn(),
     fillBudgets: jest.fn(),
     getLoans: jest.fn(),
+    adjustBudget: jest.fn(),
   },
 }));
 
@@ -664,6 +665,88 @@ describe("BudgetsScreen", () => {
       fireEvent.press(q.getByText("Preview"));
       await waitFor(() => expect(q.getByText("Nope")).toBeTruthy());
       expect(q.getByText("Preview")).toBeTruthy();
+    });
+  });
+
+  describe("budget rules", () => {
+    // Groceries' month is made by its rules: 2,800 from rules + 50 typed.
+    function ruleMonth(plan: Partial<NonNullable<BudgetLine["plan"]>> = {}) {
+      const m = month();
+      m.spending[0].lines[0] = {
+        ...m.spending[0].lines[0],
+        budgeted: 2850,
+        plan: { ruleCount: 2, fromRules: 2800, adjustment: 50, override: false, open: true, ...plan },
+      };
+      return m;
+    }
+
+    async function openRuleLine(data: BudgetMonth) {
+      mockLoad(data);
+      (endpoints.adjustBudget as jest.Mock).mockResolvedValue({ success: true, data: {} });
+      const q = renderScreen();
+      await waitFor(() => expect(q.getByText("Groceries")).toBeTruthy());
+      fireEvent.press(q.getByLabelText("Budget for Groceries"));
+      await waitFor(() => expect(q.getByText("From rules (2)")).toBeTruthy());
+      return q;
+    }
+
+    it("marks a line that has rules", async () => {
+      mockLoad(ruleMonth());
+      const q = renderScreen();
+      await waitFor(() => expect(q.getByText("Groceries")).toBeTruthy());
+      expect(q.getAllByLabelText("Has budget rules")).toHaveLength(1);
+    });
+
+    it("shows what the rules give and saves an adjustment, which may be negative", async () => {
+      const q = await openRuleLine(ruleMonth());
+      expect(q.getByLabelText("Adjustment").props.value).toBe("50");
+      fireEvent.changeText(q.getByLabelText("Adjustment"), "-25");
+      expect(q.getByText("$2,775.00")).toBeTruthy();
+      fireEvent.press(q.getByLabelText("Save"));
+      await waitFor(() => expect(endpoints.adjustBudget).toHaveBeenCalledWith("c:1", monthFromOffset(0), { adjustment: -25 }));
+      expect(endpoints.setBudgetLine).not.toHaveBeenCalled();
+    });
+
+    it("uses only one amount this month, ignoring the rules", async () => {
+      const q = await openRuleLine(ruleMonth());
+      fireEvent(q.getByLabelText("Use only this amount this month"), "valueChange", true);
+      fireEvent.changeText(q.getByLabelText("Amount for this month"), "90");
+      fireEvent.press(q.getByLabelText("Save"));
+      await waitFor(() => expect(endpoints.adjustBudget).toHaveBeenCalledWith("c:1", monthFromOffset(0), { override: 90 }));
+    });
+
+    it("stops using only one amount and keeps the adjustment typed", async () => {
+      const q = await openRuleLine(ruleMonth({ override: true, adjustment: 0 }));
+      fireEvent(q.getByLabelText("Use only this amount this month"), "valueChange", false);
+      fireEvent.changeText(q.getByLabelText("Adjustment"), "10");
+      fireEvent.press(q.getByLabelText("Save"));
+      await waitFor(() =>
+        expect(endpoints.adjustBudget).toHaveBeenCalledWith("c:1", monthFromOffset(0), { override: null, adjustment: 10 }),
+      );
+    });
+
+    it("refuses an adjustment that isn't an amount", async () => {
+      const q = await openRuleLine(ruleMonth());
+      fireEvent.changeText(q.getByLabelText("Adjustment"), "abc");
+      fireEvent.press(q.getByLabelText("Save"));
+      await waitFor(() => expect(q.getByText(/minus sign/)).toBeTruthy());
+      expect(endpoints.adjustBudget).not.toHaveBeenCalled();
+    });
+
+    it("opens the line's rules", async () => {
+      const q = await openRuleLine(ruleMonth());
+      fireEvent.press(q.getByText("Budget rules (2)"));
+      expect(mockNavigate).toHaveBeenCalledWith("BudgetRules", { lineKey: "c:1", name: "Groceries", month: monthFromOffset(0) });
+    });
+
+    it("offers to add a rule on a line without any, keeping the plain field", async () => {
+      mockLoad();
+      const q = renderScreen();
+      await waitFor(() => expect(q.getByText("Transport")).toBeTruthy());
+      fireEvent.press(q.getByLabelText("Budget for Transport"));
+      await waitFor(() => expect(q.getByLabelText("Budget amount")).toBeTruthy());
+      fireEvent.press(q.getByText("Add a budget rule for later months"));
+      expect(mockNavigate).toHaveBeenCalledWith("BudgetRules", { lineKey: "c:3", name: "Transport", month: monthFromOffset(0) });
     });
   });
 

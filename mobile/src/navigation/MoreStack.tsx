@@ -2,6 +2,7 @@ import React from "react";
 import { createNativeStackNavigator } from "@react-navigation/native-stack";
 import MoreScreen from "../screens/MoreScreen";
 import BudgetsScreen from "../screens/BudgetsScreen";
+import BudgetRulesScreen from "../screens/BudgetRulesScreen";
 import GoalsScreen from "../screens/GoalsScreen";
 import LoansScreen from "../screens/LoansScreen";
 import LoanDetailScreen from "../screens/LoanDetailScreen";
@@ -57,6 +58,8 @@ export interface ReportRangeRouteParams {
 export type MoreStackParamList = {
   MoreHome: undefined;
   Budgets: undefined;
+  // One budget line's rules (key `c:<id>` / `g:<group>`), from the line sheet.
+  BudgetRules: { lineKey: string; name: string; month: string };
   Goals: undefined;
   Loans: undefined;
   // One loan and its payment schedule, opened from the Loans list.
@@ -113,6 +116,7 @@ export default function MoreStack() {
     <Stack.Navigator screenOptions={{ headerShown: false }}>
       <Stack.Screen name="MoreHome" component={MoreScreen} />
       <Stack.Screen name="Budgets" component={BudgetsScreen} />
+      <Stack.Screen name="BudgetRules" component={BudgetRulesScreen} />
       <Stack.Screen name="Goals" component={GoalsScreen} />
       <Stack.Screen name="Loans" component={LoansScreen} />
       <Stack.Screen name="LoanDetail" component={LoanDetailScreen} />

@@ -341,7 +341,14 @@ export const api = {
 };
 
 // Typed endpoint helpers
-import type { BudgetFillRequest, BudgetFillResult, BudgetMonth, BudgetSettingsChange } from "../lib/budgets";
+import type {
+  BudgetFillRequest,
+  BudgetFillResult,
+  BudgetMonth,
+  BudgetRuleInput,
+  BudgetSettingsChange,
+  LineRulesView,
+} from "../lib/budgets";
 import type {
   Account,
   AccountBalance,
@@ -718,6 +725,18 @@ export const endpoints = {
     api.put<unknown>("/api/budgets/carryover", { key, month, amount }),
   // `preview: true` returns the rows without saving.
   fillBudgets: (request: BudgetFillRequest) => api.post<BudgetFillResult>("/api/budgets/fill", request),
+  // Budget rules (web plan/budget-rules.md). They fill the current month and
+  // later; a server without them answers 404 (`isMissingRoute`).
+  // The cell of an open month a rule covers: an adjustment on top of the rules
+  // (negative takes off), or `override` = use only this amount (null stops it).
+  adjustBudget: (key: string, month: string, change: { adjustment?: number | null; override?: number | null }) =>
+    api.put<unknown>("/api/budgets/adjust", { key, month, ...change }),
+  getBudgetRules: (key: string, month: string) =>
+    api.get<LineRulesView>(`/api/budgets/rules?key=${encodeURIComponent(key)}&month=${month}`),
+  createBudgetRule: (key: string, rule: BudgetRuleInput) => api.post<{ id: number }>("/api/budgets/rules", { key, ...rule }),
+  // Every field is sent: PUT replaces the rule.
+  updateBudgetRule: (id: number, rule: BudgetRuleInput) => api.put<{ id: number }>("/api/budgets/rules", { id, ...rule }),
+  deleteBudgetRule: (id: number) => api.delete<{ id: number }>(`/api/budgets/rules?id=${id}`),
 
   getLoans: () => api.get<LoanSummary[]>("/api/loans"),
   // Create / edit / delete. POST and PUT answer bare JSON and refuse a loan

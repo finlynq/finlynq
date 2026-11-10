@@ -392,3 +392,17 @@ review never prompts.
   through react-native-web against dev.finlynq.com as the demo account: November 2026 lists Groceries $0 / $199 (a
   carried-in amount) beside PR389 Verify Target $0 / $250, where the legacy list has only the second, and no request
   goes to `/api/budgets`.
+- **Next build, not in 1.0.31: budget rules** (2026-11-10, on `mobile-dev`; not in any build; web plan
+  `plan/budget-rules.md`). A line with rules gets a small list icon. Its sheet, on a month the rules make, shows
+  **From rules (N)**, an **Adjustment** that may be negative, and **Use only this amount this month** (ignores the
+  rules), with the month's total; saving goes to `PUT /api/budgets/adjust`. **Budget rules (N)** / **Add a budget
+  rule for later months** opens `BudgetRulesScreen` (More stack `BudgetRules {lineKey, name, month}`): the line's
+  rules (amount, months, increase in words), add / edit / delete (an Alert says months that have ended keep their
+  budgets), months picked with a ‹ › stepper, and the next 12 months as Rules / Typed / Budget, over
+  `GET/POST/PUT/DELETE /api/budgets/rules`. Types and helpers mirror the web (`LinePlan`, `ruleMade`,
+  `describeIncrease`) in `lib/budgets.ts`. A server without rules answers 404 and the screen says to update it.
+  JavaScript only. Server routes are on prod since 2026-11-10. Pinned by `budgetRules.test.tsx` and the
+  "budget rules" block of `BudgetsScreen.test.tsx`. **Seen:** both screens through react-native-web with fixture
+  data, 360px, light and dark. **Check on a device before promoting:** the keyboard over the adjustment and amount
+  fields (the adjustment uses `numbers-and-punctuation` so a minus can be typed), the `Switch` rows, and that the
+  Budgets list refreshes on coming back from the rules screen.

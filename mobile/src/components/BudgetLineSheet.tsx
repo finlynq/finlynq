@@ -24,6 +24,8 @@ import { Icon } from "./icon";
 import {
   formatMonthLabel,
   parseBudgetAmount,
+  parseSignedAmount,
+  ruleMade,
   type BudgetSettingsChange,
   type BudgetTarget,
 } from "../lib/budgets";
@@ -40,6 +42,7 @@ export function BudgetLineSheet({
   onClose,
   onChanged,
   onSeeSpending,
+  onOpenRules,
 }: {
   /** Null hides the sheet. */
   target: BudgetTarget | null;
@@ -49,19 +52,26 @@ export function BudgetLineSheet({
   /** Reloads the month after a write; the sheet stays busy until it has. */
   onChanged: () => Promise<void>;
   onSeeSpending: (categoryId: number, name: string) => void;
+  /** Opens the line's budget rules; absent on a server without them. */
+  onOpenRules?: (key: string, name: string) => void;
 }) {
   const { colors } = useTheme();
   const insets = useSafeAreaInsets();
   const [text, setText] = useState("");
+  const [adjText, setAdjText] = useState("");
+  const [useOnly, setUseOnly] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
   const targetKey = target?.key ?? null;
   const seed = target?.budgeted ?? null;
+  const plan = target?.plan ?? null;
   // Seeded when a line opens, not on each reload, so a toggle saved in the sheet
   // never overwrites what is being typed.
   useEffect(() => {
     setText(seed == null ? "" : String(seed));
+    setAdjText(plan && plan.adjustment ? String(plan.adjustment) : "");
+    setUseOnly(!!plan?.override);
     setError(null);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [targetKey]);
@@ -103,6 +113,39 @@ export function BudgetLineSheet({
     void write(() => endpoints.setBudgetLine(target.key, month, amount), true);
   };
 
+  // An open month the line's rules make: what the rules give, plus what is
+  // typed on top, or "use only this amount". The server works out the total.
+  const rulesMake = canBudget && ruleMade(plan);
+  const fromRules = plan?.fromRules ?? 0;
+  const adjParsed = parseSignedAmount(adjText);
+  const onlyParsed = parseBudgetAmount(text);
+  const shownTotal = useOnly
+    ? onlyParsed === "invalid" || onlyParsed == null
+      ? null
+      : onlyParsed
+    : adjParsed === "invalid"
+      ? null
+      : fromRules + (adjParsed ?? 0);
+
+  const saveRuleMonth = () => {
+    if (useOnly) {
+      if (onlyParsed === "invalid" || onlyParsed == null) {
+        setError("Enter the amount to use this month.");
+        return;
+      }
+      void write(() => endpoints.adjustBudget(target.key, month, { override: onlyParsed }), true);
+      return;
+    }
+    if (adjParsed === "invalid") {
+      setError("Enter an amount, with a minus sign to take off.");
+      return;
+    }
+    void write(
+      () => endpoints.adjustBudget(target.key, month, { ...(plan?.override ? { override: null } : {}), adjustment: adjParsed }),
+      true,
+    );
+  };
+
   const settings = (change: Omit<BudgetSettingsChange, "target" | "month">, closeAfter = false) => {
     const settingsTarget = target.group != null ? { group: target.group } : { categoryId: target.categoryId as number };
     void write(() => endpoints.setBudgetSettings({ target: settingsTarget, month, ...change }), closeAfter);
@@ -133,7 +176,75 @@ export function BudgetLineSheet({
           ) : null}
 
           <ScrollView keyboardShouldPersistTaps="handled" style={styles.body}>
-            {canBudget ? (
+            {rulesMake && plan ? (
+              <>
+                <View style={styles.ruleRow}>
+                  <Text style={[styles.ruleLabel, { color: colors.mutedForeground }]}>
+                    From rules{plan.ruleCount ? ` (${plan.ruleCount})` : ""}
+                  </Text>
+                  <Text
+                    style={[
+                      styles.ruleValue,
+                      { color: useOnly ? colors.mutedForeground : colors.foreground, textDecorationLine: useOnly ? "line-through" : "none" },
+                    ]}
+                  >
+                    {plan.fromRules == null ? "none this month" : fmt(fromRules)}
+                  </Text>
+                </View>
+                {!useOnly ? (
+                  <>
+                    <Text style={[styles.fieldLabel, { color: colors.mutedForeground }]}>ADJUSTMENT (+ ADDS, − TAKES OFF)</Text>
+                    <TextInput
+                      accessibilityLabel="Adjustment"
+                      style={[styles.input, styles.inputFull, { color: colors.foreground, backgroundColor: colors.secondary, borderColor: colors.border }]}
+                      value={adjText}
+                      onChangeText={setAdjText}
+                      keyboardType="numbers-and-punctuation"
+                      placeholder="0"
+                      placeholderTextColor={colors.mutedForeground}
+                      autoFocus
+                      onSubmitEditing={saveRuleMonth}
+                    />
+                  </>
+                ) : null}
+                <View style={styles.switchRow}>
+                  <Text style={[styles.switchLabel, { color: colors.foreground }]}>Use only this amount this month (ignore the rules)</Text>
+                  <Switch accessibilityLabel="Use only this amount this month" value={useOnly} disabled={busy} onValueChange={setUseOnly} />
+                </View>
+                {useOnly ? (
+                  <TextInput
+                    accessibilityLabel="Amount for this month"
+                    style={[styles.input, styles.inputFull, { color: colors.foreground, backgroundColor: colors.secondary, borderColor: colors.border }]}
+                    value={text}
+                    onChangeText={setText}
+                    keyboardType="decimal-pad"
+                    placeholder="0"
+                    placeholderTextColor={colors.mutedForeground}
+                    onSubmitEditing={saveRuleMonth}
+                  />
+                ) : null}
+                <View style={[styles.ruleRow, styles.totalRow, { borderTopColor: colors.border }]}>
+                  <Text style={[styles.ruleLabel, { color: colors.foreground, fontWeight: "700" }]}>{formatMonthLabel(month)}</Text>
+                  <Text
+                    style={[styles.ruleValue, { color: shownTotal != null && shownTotal < 0 ? colors.destructive : colors.foreground, fontWeight: "700" }]}
+                  >
+                    {shownTotal == null ? "—" : fmt(shownTotal)}
+                  </Text>
+                </View>
+                <TouchableOpacity
+                  accessibilityRole="button"
+                  accessibilityLabel="Save"
+                  onPress={busy ? undefined : saveRuleMonth}
+                  style={[styles.saveBtn, styles.saveWide, { backgroundColor: colors.primary, opacity: busy ? 0.6 : 1 }]}
+                >
+                  {busy ? (
+                    <ActivityIndicator size="small" color={colors.primaryForeground} />
+                  ) : (
+                    <Text style={[styles.saveText, { color: colors.primaryForeground }]}>Save</Text>
+                  )}
+                </TouchableOpacity>
+              </>
+            ) : canBudget ? (
               <>
                 <Text style={[styles.fieldLabel, { color: colors.mutedForeground }]}>
                   {income ? "EXPECTED" : "BUDGET"} FOR {formatMonthLabel(month).toUpperCase()} ({currency})
@@ -190,6 +301,25 @@ export function BudgetLineSheet({
             )}
 
             {error ? <Text style={[styles.error, { color: colors.destructive }]}>{error}</Text> : null}
+
+            {canBudget && onOpenRules ? (
+              <View style={[styles.block, { borderTopColor: colors.border }]}>
+                <TouchableOpacity accessibilityRole="button" onPress={() => onOpenRules(target.key, target.name)} style={styles.link}>
+                  <Text style={[styles.linkText, { color: colors.primary }]}>
+                    {plan?.ruleCount ? `Budget rules (${plan.ruleCount})` : "Add a budget rule for later months"}
+                  </Text>
+                </TouchableOpacity>
+                {rulesMake && target.budgeted != null ? (
+                  <TouchableOpacity
+                    accessibilityRole="button"
+                    onPress={() => void write(() => endpoints.setBudgetLine(target.key, month, null), true)}
+                    style={styles.link}
+                  >
+                    <Text style={[styles.linkText, { color: colors.destructive }]}>Clear what is typed this month</Text>
+                  </TouchableOpacity>
+                ) : null}
+              </View>
+            ) : null}
 
             {canRoll ? (
               <View style={[styles.block, { borderTopColor: colors.border }]}>
@@ -280,6 +410,12 @@ const styles = StyleSheet.create({
   },
   saveBtn: { paddingHorizontal: 18, paddingVertical: 11, borderRadius: 8, minWidth: 70, alignItems: "center" },
   saveText: { fontSize: 15, fontWeight: "700" },
+  saveWide: { marginTop: 10, alignSelf: "stretch" },
+  inputFull: { marginRight: 0, marginBottom: 6 },
+  ruleRow: { flexDirection: "row", alignItems: "baseline", justifyContent: "space-between", paddingVertical: 6 },
+  ruleLabel: { fontSize: 14 },
+  ruleValue: { fontSize: 15, fontWeight: "600", fontVariant: ["tabular-nums"] },
+  totalRow: { borderTopWidth: StyleSheet.hairlineWidth, marginTop: 4 },
   link: { paddingVertical: 9 },
   linkText: { fontSize: 14, fontWeight: "600" },
   note: { fontSize: 13, lineHeight: 18 },

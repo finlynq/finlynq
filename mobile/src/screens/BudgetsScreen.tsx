@@ -426,6 +426,11 @@ export default function BudgetsScreen() {
                       <Icon name="refresh" size={12} color={colors.mutedForeground} />
                     </View>
                   ) : null}
+                  {group.byGroup && group.plan?.ruleCount ? (
+                    <View style={styles.rollIcon} accessibilityLabel="Has budget rules">
+                      <Icon name="rules" size={12} color={colors.mutedForeground} />
+                    </View>
+                  ) : null}
                 </>
               }
             />
@@ -453,11 +458,18 @@ export default function BudgetsScreen() {
               name={name}
               view={view}
               badge={
-                line.rollover ? (
-                  <View style={styles.rollIcon}>
-                    <Icon name="refresh" size={12} color={colors.mutedForeground} />
-                  </View>
-                ) : null
+                <>
+                  {line.rollover ? (
+                    <View style={styles.rollIcon}>
+                      <Icon name="refresh" size={12} color={colors.mutedForeground} />
+                    </View>
+                  ) : null}
+                  {!row.inGroupBudget && line.plan?.ruleCount ? (
+                    <View style={styles.rollIcon} accessibilityLabel="Has budget rules">
+                      <Icon name="rules" size={12} color={colors.mutedForeground} />
+                    </View>
+                  ) : null}
+                </>
               }
             />
           </TouchableOpacity>
@@ -637,6 +649,10 @@ export default function BudgetsScreen() {
         onSeeSpending={(categoryId, name) => {
           setSheetKey(null);
           navigation.navigate("CategoryDetail", { categoryId, name });
+        }}
+        onOpenRules={(lineKey, name) => {
+          setSheetKey(null);
+          navigation.navigate("BudgetRules", { lineKey, name, month });
         }}
       />
       <BudgetFillSheet
