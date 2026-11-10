@@ -90,9 +90,16 @@ function kickSelfHeal(
       // instead of a perma-"starting…". `tryBeginRebuild` above seeds the entry
       // running:true, but WITHOUT an onProgress callback `totalDays`/
       // `daysProcessed` never update, so the button froze on "starting…" the
-      // whole walk even though the rebuild was progressing fine.
-      const result = await rebuildPortfolioSnapshots(userId, from, today, dek, (done, total) =>
-        reportRebuildProgress(userId, done, total),
+      // whole walk even though the rebuild was progressing fine. Forward the
+      // phase too: without it the closing cash leg reported under the
+      // investment label, and its account-days count ("day X of 28633") read as
+      // decades of balance history.
+      const result = await rebuildPortfolioSnapshots(
+        userId,
+        from,
+        today,
+        dek,
+        (done, total, phase) => reportRebuildProgress(userId, done, total, phase),
       );
       if (dirtyMarkedAt) await clearDirtyIfUnchanged(userId, dirtyMarkedAt);
       endRebuild(userId, { result });

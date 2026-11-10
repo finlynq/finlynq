@@ -324,6 +324,30 @@ async function deleteLeadingInvestmentSnapshots(
   `);
 }
 
+/**
+ * Window for the CASH leg that closes every rebuild.
+ *
+ * - A caller date (a dirty marker from a dated edit, or an explicit `fromDate`)
+ *   rebuilds every cash account from THAT date forward only. The builder folds
+ *   all earlier deltas into the opening balance, so the rows it writes are
+ *   correct; rows before the date are left as they are. It must NOT stamp the
+ *   cash staleness watermark: a partial build cannot vouch for changes dated
+ *   before its window (an import or reconcile stamps no marker), and claiming
+ *   fresh would hide them from the chart-load cash self-heal.
+ * - No caller date (the manual "Rebuild balance history" button, a first
+ *   backfill) rebuilds full history and stamps the watermark, as before.
+ *
+ * Before 2026-11-10 the leg always ran full history, so booking one transaction
+ * last month rewrote every cash account back to 2015 (one row per account per
+ * day — the "day 16623 of 28633" a user watched for minutes).
+ */
+export function cashLegWindow(
+  fromDate: string | null | undefined,
+): { fromDate: string | null; stampMeta: boolean } {
+  const from = typeof fromDate === "string" && fromDate.length > 0 ? fromDate : null;
+  return from ? { fromDate: from, stampMeta: false } : { fromDate: null, stampMeta: true };
+}
+
 export function rebuildPortfolioSnapshots(
   userId: string,
   fromDate?: string | null,
@@ -452,18 +476,21 @@ async function rebuildPortfolioSnapshotsImpl(
   }
 
   // Cash side (DEK-free): rebuild the per-account historical-FX cash snapshots
-  // over FULL history (decoupled from the investment `from`, which may be a
-  // recent dirty-marker date — a partial cash build would otherwise wrongly
-  // claim the watermark fresh). Guarded by the separate cash in-flight set so a
-  // concurrent chart-load cash self-heal doesn't double-build. Best-effort: a
-  // cash failure must never fail the investment rebuild the caller awaited.
+  // from the CALLER's date (every cash account; full history when there is
+  // none) — see cashLegWindow. Deliberately the caller's `fromDate`, not the
+  // investment `from` above, which is clamped UP to the first holding date and
+  // would skip impacted cash days before it. Guarded by the separate cash
+  // in-flight set so a concurrent chart-load cash self-heal doesn't
+  // double-build. Best-effort: a cash failure must never fail the investment
+  // rebuild the caller awaited.
   if (tryBeginCashRebuild(userId)) {
     try {
+      const cashWindow = cashLegWindow(fromDate);
       await rebuildCashSnapshots({
         userId,
-        fromDate: null,
+        fromDate: cashWindow.fromDate,
         toDate: to,
-        stampMeta: true,
+        stampMeta: cashWindow.stampMeta,
         // Report the cash leg into the SAME registry the button polls, tagged
         // phase 'cash' so the bar stays alive (and correctly labelled) through
         // the cash walk — which for a no-holdings user is the ONLY walk and was
