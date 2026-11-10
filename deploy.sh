@@ -267,76 +267,137 @@ else
   echo "==> Applied $APPLIED_COUNT migration(s)."
 fi
 
-# 3. Build
+# 3. Build into a side directory. The live build in .next is NOT touched here.
+#
+# History (2026-11-10): this step used to move .next aside and delete it, THEN
+# run `npm run build` in place. The service runs from .next/standalone
+# (systemd WorkingDirectory) and reads every /_next/static/* file from disk per
+# request, so for the whole build the live site served pages with no CSS/JS —
+# and when the build FAILED (twice on prod that day: next/font/google could not
+# download a font) it stayed that way, assets 500ing, until a later build
+# succeeded, while /api/healthz and / kept answering 200.
+#
+# Now `next build` writes to $BUILD_DIR (next.config.ts reads NEXT_DIST_DIR) and
+# .next is replaced only after the build AND the static copy have succeeded.
+# Anything failing before the swap exits with the previous build still serving.
+#
+# Layout consequence: Next bakes the dist-dir NAME into the standalone bundle
+# (server.js embeds distDir "./.next-deploy"), and renaming the outer directory
+# does not change it. So after the swap the live tree is
+#   .next/standalone/server.js
+#   .next/standalone/.next-deploy/{server,static,cache}
+# i.e. the inner directory keeps the build-time name. That is expected; the
+# outer name stays .next because the systemd units point at .next/standalone.
+# tsconfig.json lists .next-deploy/types so `next build` doesn't rewrite it.
+BUILD_DIR=".next-deploy"
+BUILD_INNER="$BUILD_DIR/standalone/$BUILD_DIR"
+OLD_NEXT=""
 if [ "$SKIP_BUILD" = false ]; then
-  # Defensive chown opener (issue: pitfall-#1 in memory/finlynq-deploy-pitfalls.md
-  # surfaced for the third time during the session-3 prod promotion). A previous
-  # deploy that failed mid-flight left 132 root-owned files inside
-  # .next/standalone/.next/static/ which blocked the `run_as rm -rf .next` here
-  # because the service user doesn't own them. Reclaim ownership before the rm
-  # so a half-failed deploy can recover on the next run instead of needing
-  # manual `chown` recovery via SSH. `2>/dev/null || true` because the dir may
-  # not exist on a fresh box.
-  if [ -d .next ] && [ -n "$REPO_OWNER" ]; then
-    sudo chown -R "$REPO_OWNER:$REPO_OWNER" .next 2>/dev/null || true
+  # Defensive chown opener (pitfall-#1 in memory/finlynq-deploy-pitfalls.md): a
+  # deploy that died mid-flight once left 132 root-owned files that the service
+  # user could not rm. Reclaim ownership of every tree we may remove below so a
+  # half-failed deploy recovers on the next run without a manual chown.
+  if [ -n "$REPO_OWNER" ]; then
+    for d in .next "$BUILD_DIR" .next.old.*; do
+      if [ -e "$d" ]; then sudo chown -R "$REPO_OWNER:$REPO_OWNER" "$d" 2>/dev/null || true; fi
+    done
   fi
-  # Atomic detach instead of in-place rm. The running service writes runtime
-  # cache files into .next/standalone/.next/cache/fetch-cache/ on every
-  # outbound HTTP fetch (FX rates, Yahoo prices, etc.). When `rm -rf .next`
-  # ran against the live tree, new fetch-cache entries appeared mid-traversal
-  # and `rm` failed with "Directory not empty" on the parent — partial-deleting
-  # the build (server.js gone, dev returning 500 on every page) until the next
-  # successful deploy. The fix: `mv` is atomic and the running service keeps
-  # its open inodes through the rename, so the rm operates on a detached tree
-  # that nobody is writing to. PID-suffixed name avoids collision if a second
-  # deploy fires before the previous .next.old.* finished cleaning up.
-  echo "==> Removing stale build output..."
-  if [ -d .next ]; then
-    OLD_NEXT=".next.old.$$"
-    run_as "mv .next $OLD_NEXT"
-    run_as "rm -rf $OLD_NEXT"
+  # Leftovers from earlier deploys: a build dir from a failed or aborted build,
+  # and old trees detached by a swap whose cleanup never ran (SSH dropout, or a
+  # failed smoke check, which keeps the previous build for a manual rollback).
+  # None of these is the live tree, so nothing is writing into them.
+  echo "==> Clearing leftovers from earlier deploys..."
+  run_as "rm -rf $BUILD_DIR .next.old.*"
+
+  # One retry. The runner's "Typecheck & Build" job has already built this
+  # commit before the deploy job starts, so a failure here is almost always the
+  # box's environment (a font download, memory), and both 2026-11-10 failures
+  # passed on a re-run minutes later. The first failure's output stays in the log.
+  echo "==> Building Next.js into $BUILD_DIR (the live build in .next keeps serving)..."
+  if ! run_as "NEXT_DIST_DIR=$BUILD_DIR npm run build"; then
+    echo "==> Build failed. Retrying once in 30s; the live build is untouched."
+    sleep 30
+    run_as "rm -rf $BUILD_DIR"
+    if ! run_as "NEXT_DIST_DIR=$BUILD_DIR npm run build"; then
+      run_as "rm -rf $BUILD_DIR" || true
+      echo "==> ERROR: the build failed twice. Nothing was swapped or restarted:"
+      echo "    the previous build in .next is still serving."
+      exit 1
+    fi
   fi
-  # Belt-and-suspenders: clean any orphaned .next.old.* trees from a previous
-  # deploy that died after the mv but before the rm (e.g. SSH dropout).
-  run_as "rm -rf .next.old.* 2>/dev/null" || true
-  echo "==> Building Next.js..."
-  run_as "npm run build"
+
+  # Refuse to swap in anything that isn't the standalone layout described above
+  # (e.g. a future Next that names the inner directory differently). Exiting
+  # here leaves the live build serving, same as a failed build.
+  if [ ! -f "$BUILD_DIR/standalone/server.js" ] || [ ! -d "$BUILD_INNER/server" ] || [ ! -d "$BUILD_DIR/static" ]; then
+    echo "==> ERROR: $BUILD_DIR is not the expected standalone layout"
+    echo "    (need $BUILD_DIR/standalone/server.js, $BUILD_INNER/server and $BUILD_DIR/static)."
+    echo "    Nothing was swapped or restarted: the previous build in .next is still serving."
+    exit 1
+  fi
+
+  # 4. Copy static assets + public into the NEW standalone bundle.
+  # Next.js `output: "standalone"` produces standalone/server.js but
+  # deliberately omits static/ and public/ — they must be copied in or the
+  # server 404s every chunk/font/favicon. DEPLOY.md has documented this since
+  # day one; the step was previously missing here, which made every deploy ship
+  # a broken /_next/static/* tree until someone manually rsync'd it on the box.
+  echo "==> Copying $BUILD_DIR/static + public/ into the new standalone bundle..."
+  run_as "rm -rf $BUILD_INNER/static $BUILD_DIR/standalone/public"
+  run_as "cp -r $BUILD_DIR/static $BUILD_INNER/static"
+  run_as "cp -r public $BUILD_DIR/standalone/public"
 else
   echo "==> Skipping build"
 fi
 
-# 4. Copy static assets + public into standalone bundle.
-# Next.js `output: "standalone"` produces .next/standalone/server.js but
-# deliberately omits .next/static and public/ — they must be copied in or the
-# server 404s every chunk/font/favicon. DEPLOY.md has documented this since
-# day one; the step was previously missing here, which made every deploy ship
-# a broken /_next/static/* tree until someone manually rsync'd it on the box.
-if [ "$SKIP_BUILD" = false ]; then
-  echo "==> Copying .next/static + public/ into standalone bundle..."
-  run_as "rm -rf .next/standalone/.next/static .next/standalone/public"
-  run_as "cp -r .next/static .next/standalone/.next/static"
-  run_as "cp -r public .next/standalone/public"
-fi
-
-# 5. Fix ownership so the service user can read all build artifacts.
-# Owner is derived from the checkout (REPO_OWNER, set above) so a future
-# rename of the service account needs no edit here.
-if [ -n "$REPO_OWNER" ]; then
-  chown -R "$REPO_OWNER:$REPO_OWNER" .next || true
-fi
-
-# 6. Restart the service
-# Stamp a fresh DEPLOY_GENERATION so the new process issues JWTs with a new
+# 5. Stamp a fresh DEPLOY_GENERATION so the new process issues JWTs with a new
 # `gen` claim. Existing JWTs become invalid on verify and the client gets a
 # 401 with `{ code: "deploy-reauth-required" }` so the UI can show a tailored
 # re-login prompt. Written as a drop-in so systemd picks it up on restart
-# without editing the unit file on every deploy.
+# without editing the unit file on every deploy. Done BEFORE the swap so the
+# swap-to-restart gap below is as short as possible.
 DEPLOY_GEN="$(date +%s)"
 echo "==> Stamping DEPLOY_GENERATION=$DEPLOY_GEN"
 sudo mkdir -p "/etc/systemd/system/${SERVICE_NAME}.service.d"
 echo -e "[Service]\nEnvironment=DEPLOY_GENERATION=${DEPLOY_GEN}" | \
   sudo tee "/etc/systemd/system/${SERVICE_NAME}.service.d/deploy-generation.conf" > /dev/null
 sudo systemctl daemon-reload
+
+# 6. Swap the new build into .next, then restart straight away.
+# Two renames, no copying or deleting: the old tree is only detached here
+# (renamed to .next.old.<pid>) and is removed after the smoke check passes. The
+# old process keeps serving until the restart; for the few seconds in between
+# its absolute paths resolve into the new tree, the same short blip a restart
+# always was. Never `rm -rf .next` in place: the running service writes
+# fetch-cache files into its tree, and an in-place rm once raced those writes,
+# failed with "Directory not empty" and left a half-deleted build.
+if [ "$SKIP_BUILD" = false ]; then
+  echo "==> Swapping the new build into .next..."
+  if [ -d .next ]; then
+    OLD_NEXT=".next.old.$$"
+    run_as "mv .next $OLD_NEXT"
+  fi
+  run_as "mv $BUILD_DIR .next"
+fi
+
+# Fix ownership so the service user can read all build artifacts.
+# Owner is derived from the checkout (REPO_OWNER, set above) so a future
+# rename of the service account needs no edit here.
+if [ -n "$REPO_OWNER" ]; then
+  chown -R "$REPO_OWNER:$REPO_OWNER" .next || true
+fi
+
+# How to put the previous build back if the new one doesn't come up. Printed on
+# a failed start or smoke check; the previous build is kept for exactly that.
+print_rollback_hint() {
+  if [ -n "$OLD_NEXT" ] && [ -d "$APP_DIR/$OLD_NEXT" ]; then
+    echo ""
+    echo "==> The previous build is kept at $APP_DIR/$OLD_NEXT. To put it back"
+    echo "    (the next deploy deletes .next.old.* trees):"
+    echo "      cd $APP_DIR && sudo -u ${REPO_OWNER:-\$USER} mv .next .next.old.failed \\"
+    echo "        && sudo -u ${REPO_OWNER:-\$USER} mv $OLD_NEXT .next && sudo systemctl restart $SERVICE_NAME"
+  fi
+}
 
 echo "==> Restarting $SERVICE_NAME service..."
 sudo systemctl restart "$SERVICE_NAME"
@@ -346,6 +407,7 @@ sleep 3
 if ! systemctl is-active --quiet "$SERVICE_NAME"; then
   echo "==> ERROR: $SERVICE_NAME failed to start!"
   sudo systemctl status "$SERVICE_NAME" --no-pager
+  print_rollback_hint
   exit 1
 fi
 echo "==> $SERVICE_NAME is running"
@@ -370,7 +432,14 @@ if ! bash "$APP_DIR/scripts/smoke-check.sh" "http://localhost:${APP_PORT}" 90; t
   echo ""
   echo "==> Last 50 log lines from $SERVICE_NAME:"
   sudo journalctl -u "$SERVICE_NAME" -n 50 --no-pager || true
+  print_rollback_hint
   exit 1
+fi
+
+# The new build is serving; the detached previous one can go.
+if [ -n "$OLD_NEXT" ]; then
+  echo "==> Removing the previous build ($OLD_NEXT)..."
+  run_as "rm -rf $OLD_NEXT" || true
 fi
 
 echo "==> Deploy completed successfully at $(date)"

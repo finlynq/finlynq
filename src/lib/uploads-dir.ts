@@ -2,8 +2,9 @@
  * Durable on-disk uploads base directory (FINLYNQ-228).
  *
  * THE DEPLOY-WIPE BUG: on the VPS, pf-dev/pf run from
- * `WorkingDirectory=.next/standalone`, and `deploy.sh` does
- * `mv .next .next.old && rm -rf .next.old` on EVERY deploy. So any path computed
+ * `WorkingDirectory=.next/standalone`, and `deploy.sh` replaces the whole `.next`
+ * tree on EVERY deploy (builds into `.next-deploy`, swaps it in, deletes the old
+ * tree after the smoke check). So any path computed
  * as `process.cwd()/uploads` resolves to `.next/standalone/uploads/` — which is
  * INSIDE the `.next` tree and therefore permanently deleted on each redeploy.
  * Feedback attachments (and mcp_uploads) stored there silently vanish.
