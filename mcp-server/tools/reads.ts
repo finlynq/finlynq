@@ -7,7 +7,7 @@
  */
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { loadBudgetMonth } from "../../src/lib/budgets/load-month";
-import type { BudgetLine } from "../../src/lib/budgets/month";
+import type { BudgetLine, LinePlan } from "../../src/lib/budgets/month";
 import {
   q,
   err,
@@ -314,7 +314,7 @@ export function registerReadsTools(server: McpServer, ctx: PgToolContext) {
   // ── get_budget_summary ─────────────────────────────────────────────────────
   server.tool(
     "get_budget_summary",
-    "Get the month's cash-flow budget: income, spending per category or group, debt payments and left to plan. Each line has budget vs actual and left (incl. carryover). Amounts are in the user's display currency; pass reportingCurrency to override.",
+    "Get the month's cash-flow budget: income, spending per category or group, debt payments and left to plan. Each line has budget vs actual and left (incl. carryover); a line with budget rules also has `rules` (from_rules + adjustment, or only_this_amount). Amounts are in the user's display currency; pass reportingCurrency to override.",
     {
       month: ymPeriod.describe("Month in YYYY-MM format"),
       reportingCurrency: z.string().optional().describe("ISO code for unified totals; defaults to user's display currency."),
@@ -325,6 +325,18 @@ export function registerReadsTools(server: McpServer, ctx: PgToolContext) {
       // count as debt payments or not at all, so loan interest is not counted
       // twice; flows use stored reporting amounts (FINLYNQ-123).
       const b = await loadBudgetMonth(userId, dek, month, reportingCurrency ?? null);
+      // Budget rules (plan/budget-rules.md): how an open month's budget is made
+      // up. Absent for a line with no rules; a month that has ended is a plain value.
+      const rules = (p: LinePlan | null | undefined) =>
+        p
+          ? {
+              rule_count: p.ruleCount,
+              from_rules: p.open ? p.fromRules : null,
+              adjustment: p.open ? p.adjustment : null,
+              only_this_amount: p.open ? p.override : null,
+              month_ended: !p.open,
+            }
+          : undefined;
       const line = (l: BudgetLine) => ({
         category: l.name,
         category_id: l.categoryId,
@@ -335,6 +347,7 @@ export function registerReadsTools(server: McpServer, ctx: PgToolContext) {
         rollover: l.rollover,
         upcoming: l.upcoming || undefined,
         status: l.status,
+        rules: rules(l.plan),
       });
       return dataResponse({
         month: b.month,
@@ -351,6 +364,7 @@ export function registerReadsTools(server: McpServer, ctx: PgToolContext) {
           left: g.left,
           carried_in: g.carriedIn,
           rollover: g.rollover,
+          rules: g.byGroup ? rules(g.plan) : undefined,
           lines: g.lines.map(line),
         })),
         debt_payments: b.debt.map((d) => ({
@@ -1556,7 +1570,7 @@ export function registerReadsTools(server: McpServer, ctx: PgToolContext) {
       if (t === "tools") {
         return dataResponse({
           read_tools: ["get_account_balances", "search_transactions", "get_budget_summary", "get_spending_trends", "get_income_statement", "get_net_worth", "get_categories", "get_recurring_transactions", "get_financial_health_score", "get_spending_anomalies", "get_spotlight_items", "get_weekly_recap", "get_cash_flow_forecast"],
-          write_tools: ["manage_transactions (op: record | update | delete; record takes one row OR transactions[])", "manage_transfers (op: record | update | delete)", "manage_splits (op: list | add | update | delete | replace)", "manage_budgets (op: set | delete)", "manage_accounts (op: add | update | delete | set_mode)", "manage_goals (op: add | update | delete | list)", "manage_categories (op: create | rename | merge | delete)", "manage_rules (op: create | update | delete | list | reorder)", "manage_subscriptions (op: add | update | delete | list)", "manage_loans (op: add | update | delete | list | post_interest | set_schedule | set_interest | set_payment | reset_schedule)", "manage_fx_overrides (op: set | delete | list)", "apply_rules_to_uncategorized"],
+          write_tools: ["manage_transactions (op: record | update | delete; record takes one row OR transactions[])", "manage_transfers (op: record | update | delete)", "manage_splits (op: list | add | update | delete | replace)", "manage_budgets (op: set | delete | fill | settings | carryover | rules | add_rule | update_rule | delete_rule | adjust)", "manage_accounts (op: add | update | delete | set_mode)", "manage_goals (op: add | update | delete | list)", "manage_categories (op: create | rename | merge | delete)", "manage_rules (op: create | update | delete | list | reorder)", "manage_subscriptions (op: add | update | delete | list)", "manage_loans (op: add | update | delete | list | post_interest | set_schedule | set_interest | set_payment | reset_schedule)", "manage_fx_overrides (op: set | delete | list)", "apply_rules_to_uncategorized"],
           portfolio_tools: ["get_portfolio_analysis", "get_portfolio_performance", "analyze_holding", "trace_holding_quantity", "get_investment_insights"],
           portfolio_write_tools: ["portfolio_record_entry (entry_type: buy | sell | swap | transfer | income_expense | fx_conversion | deposit | withdrawal)", "manage_holdings (op: add | update | delete)", "manage_lots (op: status | set_mode | list | reassign | rebuild)"],
           reconcile_tools: ["get_reconciliation_summary", "reconcile (op: suggest | accept | unlink | materialize | apply_rules)", "manage_statement_import (op: upload | list | get | list_rows | update_row | link_transfer_pair | approve | send_to_bank_ledger | apply_rules | reject)", "manage_bank_ledger (op: list_anchors | upsert_anchor | find_duplicates | delete_row)"],
@@ -1570,7 +1584,7 @@ export function registerReadsTools(server: McpServer, ctx: PgToolContext) {
           primary_add: "manage_transactions(op='record', amount, payee, account) — one row; account required, fuzzy matching on account/category names",
           bulk_add: "manage_transactions(op='record', transactions=[{amount, payee, date, account}, ...]) — array; account required per item",
           edits: ["manage_transactions(op='update', id, ...fields)", "manage_transactions(op='delete', id)"],
-          budget: ["manage_budgets(op='set', category, month, amount)", "manage_budgets(op='delete', category, month)"],
+          budget: ["manage_budgets(op='set', category, month, amount)", "manage_budgets(op='delete', category, month)", "manage_budgets(op='add_rule', category, amount, start_month, end_month?, increase?) — fills this month and later", "manage_budgets(op='rules', category) — a line's rules + next 12 months", "manage_budgets(op='adjust', category, month, adjustment | only_this_amount)"],
           accounts: ["manage_accounts(op='add', name, type)", "manage_accounts(op='update', account, ...)", "manage_accounts(op='delete', account)", "manage_accounts(op='set_mode', accountId, mode)"],
           goals: ["manage_goals(op='add', name, type, target_amount)", "manage_goals(op='update', goal, ...)", "manage_goals(op='delete', goal)", "manage_goals(op='list')"],
           categories: ["manage_categories(op='create', name, type)", "manage_categories(op='rename', id|name, new_name) — pure metadata; a duplicate name is refused", "manage_categories(op='merge', source, target, confirmation_token) — TWO-STEP: omit the token to preview per-type dependent counts + get one, then re-call to atomically repoint EVERY dependent (transactions/splits/rules/subscriptions/budgets/…) into target and delete source", "manage_categories(op='delete', id, confirmation_token) — omit the token to preview FK counts + get one", "manage_rules(op='create', match_payee, assign_category)"],

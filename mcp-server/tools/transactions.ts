@@ -10,12 +10,22 @@ import {
   BudgetWriteError,
   runBudgetFill,
   setAccountBudgetRole,
+  setBudgetAdjustment,
   setBudgetCell,
   setCarryover,
   updateLineSettings,
 } from "../../src/lib/budgets/write";
 import { fillBodySchema } from "../../src/lib/budgets/schemas";
-import { loadMoneyCtx, recomputeRuleLines } from "../../src/lib/budgets/rule-store";
+import {
+  createBudgetRule,
+  deleteBudgetRule,
+  loadLineRulesView,
+  loadMoneyCtx,
+  loadRules,
+  recomputeRuleLines,
+  updateBudgetRule,
+} from "../../src/lib/budgets/rule-store";
+import type { BudgetRuleView, RuleIncrease } from "../../src/lib/budgets/rules";
 import type { BudgetRole } from "../../src/lib/budgets/lines";
 import { getDisplayCurrency } from "../../src/lib/fx-service";
 import {
@@ -122,6 +132,18 @@ import {
 } from "../../src/lib/portfolio/lots/types";
 import { registerManageTool } from "./_consolidate";
 
+/** A budget rule's increase (plan/budget-rules.md): counted from the rule's start, never in the start month. */
+const budgetRuleIncrease = z
+  .object({
+    mode: z.enum(["percent", "amount"]),
+    value: z.number().describe("Percent (3 = +3%) or an amount; negative lowers."),
+    every: z.enum(["month", "year"]).describe("month compounds monthly; year steps once a year in step_month."),
+    step_month: z.number().int().min(1).max(12).optional().describe("every year: the month the step lands in (1-12, default 1 = January)."),
+  })
+  .nullable()
+  .optional()
+  .describe("Optional increase; null removes it (update_rule).");
+
 export function registerTransactionsTools(server: McpServer, ctx: PgToolContext) {
   const { db, userId, dek } = ctx;
 
@@ -185,6 +207,30 @@ export function registerTransactionsTools(server: McpServer, ctx: PgToolContext)
   async function opBudgetFill(args: z.infer<typeof fillBodySchema>): Promise<ToolResult> {
     try {
       const res = await runBudgetFill(userId, dek, args);
+      if (args.mode === "rules") {
+        return dataResponse({
+          preview: !res.applied,
+          rules_added: res.applied ? res.rules.length : 0,
+          first_month_total: res.total,
+          currency: res.currency,
+          rules: res.rules.slice(0, 200).map((r) => ({
+            key: r.key,
+            line: r.name,
+            amount: r.amount,
+            start_month: r.startMonth,
+            end_month: r.endMonth,
+            increase: r.increase,
+            months: r.months,
+            replaces: r.replaces,
+          })),
+          truncated: res.rules.length > 200,
+          next: res.applied
+            ? undefined
+            : res.rules.length
+              ? "Call again with preview: false to add these rules. `replaces` lists the line's existing rules that will be ended or removed; months that have ended keep their budgets."
+              : "Nothing to fill.",
+        });
+      }
       return dataResponse({
         preview: !res.applied,
         saved: res.applied ? res.rows.length : 0,
@@ -254,6 +300,128 @@ export function registerTransactionsTools(server: McpServer, ctx: PgToolContext)
     }
   }
 
+  // ── Budget rules (plan/budget-rules.md) ────────────────────────────────────
+  // Thin wrappers over rule-store.ts / write.ts, the same functions the REST
+  // routes call. Rules fill the current month and later only; months that
+  // have ended keep their budgets.
+
+  type RuleIncreaseArg = { mode: "percent" | "amount"; value: number; every: "month" | "year"; step_month?: number } | null | undefined;
+  const toIncrease = (inc: RuleIncreaseArg): RuleIncrease | null | undefined =>
+    inc === undefined ? undefined : inc === null ? null : { mode: inc.mode, value: inc.value, every: inc.every, ...(inc.every === "year" ? { stepMonth: inc.step_month ?? 1 } : {}) };
+
+  const ruleOut = (r: BudgetRuleView & { fromMonthAmount?: number | null }) => ({
+    rule_id: r.id,
+    amount: r.amount,
+    currency: r.currency,
+    start_month: r.startMonth,
+    end_month: r.endMonth,
+    increase: r.increase
+      ? { mode: r.increase.mode, value: r.increase.value, every: r.increase.every, ...(r.increase.every === "year" ? { step_month: r.increase.stepMonth ?? 1 } : {}) }
+      : null,
+    ...(r.fromMonthAmount !== undefined ? { amount_first_open_month: r.fromMonthAmount } : {}),
+  });
+
+  async function opBudgetRules(args: { category?: string; category_id?: number; group?: string; month?: string }): Promise<ToolResult> {
+    const line = await budgetLineKey(args);
+    if ("report" in line) return line.report;
+    try {
+      const view = await loadLineRulesView(userId, line.key, args.month ?? new Date().toISOString().slice(0, 7));
+      return dataResponse({
+        key: line.key,
+        currency: view.currency,
+        rules: view.rules.map(ruleOut),
+        first_open_month: view.from,
+        next_12_months: view.months.map((m) => ({
+          month: m.month,
+          from_rules: m.fromRules,
+          adjustment: m.adjustment,
+          only_this_amount: m.override,
+          budget: m.total,
+        })),
+        note: "Rules fill the current month and later; months that have ended keep their budgets.",
+      });
+    } catch (e) {
+      return budgetWriteFailure(e);
+    }
+  }
+
+  async function opBudgetAddRule(args: {
+    category?: string; category_id?: number; group?: string;
+    amount: number; start_month: string; end_month?: string | null; increase?: RuleIncreaseArg;
+  }): Promise<ToolResult> {
+    const line = await budgetLineKey(args);
+    if ("report" in line) return line.report;
+    try {
+      const { id } = await createBudgetRule(userId, line.key, {
+        amount: args.amount,
+        startMonth: args.start_month,
+        endMonth: args.end_month ?? null,
+        increase: toIncrease(args.increase) ?? null,
+      });
+      const [rule] = (await loadRules(userId, line.key)).filter((r) => r.id === id);
+      return dataResponse({ key: line.key, rule: rule ? ruleOut(rule) : { rule_id: id }, next: "Read the months with op:'rules'." });
+    } catch (e) {
+      return budgetWriteFailure(e);
+    }
+  }
+
+  async function opBudgetUpdateRule(args: {
+    rule_id: number; amount?: number; start_month?: string; end_month?: string | null; increase?: RuleIncreaseArg;
+  }): Promise<ToolResult> {
+    try {
+      const existing = (await loadRules(userId)).find((r) => r.id === args.rule_id);
+      if (!existing) return err("Rule not found.");
+      // Fields left out keep their value; end_month / increase null clears them.
+      const increase = toIncrease(args.increase);
+      await updateBudgetRule(userId, args.rule_id, {
+        amount: args.amount ?? existing.amount,
+        startMonth: args.start_month ?? existing.startMonth,
+        endMonth: args.end_month === undefined ? existing.endMonth : args.end_month,
+        increase: increase === undefined ? existing.increase : increase,
+      });
+      const [rule] = (await loadRules(userId)).filter((r) => r.id === args.rule_id);
+      return dataResponse({ rule: rule ? ruleOut(rule) : { rule_id: args.rule_id } });
+    } catch (e) {
+      return budgetWriteFailure(e);
+    }
+  }
+
+  async function opBudgetDeleteRule(args: { rule_id: number }): Promise<ToolResult> {
+    try {
+      await deleteBudgetRule(userId, args.rule_id);
+      return dataResponse({ rule_id: args.rule_id, deleted: true, note: "Months that have ended keep their budgets." });
+    } catch (e) {
+      return budgetWriteFailure(e);
+    }
+  }
+
+  async function opBudgetAdjust(args: {
+    category?: string; category_id?: number; group?: string; month: string;
+    adjustment?: number | null; only_this_amount?: number | null;
+  }): Promise<ToolResult> {
+    if (args.adjustment === undefined && args.only_this_amount === undefined) {
+      return err("Pass `adjustment` and/or `only_this_amount`.");
+    }
+    const line = await budgetLineKey(args);
+    if ("report" in line) return line.report;
+    try {
+      await setBudgetAdjustment(userId, line.key, args.month, { adjustment: args.adjustment, override: args.only_this_amount });
+      const view = await loadLineRulesView(userId, line.key, args.month);
+      const m = view.months.find((x) => x.month === args.month);
+      return dataResponse({
+        key: line.key,
+        month: args.month,
+        from_rules: m?.fromRules ?? null,
+        adjustment: m?.adjustment ?? null,
+        only_this_amount: m?.override ?? false,
+        budget: m?.total ?? null,
+        currency: view.currency,
+      });
+    } catch (e) {
+      return budgetWriteFailure(e);
+    }
+  }
+
   async function opBudgetDelete(args: { category?: string; category_id?: number; month: string }): Promise<ToolResult> {
     const { category, category_id, month } = args;
     // FINLYNQ-267: `category_id` FK fast-path wins; a name resolves via the
@@ -286,7 +454,7 @@ export function registerTransactionsTools(server: McpServer, ctx: PgToolContext)
   registerManageTool(
     server,
     "manage_budgets",
-    "Manage the monthly cash-flow budget: `op` selects set / delete / fill / settings / carryover. set: one month's budget for a category (expense, or income = expected income) or an expense `group` budgeted as one line. fill: fill months from last month's budget or spending, an average, the same month last year or a fixed amount, with an optional % or amount increase once / every month / every year; previews unless preview:false. settings: leave a category or group out, budget a group as one line (by_group), roll leftover over, or set how an account counts (account_role). carryover: pin what a rollover line carries into a month (0 resets). Amounts are in the display currency. Read with get_budget_summary.",
+    "Manage the monthly cash-flow budget and its budget rules; `op` picks the action. set/delete: one month's budget for a category (income = expected income) or a one-line expense `group`. fill: fill months from a source with an optional increase; mode:'rules' adds a rule per line; previews unless preview:false. Rules: an amount from start_month to an optional end_month, optionally rising every month or year. A month's budget = its rules + an adjustment; rules fill the current month and later, never months that have ended. rules: a line's rules + next 12 months. add_rule / update_rule / delete_rule. adjust: a month's adjustment or only_this_amount (set on a rule month means only this amount). settings: leave out, by_group, rollover, account_role. carryover: pin what a rollover line carries in (0 resets). Display currency. Read with get_budget_summary.",
     z.discriminatedUnion("op", [
       z.object({
         op: z.literal("set"),
@@ -296,10 +464,54 @@ export function registerTransactionsTools(server: McpServer, ctx: PgToolContext)
         month: ymPeriod.describe("Month (YYYY-MM)"),
         amount: z.number().nonnegative().describe("Budget amount in the display currency"),
       }),
-      // `mode` / `noEnd` (rule-making fill) stay web-only until MCP gets rule ops.
-      fillBodySchema.omit({ mode: true, noEnd: true }).extend({
+      fillBodySchema.extend({
         op: z.literal("fill"),
         preview: z.boolean().default(true).describe("true (default) returns the rows without saving."),
+        mode: z
+          .enum(["values", "this_month", "rules"])
+          .optional()
+          .describe(
+            "values (default): one value per month. this_month: the first month only, ignoring the line's rules there. rules: one budget rule per line from the first month (to the last month, or for good with noEnd), carrying `adjust` as the rule's increase; the line's overlapping rules are ended.",
+          ),
+        noEnd: z.boolean().optional().describe("mode rules: the rule never ends."),
+      }),
+      z.object({
+        op: z.literal("rules"),
+        category: z.string().optional().describe("Category name. Pass this, `category_id` or `group`."),
+        category_id: z.number().int().positive().optional(),
+        group: z.string().optional().describe("Expense category group budgeted as one line."),
+        month: ymPeriod.optional().describe("First month to show (default: this month; a month that has ended shows from this month)."),
+      }),
+      z.object({
+        op: z.literal("add_rule"),
+        category: z.string().optional().describe("Category name. Pass this, `category_id` or `group`."),
+        category_id: z.number().int().positive().optional(),
+        group: z.string().optional().describe("Expense category group budgeted as one line."),
+        amount: z.number().nonnegative().describe("Amount a month in the display currency."),
+        start_month: ymPeriod.describe("First month the rule counts (YYYY-MM). A past start never changes months that have ended."),
+        end_month: ymPeriod.nullable().optional().describe("Last month (YYYY-MM); omit or null for no end."),
+        increase: budgetRuleIncrease,
+      }),
+      z.object({
+        op: z.literal("update_rule"),
+        rule_id: z.number().int().positive().describe("From op:'rules'."),
+        amount: z.number().nonnegative().optional(),
+        start_month: ymPeriod.optional().describe("Moving it restarts the increase count from the new start."),
+        end_month: ymPeriod.nullable().optional().describe("null = no end."),
+        increase: budgetRuleIncrease,
+      }),
+      z.object({
+        op: z.literal("delete_rule"),
+        rule_id: z.number().int().positive().describe("From op:'rules'."),
+      }),
+      z.object({
+        op: z.literal("adjust"),
+        category: z.string().optional().describe("Category name. Pass this, `category_id` or `group`."),
+        category_id: z.number().int().positive().optional(),
+        group: z.string().optional(),
+        month: ymPeriod.describe("The current month or later (YYYY-MM)."),
+        adjustment: z.number().nullable().optional().describe("Added to the rules' amount (negative takes off; the month may go below 0). null = none."),
+        only_this_amount: z.number().nullable().optional().describe("Use only this amount this month, ignoring the rules; null stops it."),
       }),
       z.object({
         op: z.literal("settings"),
@@ -344,6 +556,16 @@ export function registerTransactionsTools(server: McpServer, ctx: PgToolContext)
           return opBudgetSettings(input);
         case "carryover":
           return opBudgetCarryover(input);
+        case "rules":
+          return opBudgetRules(input);
+        case "add_rule":
+          return opBudgetAddRule(input);
+        case "update_rule":
+          return opBudgetUpdateRule(input);
+        case "delete_rule":
+          return opBudgetDeleteRule(input);
+        case "adjust":
+          return opBudgetAdjust(input);
       }
     },
   );
