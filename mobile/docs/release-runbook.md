@@ -382,7 +382,7 @@ review never prompts.
   dev.finlynq.com as the demo account, in June, July and November 2026, light and dark, with web and MCP
   `get_budget_summary` agreeing on the totals. **Check on a device before promoting:** the sheet's keyboard, the
   `Switch` rows, scrolling a long list, and that the widget moves within seconds of a save.
-- **Next build, not in 1.0.31: Home's Budget Progress card on Budget v2** (2026-11-07, merged into `mobile-dev` the same day; not in any build). The card reads `GET /api/budgets/month`,
+- **1.0.32 / vc41 (Android, Play internal 2026-11-10; no iOS build): Home's Budget Progress card on Budget v2** (2026-11-07, merged into `mobile-dev` the same day). The card reads `GET /api/budgets/month`,
   like the Budgets screen and the Left to spend widget, instead of the legacy `/api/budgets` list, so a line on it no
   longer differs from the Budgets screen. It lists each group budgeted as one line and, in the other groups, each
   category with a budget or a rollover (`budgetProgressLines` in `lib/budgets.ts`), most at risk first, measured
@@ -392,8 +392,8 @@ review never prompts.
   through react-native-web against dev.finlynq.com as the demo account: November 2026 lists Groceries $0 / $199 (a
   carried-in amount) beside PR389 Verify Target $0 / $250, where the legacy list has only the second, and no request
   goes to `/api/budgets`.
-- **Next build, not in 1.0.31: budget rules** (2026-11-10, on `mobile-dev`; not in any build; web plan
-  `plan/budget-rules.md`). A line with rules gets a small list icon. Its sheet, on a month the rules make, shows
+- **1.0.32 / vc41 (Android, Play internal 2026-11-10; no iOS build): budget rules** (2026-11-10; web plan
+  `plan/budget-rules.md`; also in 1.0.32: editing a loan schedule row's payment, `a346cbd`). A line with rules gets a small list icon. Its sheet, on a month the rules make, shows
   **From rules (N)**, an **Adjustment** that may be negative, and **Use only this amount this month** (ignores the
   rules), with the month's total; saving goes to `PUT /api/budgets/adjust`. **Budget rules (N)** / **Add a budget
   rule for later months** opens `BudgetRulesScreen` (More stack `BudgetRules {lineKey, name, month}`): the line's
