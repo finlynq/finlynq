@@ -443,8 +443,13 @@ export const budgets = pgTable("budgets", {
     .references(() => categories.id)
     .notNull(),
   month: text("month").notNull(),
+  /** The month's whole budget: what every reader reads (plan/budget-rules.md). */
   amount: doublePrecision("amount").notNull().default(0),
   currency: text("currency").notNull().default("USD"),
+  /** The part of `amount` that came from budget rules at the last recompute; NULL = none. */
+  rulesAmount: doublePrecision("rules_amount"),
+  /** "Use only this amount": the line's rules are ignored for this month. */
+  override: boolean("override").notNull().default(false),
 }, (t) => [
   uniqueIndex("budgets_user_category_month_unique").on(t.userId, t.categoryId, t.month),
   index("idx_budgets_user_id").on(t.userId),
@@ -478,8 +483,40 @@ export const budgetGroupAmounts = pgTable("budget_group_amounts", {
   month: text("month").notNull(),
   amount: doublePrecision("amount").notNull().default(0),
   currency: text("currency").notNull().default("USD"),
+  rulesAmount: doublePrecision("rules_amount"),
+  override: boolean("override").notNull().default(false),
 }, (t) => [
   uniqueIndex("budget_group_amounts_user_group_month_unique").on(t.userId, t.groupName, t.month),
+]);
+
+// Budget rules (2026-11-09, plan/budget-rules.md): an amount from a start month
+// to an optional end month, with an optional increase every month or every
+// year. They fill the CURRENT and later months of `budgets` /
+// `budget_group_amounts`; a month that has ended is never recomputed.
+export const budgetRules = pgTable("budget_rules", {
+  id: serial("id").primaryKey(),
+  userId: text("user_id").notNull(),
+  categoryId: integer("category_id").references(() => categories.id, { onDelete: "cascade" }),
+  groupName: text("group_name"),
+  amount: doublePrecision("amount").notNull(),
+  currency: text("currency").notNull().default("USD"),
+  startMonth: text("start_month").notNull(),
+  endMonth: text("end_month"),
+  increaseMode: text("increase_mode").$type<"percent" | "amount">(),
+  increaseValue: doublePrecision("increase_value"),
+  increaseEvery: text("increase_every").$type<"month" | "year">(),
+  stepMonth: integer("step_month"),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+}, (t) => [
+  index("idx_budget_rules_user_id").on(t.userId),
+  index("idx_budget_rules_category_id").on(t.categoryId),
+  check("budget_rules_target_check", sql`(${t.categoryId} IS NULL) <> (${t.groupName} IS NULL)`),
+  check("budget_rules_increase_mode_check", sql`${t.increaseMode} IN ('percent','amount')`),
+  check("budget_rules_increase_every_check", sql`${t.increaseEvery} IN ('month','year')`),
+  check("budget_rules_step_month_check", sql`${t.stepMonth} >= 1 AND ${t.stepMonth} <= 12`),
+  check("budget_rules_months_check", sql`${t.endMonth} IS NULL OR ${t.endMonth} >= ${t.startMonth}`),
+  check("budget_rules_amount_check", sql`${t.amount} >= 0`),
 ]);
 
 // A user's own reset (0) or edit of what a rollover line carries into a month.

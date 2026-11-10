@@ -35,7 +35,9 @@ import {
   categoryKey,
   groupKey,
   monthEndDate,
+  monthRange,
   monthStartDate,
+  parseLineKey,
   resolveBudgetRole,
   shiftMonth,
   type BudgetRole,
@@ -45,9 +47,12 @@ import {
   type BudgetAccountInfo,
   type BudgetMonth,
   type DebtLine,
+  type LinePlan,
   type MonthCategoryInput,
   type MonthGroupSetting,
 } from "./month";
+import { convertRule, inCurrency, loadRules, loadStoredMonths, refreshRuleHorizon, rulesByLine } from "./rule-store";
+import { computedMonthTotal, rulesTotalForMonth } from "./rules";
 
 type LoanRow = typeof schema.loans.$inferSelect;
 
@@ -260,7 +265,76 @@ export async function loadBudgetsByMonth(
     m[b.month] = round2(convertWithRateMap(num(b.amount), b.currency ?? ctx.currency, ctx.rateMap));
     groups.set(b.group_name, m);
   }
+  await applyRulesToOpenMonths(ctx, fromMonth, toMonth, { categories, groups });
   return { categories, groups };
+}
+
+/**
+ * Open months (the current one and later) of lines with rules, worked out
+ * from the rules and what was typed, exactly as the recompute stores them
+ * (rule-store.ts). Stored rows already hold this inside the stored horizon;
+ * beyond it this is the only source.
+ */
+async function applyRulesToOpenMonths(
+  ctx: BudgetContext,
+  fromMonth: string,
+  toMonth: string,
+  out: { categories: Map<number, Record<string, number>>; groups: Map<string, Record<string, number>> },
+): Promise<void> {
+  const from = fromMonth > ctx.currentMonth ? fromMonth : ctx.currentMonth;
+  if (from > toMonth) return;
+  const byLine = rulesByLine(await loadRules(ctx.userId));
+  if (!byLine.size) return;
+  const keys = [...byLine.keys()];
+  const stored = await loadStoredMonths(ctx.userId, keys, from, toMonth);
+  const money = { currency: ctx.currency, rateMap: ctx.rateMap };
+  const convert = convertRule(money);
+  for (const key of keys) {
+    const rules = byLine.get(key)!;
+    const parsed = parseLineKey(key);
+    if (!parsed) continue;
+    const target =
+      parsed.kind === "category"
+        ? out.categories.get(parsed.categoryId) ?? {}
+        : out.groups.get(parsed.group) ?? {};
+    for (const month of monthRange(from, toMonth)) {
+      const raw = stored.get(key)?.get(month) ?? null;
+      const { total, active } = rulesTotalForMonth(rules, month, convert);
+      const value = computedMonthTotal(raw ? inCurrency(raw, money) : null, total, active);
+      if (value == null) delete target[month];
+      else target[month] = round2(value);
+    }
+    if (parsed.kind === "category") out.categories.set(parsed.categoryId, target);
+    else out.groups.set(parsed.group, target);
+  }
+}
+
+/** Per line, for one month: its rules and how the month's budget is made up. */
+export async function loadLinePlans(ctx: BudgetContext, month: string): Promise<Map<string, LinePlan>> {
+  const out = new Map<string, LinePlan>();
+  const byLine = rulesByLine(await loadRules(ctx.userId));
+  if (!byLine.size) return out;
+  const open = month >= ctx.currentMonth;
+  const money = { currency: ctx.currency, rateMap: ctx.rateMap };
+  const stored = open ? await loadStoredMonths(ctx.userId, [...byLine.keys()], month, month) : new Map();
+  const convert = convertRule(money);
+  for (const [key, rules] of byLine) {
+    if (!open) {
+      out.set(key, { ruleCount: rules.length, fromRules: null, adjustment: 0, override: false, open: false });
+      continue;
+    }
+    const raw = stored.get(key)?.get(month) ?? null;
+    const row = raw ? inCurrency(raw, money) : null;
+    const { total, active } = rulesTotalForMonth(rules, month, convert);
+    out.set(key, {
+      ruleCount: rules.length,
+      fromRules: active ? total : null,
+      adjustment: row && !row.override ? round2(row.amount - (row.rulesAmount ?? 0)) : 0,
+      override: !!row?.override,
+      open: true,
+    });
+  }
+  return out;
 }
 
 /** Carryover resets and edits per line key, in the display currency. */
@@ -499,6 +573,7 @@ export async function loadBudgetMonth(
   month: string,
   currencyOverride?: string | null,
 ): Promise<BudgetMonth> {
+  await refreshRuleHorizon(userId);
   const ctx = await loadBudgetContext(userId, dek, currencyOverride);
   const sets = await loadCarrySets(ctx);
   const lastComplete = shiftMonth(ctx.currentMonth, -1);
@@ -510,11 +585,12 @@ export async function loadBudgetMonth(
   const floor = shiftMonth(month, -120);
   if (from < floor) from = floor;
 
-  const [actuals, budgets, debt, upcoming] = await Promise.all([
+  const [actuals, budgets, debt, upcoming, plans] = await Promise.all([
     loadActualsByMonth(ctx, from, month),
     loadBudgetsByMonth(ctx, from, month),
     loadDebtLines(ctx, month),
     loadUpcoming(ctx, month),
+    loadLinePlans(ctx, month),
   ]);
 
   const monthActuals = new Map<number, number>();
@@ -584,5 +660,6 @@ export async function loadBudgetMonth(
     upcoming,
     debt,
     accounts: ctx.accounts,
+    plans,
   });
 }

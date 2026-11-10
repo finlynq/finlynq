@@ -3,6 +3,12 @@ import { parseSaveError } from "@/lib/save-error";
 import type { BudgetMonth } from "@/lib/budgets/month";
 import type { FillAdjust, FillSource } from "@/lib/budgets/fill";
 import type { BudgetRole } from "@/lib/budgets/lines";
+import type { RuleIncrease } from "@/lib/budgets/rules";
+// Type-only imports from server modules: erased at build, nothing server-side reaches the bundle.
+import type { LineRulesView } from "@/lib/budgets/rule-store";
+import type { FillRulePreview } from "@/lib/budgets/write";
+
+export type { LineRulesView, FillRulePreview };
 
 async function call<T>(url: string, init: RequestInit | undefined, fallback: string): Promise<T> {
   let res: Response;
@@ -51,10 +57,43 @@ export const budgetApi = {
     scope: { kind: "all" } | { kind: "keys"; keys: string[] } | { kind: "group"; group: string };
     section: "spending" | "income";
     preview: boolean;
+    mode?: "values" | "this_month" | "rules";
+    noEnd?: boolean;
   }) =>
-    call<{ rows: Array<{ key: string; name: string; month: string; amount: number; previous: number | null }>; applied: boolean; total: number; currency: string }>(
+    call<{
+      rows: Array<{ key: string; name: string; month: string; amount: number; previous: number | null }>;
+      rules: FillRulePreview[];
+      applied: boolean;
+      total: number;
+      currency: string;
+    }>(
       "/api/budgets/fill",
       { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) },
       "Couldn't fill the budgets",
     ),
+
+  /** The cell of an open month on a line with rules. */
+  adjust: (key: string, month: string, change: { adjustment?: number | null; override?: number | null }) =>
+    call<unknown>("/api/budgets/adjust", put({ key, month, ...change }), "Couldn't save the budget"),
+
+  rules: (key: string, month: string) =>
+    call<LineRulesView>(`/api/budgets/rules?key=${encodeURIComponent(key)}&month=${encodeURIComponent(month)}`, undefined, "Couldn't load the rules"),
+
+  createRule: (key: string, rule: RuleInput) =>
+    call<{ id: number }>(
+      "/api/budgets/rules",
+      { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ key, ...rule }) },
+      "Couldn't save the rule",
+    ),
+
+  updateRule: (id: number, rule: RuleInput) => call<unknown>("/api/budgets/rules", put({ id, ...rule }), "Couldn't save the rule"),
+
+  deleteRule: (id: number) => call<unknown>(`/api/budgets/rules?id=${id}`, { method: "DELETE" }, "Couldn't delete the rule"),
 };
+
+export interface RuleInput {
+  amount: number;
+  startMonth: string;
+  endMonth: string | null;
+  increase: RuleIncrease | null;
+}

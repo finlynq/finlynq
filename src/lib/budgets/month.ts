@@ -44,7 +44,25 @@ export interface DebtLine {
   loanIds: number[];
 }
 
+/**
+ * A line's budget rules for the month (plan/budget-rules.md). `open` = the
+ * current month or later; a month that has ended is a plain value, so its
+ * `fromRules` is null.
+ */
+export interface LinePlan {
+  ruleCount: number;
+  /** What the rules active this month add up to; null when none is. */
+  fromRules: number | null;
+  /** Typed on top of the rules (negative takes off). */
+  adjustment: number;
+  /** "Use only this amount": the rules are ignored this month. */
+  override: boolean;
+  open: boolean;
+}
+
 export interface BudgetLine {
+  /** The line's rules, when it has any. */
+  plan?: LinePlan | null;
   key: LineKey;
   categoryId: number | null;
   name: string;
@@ -65,6 +83,8 @@ export interface BudgetLine {
 }
 
 export interface BudgetGroup {
+  /** The group line's rules (budgeted as one line), when it has any. */
+  plan?: LinePlan | null;
   key: LineKey;
   name: string;
   byGroup: boolean;
@@ -144,6 +164,8 @@ export interface BuildMonthInput {
    * elsewhere they are not listed (no "not budgeted" nag for interest).
    */
   coveredByLoan?: ReadonlySet<number>;
+  /** Budget rules per line key (`c:<id>` / `g:<group>`). */
+  plans?: ReadonlyMap<string, LinePlan>;
 }
 
 const round2 = (n: number) => Math.round(n * 100) / 100;
@@ -273,6 +295,13 @@ export function buildBudgetMonth(input: BuildMonthInput): BudgetMonth {
       actual: round2(lines.reduce((s, l) => s + l.actual, 0)),
       carriedIn: null, left: null, upcoming: 0, average3: 0, status: "ok", lines,
     });
+  }
+
+  if (input.plans?.size) {
+    for (const g of [...spending, ...income]) {
+      if (g.byGroup) g.plan = input.plans.get(g.key) ?? null;
+      for (const l of g.lines) l.plan = input.plans.get(l.key) ?? null;
+    }
   }
 
   const sum = (xs: number[]) => round2(xs.reduce((s, x) => s + x, 0));
