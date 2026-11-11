@@ -14,15 +14,16 @@
 # reported as green. Do not reintroduce a `|| echo` / `|| true` around these
 # checks — a check that cannot fail is not a check.
 #
-# Three signals, chosen to be unauthenticated, side-effect-free, and to cover
+# Four signals, chosen to be unauthenticated, side-effect-free, and to cover
 # distinct failure modes:
 #   1. /api/healthz        — process is up AND the DB pool is live (503 if not)
 #   2. /                   — Next is rendering pages, not just answering API routes
-#   3. /api/auth/session   — the auth stack + JSON serialization work end to end
+#   3. a /_next/static/ file linked from /  — the page's CSS/JS is actually served
+#   4. /api/auth/session   — the auth stack + JSON serialization work end to end
 #
 # Only (1) is retried. It is the readiness gate: a fresh `systemctl restart`
 # needs time to boot and for instrumentation.ts to bring up the DB adapter.
-# Once healthz is green the app is warm, so (2) and (3) get one shot each —
+# Once healthz is green the app is warm, so (2)-(4) get one shot each —
 # retrying them would just mask a real intermittent fault.
 
 set -uo pipefail
@@ -70,7 +71,8 @@ fail() {
   fi
   echo ""
   echo "    The deploy has ALREADY been applied — the new code is live and broken."
-  echo "    To roll back: revert the merge commit on main and let the deploy re-run."
+  echo "    deploy.sh keeps the previous build and prints how to put it back."
+  echo "    Otherwise, to roll back: revert the merge commit on main and let the deploy re-run."
   echo "    If this release included a database migration, restoring is NOT just a"
   echo "    revert — see scripts/restore-backup.sh and the pre-deploy dump in"
   echo "    /opt/finlynq-backups/ (newest file is from minutes ago)."
@@ -92,7 +94,7 @@ while [ $SECONDS -lt $DEADLINE ]; do
   if fetch "/api/healthz" && [ "$HTTP_STATUS" = "200" ] && \
      printf '%s' "$HTTP_BODY" | grep -q '"status":"ok"'; then
     READY=true
-    echo "==> [1/3] /api/healthz OK (ready after ${SECONDS}s, ${ATTEMPT} attempt(s))"
+    echo "==> [1/4] /api/healthz OK (ready after ${SECONDS}s, ${ATTEMPT} attempt(s))"
     break
   fi
   sleep "$POLL_INTERVAL"
@@ -110,9 +112,36 @@ fetch "/" || fail "landing page unreachable" "/"
 if [ "$HTTP_STATUS" -ge 400 ] 2>/dev/null; then
   fail "landing page returned HTTP $HTTP_STATUS" "/"
 fi
-echo "==> [2/3] / OK (HTTP $HTTP_STATUS)"
+echo "==> [2/4] / OK (HTTP $HTTP_STATUS)"
 
-# ── 3. Auth stack: unauthenticated session must be a clean 200 ──────────────
+# ── 3. Page assets: a /_next/static/ file the landing page links must load ──
+# The standalone server reads static files from disk on every request, so
+# pages can render 200 while every chunk and stylesheet 404s or 500s: the
+# static copy step missing from deploy.sh (2026-05), or the build output
+# deleted under a running server (2026-11-10, twice on prod). healthz and /
+# both stayed green through those; this is the check that sees them.
+# Prefers a stylesheet (an unstyled site is the visible symptom), else any file.
+LANDING_STATUS="$HTTP_STATUS"
+LANDING_BODY="$HTTP_BODY"
+ASSET_PATH="$(printf '%s' "$LANDING_BODY" | grep -oE '/_next/static/[A-Za-z0-9._~%/-]+\.css' | head -1)"
+if [ -z "$ASSET_PATH" ]; then
+  ASSET_PATH="$(printf '%s' "$LANDING_BODY" | grep -oE '/_next/static/[A-Za-z0-9._~%/-]+' | head -1)"
+fi
+if [ -n "$ASSET_PATH" ]; then
+  fetch "$ASSET_PATH" || fail "page asset unreachable" "$ASSET_PATH"
+  if [ "$HTTP_STATUS" != "200" ]; then
+    fail "page asset returned HTTP $HTTP_STATUS (expected 200)" "$ASSET_PATH"
+  fi
+  echo "==> [3/4] $ASSET_PATH OK (HTTP 200)"
+elif [ "$LANDING_STATUS" -lt 300 ] 2>/dev/null; then
+  HTTP_BODY="$(printf '%s' "$LANDING_BODY" | head -c 300)"
+  fail "landing page links no /_next/static/ file to check" "/"
+else
+  # A redirect (e.g. a future maintenance interstitial) has no assets to test.
+  echo "==> [3/4] skipped: / answered HTTP $LANDING_STATUS (a redirect, no assets to check)"
+fi
+
+# ── 4. Auth stack: unauthenticated session must be a clean 200 ──────────────
 # GET /api/auth/session with no cookie returns 200 {"authenticated":false} — it
 # is NOT a 401. A 500 here means requireAuth or the DB read behind it is broken,
 # which would lock every user out while healthz still reported "ok".
@@ -123,6 +152,6 @@ fi
 if ! printf '%s' "$HTTP_BODY" | grep -q '"authenticated":false'; then
   fail "session endpoint did not report an unauthenticated session" "/api/auth/session"
 fi
-echo "==> [3/3] /api/auth/session OK (unauthenticated session clean)"
+echo "==> [4/4] /api/auth/session OK (unauthenticated session clean)"
 
 echo "==> Smoke check PASSED — app is serving"

@@ -1,31 +1,10 @@
 import type { Metadata, Viewport } from "next";
-import { Geist, Geist_Mono, Instrument_Serif, Inter, IBM_Plex_Sans, Atkinson_Hyperlegible } from "next/font/google";
 import { headers } from "next/headers";
 import { ThemeProvider } from "@/components/theme-provider";
 import { JsonLd, organizationSchema } from "@/components/seo/json-ld";
 import { SITE_URL } from "@/lib/seo/site";
+import { fontVariables } from "@/fonts/fonts";
 import "./globals.css";
-
-const geistSans = Geist({ variable: "--font-geist-sans", subsets: ["latin"] });
-const geistMono = Geist_Mono({ variable: "--font-geist-mono", subsets: ["latin"] });
-const instrumentSerif = Instrument_Serif({
-  variable: "--font-instrument-serif",
-  subsets: ["latin"],
-  weight: "400",
-  style: ["normal", "italic"],
-});
-// Alternate UI fonts (FINLYNQ-225) — loaded as CSS variables; Geist is default.
-const inter = Inter({ variable: "--font-inter", subsets: ["latin"] });
-const ibmPlexSans = IBM_Plex_Sans({
-  variable: "--font-ibm-plex-sans",
-  subsets: ["latin"],
-  weight: ["400", "500", "600", "700"],
-});
-const atkinsonHyperlegible = Atkinson_Hyperlegible({
-  variable: "--font-atkinson",
-  subsets: ["latin"],
-  weight: ["400", "700"],
-});
 
 /** Inline script run before first paint to apply the stored font preference.
  *  Mirrors next-themes FOUC pattern — nonce carried by the <script> tag.
@@ -85,7 +64,8 @@ export default async function RootLayout({ children }: { children: React.ReactNo
   const nonce = (await headers()).get("x-nonce") ?? undefined;
 
   return (
-    // Font CSS variables (next/font) MUST live on <html> so they exist at :root —
+    // Font CSS variables (self-hosted via next/font/local, src/fonts/fonts.ts)
+    // MUST live on <html> so they exist at :root —
     // globals.css consumes them via --font-sans + the [data-font] overrides, which
     // apply at :root/<html>. CSS custom properties inherit DOWN, not up; on <body>
     // they'd be invisible to :root and --font-sans would resolve to nothing
@@ -93,7 +73,7 @@ export default async function RootLayout({ children }: { children: React.ReactNo
     <html
       lang="en"
       suppressHydrationWarning
-      className={`${geistSans.variable} ${geistMono.variable} ${instrumentSerif.variable} ${inter.variable} ${ibmPlexSans.variable} ${atkinsonHyperlegible.variable}`}
+      className={fontVariables}
     >
       {/* FOUC-prevention for font preference (FINLYNQ-225).
           Runs before paint, sets data-font on <html> from localStorage.

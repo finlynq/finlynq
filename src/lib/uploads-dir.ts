@@ -2,8 +2,9 @@
  * Durable on-disk uploads base directory (FINLYNQ-228).
  *
  * THE DEPLOY-WIPE BUG: on the VPS, pf-dev/pf run from
- * `WorkingDirectory=.next/standalone`, and `deploy.sh` does
- * `mv .next .next.old && rm -rf .next.old` on EVERY deploy. So any path computed
+ * `WorkingDirectory=.next/standalone`, and `deploy.sh` replaces the whole `.next`
+ * tree on EVERY deploy (builds into `.next-deploy`, swaps it in, deletes the old
+ * tree after the smoke check). So any path computed
  * as `process.cwd()/uploads` resolves to `.next/standalone/uploads/` — which is
  * INSIDE the `.next` tree and therefore permanently deleted on each redeploy.
  * Feedback attachments (and mcp_uploads) stored there silently vanish.
@@ -26,9 +27,12 @@ export function getUploadsBaseDir(): string {
 
   const cwd = process.cwd();
   const normalized = cwd.replace(/\\/g, "/").replace(/\/+$/, "");
+  // turbopackIgnore on both joins: runtime data, not a build input (see
+  // next.config.ts outputFileTracingExcludes, which keeps uploads/ out of the
+  // build output even if a new caller forgets the hint).
   if (normalized.endsWith("/.next/standalone")) {
     // <root>/.next/standalone → <root>/uploads (sibling of .next).
-    return path.join(cwd, "..", "..", "uploads");
+    return path.join(/* turbopackIgnore: true */ cwd, "..", "..", "uploads");
   }
-  return path.join(cwd, "uploads");
+  return path.join(/* turbopackIgnore: true */ cwd, "uploads");
 }

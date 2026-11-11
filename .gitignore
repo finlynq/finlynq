@@ -59,6 +59,9 @@ pf-server.log
 /.next-managed/
 /.next-test/
 /.next-verify/
+# deploy.sh builds here, then swaps it into .next; the previous build waits as .next.old.<pid>
+/.next-deploy/
+/.next.old.*/
 /build.log
 /pf-managed*.log
 /pf-managed.log
