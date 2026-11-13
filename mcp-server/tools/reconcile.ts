@@ -60,6 +60,7 @@ import {
 import {
   bucketSuggestions,
 } from "../../src/lib/reconcile/bucket-suggestions";
+import { runReconcileCompute } from "../../src/lib/reconcile/compute-limiter";
 import {
   materializeBankRowAsTransaction,
 } from "../../src/lib/reconcile/materialize-transaction";
@@ -153,34 +154,37 @@ export function registerReconcileTools(server: McpServer, ctx: PgToolContext) {
         "reconcile(op:suggest) requires an unlocked DEK to decrypt payees for matching. Re-login to refresh your session.",
       );
     }
-    // Cross-tenant guard — 404-equivalent without leaking existence.
-    const acct = await q(
-      db,
-      sql`SELECT id FROM accounts WHERE id = ${accountId} AND user_id = ${userId} LIMIT 1`,
-    );
-    if (!acct.length) return err("Not found");
+    // Per-user limit on engine runs, shared with the web route (compute-limiter.ts).
+    return runReconcileCompute(userId, async () => {
+      // Cross-tenant guard — 404-equivalent without leaking existence.
+      const acct = await q(
+        db,
+        sql`SELECT id FROM accounts WHERE id = ${accountId} AND user_id = ${userId} LIMIT 1`,
+      );
+      if (!acct.length) return err("Not found");
 
-    const thresholds = await loadReconcileThresholds();
-    const lookbackMin =
-      lookbackDays != null
-        ? new Date(Date.now() - lookbackDays * 86_400_000)
-            .toISOString()
-            .slice(0, 10)
-        : null;
-    const result = await computeReconcileForAccount({
-      userId,
-      dek,
-      accountId,
-      thresholds,
-      dateMin: dateMin ?? lookbackMin,
-      dateMax: dateMax ?? null,
+      const thresholds = await loadReconcileThresholds();
+      const lookbackMin =
+        lookbackDays != null
+          ? new Date(Date.now() - lookbackDays * 86_400_000)
+              .toISOString()
+              .slice(0, 10)
+          : null;
+      const result = await computeReconcileForAccount({
+        userId,
+        dek,
+        accountId,
+        thresholds,
+        dateMin: dateMin ?? lookbackMin,
+        dateMax: dateMax ?? null,
+      });
+      // FINLYNQ-271 phase 3 — rollups-first: PREPEND the three decision buckets
+      // (exact / fuzzy / noMatch / alreadyLinked) so an agent can act per bucket.
+      // Additive — every legacy key below is byte-identical; buckets is a pure
+      // re-grouping of suggestions/bankOnly/linked (no engine change).
+      const buckets = bucketSuggestions(result, thresholds);
+      return dataResponse({ buckets, ...result, thresholds });
     });
-    // FINLYNQ-271 phase 3 — rollups-first: PREPEND the three decision buckets
-    // (exact / fuzzy / noMatch / alreadyLinked) so an agent can act per bucket.
-    // Additive — every legacy key below is byte-identical; buckets is a pure
-    // re-grouping of suggestions/bankOnly/linked (no engine change).
-    const buckets = bucketSuggestions(result, thresholds);
-    return dataResponse({ buckets, ...result, thresholds });
   }
 
   // ── reconcile op: accept — lifted VERBATIM from accept_reconcile_suggestions ─

@@ -27,6 +27,7 @@
 import { db, schema } from "@/db";
 import { and, eq, inArray, isNotNull, sql } from "drizzle-orm";
 import { computeReconcileForAccount } from "./match-engine";
+import { runReconcileCompute } from "./compute-limiter";
 import {
   computeAccountBalanceSummary,
   type BalanceSummaryAccount,
@@ -240,15 +241,20 @@ export async function getReconciliationSummary(
         currency: acct.currency,
         isInvestment: acct.isInvestment,
       };
-      const [recon, balance] = await Promise.all([
-        computeReconcileForAccount({
-          userId,
-          dek,
-          accountId: acct.id,
-          dateMin,
-        }),
-        computeAccountBalanceSummary(userId, dek, acctForBalance, holdingsByAccount),
-      ]);
+      // Every account at once used to mean ~9 queries x every account in
+      // flight, enough to take the 10-connection pool from all other users;
+      // the per-user limit keeps it to a few accounts at a time.
+      const [recon, balance] = await runReconcileCompute(userId, () =>
+        Promise.all([
+          computeReconcileForAccount({
+            userId,
+            dek,
+            accountId: acct.id,
+            dateMin,
+          }),
+          computeAccountBalanceSummary(userId, dek, acctForBalance, holdingsByAccount),
+        ]),
+      );
       return {
         accountId: acct.id,
         accountName: null,

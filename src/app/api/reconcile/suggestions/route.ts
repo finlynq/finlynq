@@ -29,6 +29,8 @@ import { NextRequest, NextResponse } from "next/server";
 import { and, eq } from "drizzle-orm";
 import { db, schema } from "@/db";
 import { requireEncryption } from "@/lib/auth/require-encryption";
+import { withOp } from "@/lib/diagnostics/op-context";
+import { runReconcileCompute } from "@/lib/reconcile/compute-limiter";
 import {
   computeReconcileForAccount,
   RECONCILE_DEFAULT_THRESHOLDS,
@@ -37,7 +39,13 @@ import {
 
 export const dynamic = "force-dynamic";
 
+// withOp: named in /admin/system "Top operations" and on slow-query rows, so a
+// burst of these requests can be traced (one went unattributed on 2026-11-13).
 export async function GET(request: NextRequest) {
+  return withOp("GET /api/reconcile/suggestions", () => handleGet(request));
+}
+
+async function handleGet(request: NextRequest) {
   const auth = await requireEncryption(request);
   if (!auth.ok) return auth.response;
   const { userId, dek } = auth;
@@ -77,42 +85,47 @@ export async function GET(request: NextRequest) {
   const dateMin = dateMinParam ?? lookbackDateMin;
   const dateMax = dateMaxParam;
 
-  // Cross-tenant attack returns 404 without leaking that the account
-  // exists for another user. Same pattern as /api/import/bank-ledger.
-  const acct = await db
-    .select({ id: schema.accounts.id })
-    .from(schema.accounts)
-    .where(
-      and(
-        eq(schema.accounts.id, accountId),
-        eq(schema.accounts.userId, userId),
-      ),
-    )
-    .limit(1);
-  if (!acct[0]) {
-    return NextResponse.json({ error: "Not found" }, { status: 404 });
-  }
+  // Per-user limit on engine runs (compute-limiter.ts): a client firing dozens
+  // of these at once waits here, holding no database connection, instead of
+  // taking the whole pool from every other user.
+  return runReconcileCompute(userId, async () => {
+    // Cross-tenant attack returns 404 without leaking that the account
+    // exists for another user. Same pattern as /api/import/bank-ledger.
+    const acct = await db
+      .select({ id: schema.accounts.id })
+      .from(schema.accounts)
+      .where(
+        and(
+          eq(schema.accounts.id, accountId),
+          eq(schema.accounts.userId, userId),
+        ),
+      )
+      .limit(1);
+    if (!acct[0]) {
+      return NextResponse.json({ error: "Not found" }, { status: 404 });
+    }
 
-  const thresholds = await loadThresholds(userId);
+    const thresholds = await loadThresholds(userId);
 
-  const result = await computeReconcileForAccount({
-    userId,
-    dek,
-    accountId,
-    thresholds,
-    dateMin,
-    dateMax,
-  });
-
-  return NextResponse.json({
-    success: true,
-    data: {
-      ...result,
+    const result = await computeReconcileForAccount({
+      userId,
+      dek,
+      accountId,
       thresholds,
-      lookbackDays: lookbackDays && lookbackDays > 0 ? lookbackDays : null,
       dateMin,
       dateMax,
-    },
+    });
+
+    return NextResponse.json({
+      success: true,
+      data: {
+        ...result,
+        thresholds,
+        lookbackDays: lookbackDays && lookbackDays > 0 ? lookbackDays : null,
+        dateMin,
+        dateMax,
+      },
+    });
   });
 }
 
