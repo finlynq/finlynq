@@ -37,6 +37,30 @@ import {
   PreviewAbortError,
 } from "./_confirm";
 import { registerManageTool } from "./_consolidate";
+import {
+  getCategoryDeleteBlockers,
+  categoryDeleteBlockedMessage,
+  type CategoryDeleteBlocker,
+} from "../../src/lib/categories/delete-blockers";
+
+/**
+ * Why a category can't be deleted yet: the shared foreign-key refusal (same
+ * wording as the web route) plus rules, which reference a category inside
+ * JSONB and so are not among the foreign-key blockers.
+ */
+function categoryInUseMessage(blockers: CategoryDeleteBlocker[], ruleCount: number): string {
+  const parts: string[] = [];
+  if (blockers.length > 0) parts.push(categoryDeleteBlockedMessage(blockers));
+  if (ruleCount > 0) {
+    parts.push(
+      `${ruleCount} rule${ruleCount === 1 ? "" : "s"} still set this category; change or delete ${ruleCount === 1 ? "it" : "them"} with manage_rules first.`,
+    );
+  }
+  parts.push(
+    "Move transactions with preview_bulk_categorize + execute_bulk_categorize; budgets with manage_budgets; subscriptions with manage_subscriptions.",
+  );
+  return parts.join(" ");
+}
 
 type ToolResult = { content: Array<{ type: "text"; text: string }> };
 
@@ -74,23 +98,24 @@ export function registerCategoriesTools(server: McpServer, ctx: PgToolContext) {
     const catId = Number(cat.id);
     const catName = String(cat.name ?? `#${catId}`);
 
-    // Count FK references. All three tables scope by user_id so cross-tenant
-    // counts can never leak. PG returns BIGINT-as-string; cast to Number.
-    const txCountRow = await q(db, sql`SELECT COUNT(*) AS cnt FROM transactions WHERE user_id = ${userId} AND category_id = ${catId}`) as { cnt: string | number }[];
-    // FINLYNQ-84: actions are JSONB. Count rules whose actions array
-    // includes a set_category action with this category id (or whose
-    // create_transfer's destAccountId / set_account's accountId resolves
-    // — only set_category matters here for category-delete FK check).
+    // Every ON DELETE NO ACTION referent, through the SAME helper the web
+    // DELETE route uses (budgets, budget templates, recurring transactions and
+    // splits were missing here, so a category with a budget reached Postgres
+    // and came back as a raw 23503; prod 2026-11-13). Rules point at a category
+    // inside JSONB, not by foreign key, so they are counted separately.
+    const blockers = await getCategoryDeleteBlockers(db, userId, catId);
+    const countOf = (table: string) => blockers.find((b) => b.table === table)?.count ?? 0;
+    // FINLYNQ-84: actions are JSONB. Count rules whose actions array includes
+    // a set_category action with this category id.
     const ruleCountRow = await q(db, sql`
       SELECT COUNT(*) AS cnt FROM transaction_rules
       WHERE user_id = ${userId}
         AND actions @> ${JSON.stringify([{ kind: "set_category", categoryId: catId }])}::jsonb
     `) as { cnt: string | number }[];
-    const subCountRow = await q(db, sql`SELECT COUNT(*) AS cnt FROM subscriptions WHERE user_id = ${userId} AND category_id = ${catId}`) as { cnt: string | number }[];
-    const txCount = Number(txCountRow[0]?.cnt ?? 0);
+    const txCount = countOf("transactions");
     const ruleCount = Number(ruleCountRow[0]?.cnt ?? 0);
-    const subscriptionCount = Number(subCountRow[0]?.cnt ?? 0);
-    const inUse = txCount + ruleCount + subscriptionCount > 0;
+    const subscriptionCount = countOf("subscriptions");
+    const inUse = blockers.length > 0 || ruleCount > 0;
 
     // Sign the confirmation token even when FKs are non-zero — execute will
     // re-check and refuse atomically. This way the preview shape is stable
@@ -105,10 +130,11 @@ export function registerCategoriesTools(server: McpServer, ctx: PgToolContext) {
         txCount,
         ruleCount,
         subscriptionCount,
+        blockers,
         inUse,
         confirmationToken,
         ...(inUse
-          ? { hint: "Reassign dependents before delete: use `preview_bulk_categorize` + `execute_bulk_categorize` to move transactions, `update_rule` / `delete_rule` for rules, `update_subscription` for subscriptions." }
+          ? { hint: categoryInUseMessage(blockers, ruleCount) }
           : {}),
       },
     });
@@ -125,23 +151,18 @@ export function registerCategoriesTools(server: McpServer, ctx: PgToolContext) {
     const catRow = decryptNameish(existing, dek)[0];
     const catName = String(catRow.name ?? `#${id}`);
 
-    // Re-check FK references atomically — token is bound to id only; a row
-    // could have been categorized between preview and execute.
-    const txCountRow = await q(db, sql`SELECT COUNT(*) AS cnt FROM transactions WHERE user_id = ${userId} AND category_id = ${id}`) as { cnt: string | number }[];
-    // FINLYNQ-84: count via JSONB @> containment.
+    // Re-check atomically: the token is bound to id only, and a row could have
+    // been attached between preview and execute. Same helper as the web route.
+    const blockers = await getCategoryDeleteBlockers(db, userId, id);
+    // FINLYNQ-84: rules reference the category inside JSONB (not a foreign key).
     const ruleCountRow = await q(db, sql`
       SELECT COUNT(*) AS cnt FROM transaction_rules
       WHERE user_id = ${userId}
         AND actions @> ${JSON.stringify([{ kind: "set_category", categoryId: id }])}::jsonb
     `) as { cnt: string | number }[];
-    const subCountRow = await q(db, sql`SELECT COUNT(*) AS cnt FROM subscriptions WHERE user_id = ${userId} AND category_id = ${id}`) as { cnt: string | number }[];
-    const txCount = Number(txCountRow[0]?.cnt ?? 0);
     const ruleCount = Number(ruleCountRow[0]?.cnt ?? 0);
-    const subscriptionCount = Number(subCountRow[0]?.cnt ?? 0);
-    if (txCount + ruleCount + subscriptionCount > 0) {
-      return err(
-        `Category "${catName}" still referenced by ${txCount} transaction(s), ${ruleCount} rule(s), ${subscriptionCount} subscription(s). Reassign dependents first (use bulk_categorize for transactions, update_rule/delete_rule for rules, update_subscription for subscriptions).`
-      );
+    if (blockers.length > 0 || ruleCount > 0) {
+      return err(`Category "${catName}": ${categoryInUseMessage(blockers, ruleCount)}`);
     }
 
     await db.execute(sql`DELETE FROM categories WHERE id = ${id} AND user_id = ${userId}`);
