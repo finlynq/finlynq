@@ -51,8 +51,11 @@ import {
   gcOrphanSecurity,
 } from "../../src/lib/securities/resolve";
 import {
-  resolveOrCreateInvestmentIncomeCategory,
+  pickInvestmentIncomeCategoryId,
 } from "../../src/lib/investment-income-category";
+import {
+  resolveOrCreateCashSleeve,
+} from "../../src/lib/portfolio/resolve-position";
 import {
   getRate,
 } from "../../src/lib/fx-service";
@@ -67,6 +70,7 @@ import {
   recordSwap,
   recordInKindTransfer,
   recordPortfolioIncomeOrExpense,
+  recordReinvestedIncomeInShares,
   recordFxConversion,
   recordBrokerageDeposit,
   recordBrokerageWithdrawal,
@@ -171,7 +175,7 @@ export function registerPortfolioTools(server: McpServer, ctx: PgToolContext) {
     // operations.ts also throws plain Errors for guard violations (qty<=0,
     // same source/dest account, cash-sleeve passed to in-kind, etc.). Surface
     // the message rather than letting it escape as a 500.
-    if (e instanceof Error && /^record(Buy|Sell|Swap|InKindTransfer|PortfolioIncomeOrExpense|FxConversion|Brokerage)/.test(e.message)) {
+    if (e instanceof Error && /^record(Buy|Sell|Swap|InKindTransfer|PortfolioIncomeOrExpense|ReinvestedIncomeInShares|FxConversion|Brokerage)/.test(e.message)) {
       return e.message;
     }
     return null;
@@ -332,38 +336,63 @@ export function registerPortfolioTools(server: McpServer, ctx: PgToolContext) {
   async function opEntryIncomeExpense(argsObj: {
     account?: string;
     account_id?: number;
-    currency: string;
+    settleAs?: "cash" | "shares";
+    currency?: string;
     amount: number;
     incomeType?: "dividend" | "interest" | "fee" | "other";
     relatedHolding?: string;
     relatedHoldingId?: number;
+    holding?: string;
+    holdingId?: number;
+    quantity?: number;
     categoryId?: number;
     date?: string;
     payee?: string;
     note?: string;
     tags?: string;
   }): Promise<ToolResult> {
-      const { account, account_id, currency, amount, incomeType, relatedHolding, relatedHoldingId, categoryId, date, payee, note, tags } = argsObj;
+      const { account, account_id, settleAs, currency, amount, incomeType, relatedHolding, relatedHoldingId, holding, holdingId, quantity, categoryId, date, payee, note, tags } = argsObj;
       if (!dek) return err("Recording this portfolio entry requires an active session DEK — log in again to encrypt the rows.");
       const accounts = await loadOpAccounts();
       const a = resolveOpAccount("account", account, account_id, accounts);
       if (!a.ok) return err(a.error);
+      const txDate = date ?? today();
+
+      // ── Income received AS SHARES (single-row DRIP, e.g. an RSU vest) ──
+      // The web form's "Settle into: Holding (shares)" path: ONE row on the
+      // stock holding, quantity = shares received, amount = their value, cost
+      // basis = value / quantity. No cash sleeve is touched, so no currency
+      // (the holding's own is used). Same helper as the web route.
+      if (settleAs === "shares") {
+        if (amount <= 0) return err("Income received as shares needs a positive amount (the value of the shares).");
+        if (quantity == null || !(quantity > 0)) return err("Income received as shares needs `quantity` (> 0): the number of shares received.");
+        if (relatedHolding != null || relatedHoldingId != null) return err("relatedHolding is for cash entries; with settleAs:'shares' the entry is booked on `holding` itself.");
+        const h = await resolveOpHolding("holding", Number(a.acct.id), holding, holdingId);
+        if (!h.ok) return err(h.error);
+        const sharesCategoryId = await pickInvestmentIncomeCategoryId(db, userId, dek, { categoryId, incomeType, amount });
+        try {
+          const result = await recordReinvestedIncomeInShares({ userId, dek, accountId: Number(a.acct.id), holdingId: h.id, qty: quantity, amount, categoryId: sharesCategoryId, date: txDate, payee, note, tags, source: "mcp_http" });
+          invalidateUserTxCache(userId);
+          await markSnapshotsDirty(userId, txDate);
+          return text({ success: true, data: { ...result, settleAs: "shares", categoryId: sharesCategoryId, resolvedAccount: { id: Number(a.acct.id), name: String(a.acct.name ?? "") }, message: `Recorded ${quantity} share(s) worth ${amount} received as income on holding #${h.id} on ${txDate} in ${a.acct.name}.` } });
+        } catch (e) {
+          const m = mapPortfolioOpError(e);
+          if (m) return err(m);
+          throw e;
+        }
+      }
+
+      // ── Cash-sleeve income / expense ──
+      if (!currency) return err("Pass `currency`: the cash sleeve to credit or debit. (Or settleAs:'shares' with holding + quantity for income received as shares.)");
+      if (holding != null || holdingId != null || quantity != null) return err("holding / quantity are for settleAs:'shares'. For a cash entry, use relatedHolding to tag the position it relates to.");
       let relatedId: number | null = null;
       if (relatedHolding != null || relatedHoldingId != null) {
         const rh = await resolveOpHolding("relatedHolding", Number(a.acct.id), relatedHolding, relatedHoldingId);
         if (!rh.ok) return err(rh.error);
         relatedId = rh.id;
       }
-      // Category precedence mirrors the REST route: explicit categoryId wins;
-      // else map the income type to its canonical category when the sign agrees.
-      let resolvedCategoryId: number | null = categoryId ?? null;
-      if (resolvedCategoryId == null && incomeType && incomeType !== "other") {
-        const wantIncome = incomeType === "dividend" || incomeType === "interest";
-        if ((wantIncome && amount > 0) || (incomeType === "fee" && amount < 0)) {
-          resolvedCategoryId = await resolveOrCreateInvestmentIncomeCategory(db, userId, dek, incomeType);
-        }
-      }
-      const txDate = date ?? today();
+      // Same category rule as the web route (investment-income-category.ts).
+      const resolvedCategoryId = await pickInvestmentIncomeCategoryId(db, userId, dek, { categoryId, incomeType, amount });
       try {
         const result = await recordPortfolioIncomeOrExpense({ userId, dek, accountId: Number(a.acct.id), currency, amount, relatedHoldingId: relatedId, categoryId: resolvedCategoryId, date: txDate, payee, note, tags, source: "mcp_http" });
         invalidateUserTxCache(userId);
@@ -484,7 +513,7 @@ export function registerPortfolioTools(server: McpServer, ctx: PgToolContext) {
   registerManageTool(
     server,
     "portfolio_record_entry",
-    "Record a lot-aware portfolio ledger entry; `entry_type` selects the operation. Values: buy, sell, swap, transfer, income_expense, fx_conversion, deposit, withdrawal. Writes the canonical, sign-correct legs (stock +, cash −, sum 0) via the operations engine — cash sleeves must already exist. CREATE-ONLY (edit on the web).",
+    "Record a lot-aware portfolio ledger entry; `entry_type` selects the operation. Values: buy, sell, swap, transfer, income_expense, fx_conversion, deposit, withdrawal. Writes the canonical, sign-correct legs (stock +, cash −, sum 0) via the operations engine. A missing cash sleeve is created with manage_holdings (op: add_cash_sleeve). income_expense with settleAs:'shares' books income received as shares (reinvested dividend, RSU vest) in one entry. CREATE-ONLY (edit on the web).",
     z.discriminatedUnion("entry_type", [
       z.object({
         entry_type: z.literal("buy"),
@@ -548,8 +577,12 @@ export function registerPortfolioTools(server: McpServer, ctx: PgToolContext) {
       z.object({
         entry_type: z.literal("income_expense"),
         ...accountRef,
-        currency: supportedCurrencyEnum.describe("Currency of the cash sleeve to credit/debit (ISO code)."),
-        amount: z.number().refine((v) => v !== 0, { message: "amount cannot be 0" }).describe("Positive = income (dividend/interest), negative = expense (fee)."),
+        settleAs: z.enum(["cash", "shares"]).optional().describe("cash (default): credit/debit a cash sleeve. shares: income received as shares on `holding` (reinvested dividend, RSU vest); one entry, cost basis = amount / quantity, no cash moves."),
+        currency: supportedCurrencyEnum.optional().describe("Currency of the cash sleeve to credit/debit (ISO code). Required for settleAs cash; shares use the holding's currency."),
+        amount: z.number().refine((v) => v !== 0, { message: "amount cannot be 0" }).describe("Cash: positive = income (dividend/interest), negative = expense (fee). Shares: the value of the shares received (> 0)."),
+        holding: z.string().optional().describe("settleAs shares: holding (name/ticker) the shares land on, in this account. Pass this or holdingId."),
+        holdingId: z.number().int().optional().describe("settleAs shares: portfolio_holdings.id of that holding (exact)."),
+        quantity: z.number().positive().optional().describe("settleAs shares: number of shares received (> 0)."),
         incomeType: z.enum(["dividend", "interest", "fee", "other"]).optional().describe("Category hint. dividend/interest apply to income (amount>0); fee to expense (amount<0); other leaves the category unset. Ignored when categoryId is given."),
         relatedHolding: z.string().optional().describe("Holding (name/ticker) this income/expense relates to, for reporting. Pass this or relatedHoldingId."),
         relatedHoldingId: z.number().int().optional().describe("portfolio_holdings.id this relates to."),
@@ -748,6 +781,47 @@ export function registerPortfolioTools(server: McpServer, ctx: PgToolContext) {
   }
 
   // ── op: update — lifted VERBATIM from update_portfolio_holding ─────────────
+  // ── op: add_cash_sleeve — mirrors POST /api/portfolio/holdings/cash-sleeve ──
+  // An assistant could not create a sleeve at all, so any buy, deposit or
+  // cash income in a currency the brokerage had no sleeve for failed with
+  // "No <CCY> cash sleeve". Wraps the shared resolveOrCreateCashSleeve
+  // (idempotent on the partial unique index; does the holding_accounts
+  // pairing). Unlike the web route it refuses a non-investment account: a
+  // holding on a chequing account would make its balance read as holdings.
+  async function opHoldingAddCashSleeve(args: {
+    account?: string;
+    account_id?: number;
+    currency: string;
+  }): Promise<ToolResult> {
+      if (!dek) return err("Creating a cash sleeve requires an active session DEK — log in again.");
+      const rawAccounts = await q(db, sql`
+        SELECT id, currency, is_investment, name_ct, alias_ct FROM accounts
+        WHERE user_id = ${userId} AND archived = false
+      `);
+      const allAccounts = decryptNameish(rawAccounts, dek);
+      const aout = resolveOrReport("account", resolveEntity({ entity: "account", id: args.account_id, name: args.account, options: allAccounts }));
+      if ("report" in aout) return aout.report;
+      const acct = allAccounts.find((a) => Number(a.id) === aout.id);
+      if (!acct) return err(`Account #${aout.id} not found.`);
+      const acctName = String(acct.name ?? `#${aout.id}`);
+      if (acct.is_investment !== true) {
+        return err(`"${acctName}" is not an investment account. A cash sleeve holds the cash inside a brokerage account; record cash in "${acctName}" with manage_transactions instead.`);
+      }
+      const sleeve = await resolveOrCreateCashSleeve(userId, dek, Number(acct.id), args.currency);
+      return text({
+        success: true,
+        data: {
+          holdingId: sleeve.id,
+          currency: sleeve.currency,
+          created: sleeve.created,
+          resolvedAccount: { id: Number(acct.id), name: acctName },
+          message: sleeve.created
+            ? `Created the ${sleeve.currency} cash sleeve (holding #${sleeve.id}) in "${acctName}".`
+            : `"${acctName}" already has a ${sleeve.currency} cash sleeve (holding #${sleeve.id}); nothing created.`,
+        },
+      });
+  }
+
   async function opHoldingUpdate(args: {
     holding?: string;
     holdingId?: number;
@@ -959,7 +1033,7 @@ export function registerPortfolioTools(server: McpServer, ctx: PgToolContext) {
   registerManageTool(
     server,
     "manage_holdings",
-    "Manage portfolio holdings (positions inside a brokerage account): `op` selects add / update / delete. add: create a position (name + account; optional symbol/currency/isCrypto). update: change name/symbol/currency/isCrypto/note (fuzzy `holding`; moving accounts is REFUSED — use portfolio_record_entry (entry_type: transfer)). delete: TWO-STEP when the holding has transactions/lots (preview counts + token, then commit); a clean holding deletes directly. qty/cost come from transactions, NOT this tool.",
+    "Manage portfolio holdings (positions inside a brokerage account): `op` selects add / add_cash_sleeve / update / delete. add: create a position (name + account; optional symbol/currency/isCrypto). add_cash_sleeve: create a brokerage account's cash sleeve for a currency (returns the existing one if there is one). update: change name/symbol/currency/isCrypto/note (fuzzy `holding`; moving accounts is REFUSED — use portfolio_record_entry (entry_type: transfer)). delete: TWO-STEP when the holding has transactions/lots (preview counts + token, then commit); a clean holding deletes directly. qty/cost come from transactions, NOT this tool.",
     z.discriminatedUnion("op", [
       z.object({
         op: z.literal("add"),
@@ -970,6 +1044,12 @@ export function registerPortfolioTools(server: McpServer, ctx: PgToolContext) {
         currency: supportedCurrencyEnum.optional().describe("ISO 4217 currency (default: parent account's currency)."),
         isCrypto: z.boolean().optional().describe("Flag this holding as crypto (default: false)"),
         note: z.string().max(500).optional(),
+      }),
+      z.object({
+        op: z.literal("add_cash_sleeve"),
+        account: z.string().optional().describe("Brokerage account name or alias (fuzzy matched; mistyped/unmatched is REFUSED). Pass this OR `account_id`."),
+        account_id: z.number().int().positive().optional().describe("Brokerage-account FK fast-path; wins over the fuzzy `account` name."),
+        currency: supportedCurrencyEnum.describe("Currency of the cash sleeve (ISO code), e.g. USD."),
       }),
       z.object({
         op: z.literal("update"),
@@ -993,6 +1073,8 @@ export function registerPortfolioTools(server: McpServer, ctx: PgToolContext) {
       switch (input.op) {
         case "add":
           return opHoldingAdd(input);
+        case "add_cash_sleeve":
+          return opHoldingAddCashSleeve(input);
         case "update":
           return opHoldingUpdate(input);
         case "delete":
