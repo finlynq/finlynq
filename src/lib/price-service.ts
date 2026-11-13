@@ -336,6 +336,28 @@ export async function fetchQuoteLive(symbol: string): Promise<QuoteResult | null
 }
 
 /**
+ * A live quote that honours the negative cache, with no price_cache read: a
+ * symbol Yahoo recently refused is not asked again until its back-off ends
+ * (404s double up to 24 h), a miss is recorded, a hit clears it. For valuing
+ * HELD symbols that have their own fallback (crypto-service: Yahoo first, then
+ * CoinGecko). Plain `fetchQuoteLive` stays side-effect-free for lookups of
+ * what a user is typing, so a half-typed ticker never blocks a real one.
+ *
+ * Before this the crypto path re-asked Yahoo for its dead pairs (FTM-USD,
+ * UNI-USD, MATIC-USD) on every portfolio load (prod 2026-11-13).
+ */
+export async function fetchQuoteLiveBackoff(symbol: string): Promise<QuoteResult | null> {
+  if (isQuoteNegativelyCached(symbol)) return null;
+  const live = await fetchQuoteLiveOutcome(symbol);
+  if (!live.ok) {
+    markQuoteMiss(symbol, live.reason, live.status);
+    return null;
+  }
+  clearQuoteMiss(symbol);
+  return live.quote;
+}
+
+/**
  * The live fetch itself. Returns the miss REASON next to a null quote so the
  * negative cache can tell a 404 (unknown symbol → longer back-off) from a
  * timeout / 5xx (transient → 10 min). Does NOT touch the negative cache —
