@@ -74,8 +74,16 @@ export interface BudgetMonthInput {
   summary: { plannedSpending: number; spent: number };
 }
 
-/** The same totals the Budgets page shows: planned spending against what was spent. */
-export function leftToSpendSection(budget: BudgetMonthInput, nowMs: number): LeftToSpendSection {
+/**
+ * The same totals the Budgets page shows: planned spending against what was
+ * spent. `format` writes the labels; the widget keeps the default (cents, C$),
+ * the Budgets screen passes its whole-dollar formatter so both read one sum.
+ */
+export function leftToSpendSection(
+  budget: BudgetMonthInput,
+  nowMs: number,
+  format: (amount: number) => string = (amount) => formatCurrency(amount, budget.currency),
+): LeftToSpendSection {
   const { plannedSpending: planned, spent } = budget.summary;
   const left = planned - spent;
   const hasBudget = planned > 0;
@@ -87,9 +95,9 @@ export function leftToSpendSection(budget: BudgetMonthInput, nowMs: number): Lef
     asOfMs: nowMs,
     month: budget.month,
     hasBudget,
-    leftLabel: formatCurrency(Math.abs(left), budget.currency),
-    plannedLabel: formatCurrency(planned, budget.currency),
-    spentLabel: formatCurrency(spent, budget.currency),
+    leftLabel: format(Math.abs(left)),
+    plannedLabel: format(planned),
+    spentLabel: format(spent),
     usedFraction,
     tone,
   };

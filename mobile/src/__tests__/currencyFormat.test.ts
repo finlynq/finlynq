@@ -1,4 +1,56 @@
-import { currencyDecimals, formatCurrency } from "../lib/format";
+import { currencyDecimals, formatCompactMoney, formatCurrency, formatWholeMoney, roundWhole } from "../lib/format";
+
+describe("formatWholeMoney (FINLYNQ-318)", () => {
+  it("rounds half away from zero, with no decimals", () => {
+    expect(roundWhole(2.5)).toBe(3);
+    expect(roundWhole(-2.5)).toBe(-3);
+    expect(roundWhole(-0.4)).toBe(0);
+    expect(Object.is(roundWhole(-0.4), -0)).toBe(false);
+    expect(formatWholeMoney(39933.28, "USD")).toBe("$39,933");
+    expect(formatWholeMoney(1214.5, "USD")).toBe("$1,215");
+    expect(formatWholeMoney(-50.5, "USD")).toBe("-$51");
+  });
+
+  it("writes every dollar currency with a bare $, since the screen names the currency once", () => {
+    expect(formatWholeMoney(8057.4, "CAD")).toBe("$8,057");
+    expect(formatWholeMoney(8057.4, "AUD")).toBe("$8,057");
+    expect(formatWholeMoney(8057.4, "HKD")).toBe("$8,057");
+  });
+
+  it("keeps the narrow symbol for other currencies", () => {
+    expect(formatWholeMoney(1234.4, "EUR")).toBe("€1,234");
+    expect(formatWholeMoney(1234.4, "GBP")).toBe("£1,234");
+    expect(formatWholeMoney(1234.4, "JPY")).toBe("¥1,234");
+  });
+
+  it("says <$1 for an amount that isn't zero but rounds to it, and $0 for float noise", () => {
+    expect(formatWholeMoney(0.4, "CAD")).toBe("<$1");
+    expect(formatWholeMoney(-0.4, "CAD")).toBe("-<$1");
+    expect(formatWholeMoney(0.004, "CAD")).toBe("$0");
+    expect(formatWholeMoney(0, "CAD")).toBe("$0");
+  });
+
+  it("fits seven digits on one line", () => {
+    expect(formatWholeMoney(9999999.49, "USD")).toBe("$9,999,999");
+  });
+});
+
+describe("formatCompactMoney (FINLYNQ-318)", () => {
+  it("shortens heading totals to one decimal and drops .0", () => {
+    expect(formatCompactMoney(39933.28, "CAD")).toBe("$39.9k");
+    expect(formatCompactMoney(31020, "CAD")).toBe("$31k");
+    expect(formatCompactMoney(4865, "CAD")).toBe("$4.9k");
+    expect(formatCompactMoney(1_250_000, "USD")).toBe("$1.3M");
+    expect(formatCompactMoney(999_960, "USD")).toBe("$1M");
+    expect(formatCompactMoney(-1500, "USD")).toBe("-$1.5k");
+  });
+
+  it("stays whole under 1,000", () => {
+    expect(formatCompactMoney(940.2, "USD")).toBe("$940");
+    expect(formatCompactMoney(999.4, "USD")).toBe("$999");
+    expect(formatCompactMoney(999.6, "USD")).toBe("$1k");
+  });
+});
 
 // What the web's `currencyDecimals` reads back: the number of decimals `Intl`
 // writes a currency with.

@@ -406,3 +406,23 @@ review never prompts.
   data, 360px, light and dark. **Check on a device before promoting:** the keyboard over the adjustment and amount
   fields (the adjustment uses `numbers-and-punctuation` so a minus can be typed), the `Switch` rows, and that the
   Budgets list refreshes on coming back from the rules screen.
+- **Next build, not in 1.0.32: Budgets redesign** (2026-11-14, FINLYNQ-318, on `mobile-dev`; owner-approved mockup
+  https://claude.ai/artifact/L8LkS5paF1QFfZxtZMz65J). More → Budgets shows whole amounts only (`formatWholeMoney` in
+  `lib/format.ts`: rounds half away from zero, `<$1` for an amount that rounds to 0 but isn't), names the currency
+  once under the month ("All amounts in CAD") and writes a bare `$` on every amount (the server returns the whole
+  screen in the display currency), with tabular digits throughout. Month arrows are 44px round buttons. The hero card
+  keeps the Left to spend widget's own sum (`leftToSpendSection` now takes an optional formatter; the widget keeps
+  cents and `C$`) and adds "Day N of M" with a pace chip (`spendingPace`: expected = planned × day / days; at or under
+  → On track, up to 10% above → Close to pace, beyond → Spending fast) and "Still due this month $X · N bills". The
+  rest of the month is a 2×2 grid (Left to plan, Net so far, Income with "Above plan" over 100%, Debt paid). Section
+  headers show short totals (`formatCompactMoney`: `$39.9k of $31k`) and a % chip. A line 95% or more spent turns
+  amber with an "Almost spent" chip (`ALMOST_SPENT_AT`; the server's own warn, bills due above what is left, stays
+  amber without it); a line with no budget gets a dimmed name and a "+ Set budget" mark, part of the row (the row
+  opens the sheet; a nested button would hide from screen readers). "Tap a line to set its budget" shows only until
+  something has a budget (`hasAnyBudget`), and the "Due later" chip reads "Due". Cents stay in the set-budget sheet
+  and the transaction views. JavaScript only; no server change. Pinned by `budgets.test.ts` (pace and almost-spent
+  thresholds mutation-checked), `BudgetsScreen.test.tsx` and `currencyFormat.test.ts`. **Seen:** the real screen
+  through react-native-web with fixture data shaped like the mockup, 390px, dark and light. **Check on a device
+  before promoting:** the 44px month buttons and chip row at 375-390px, the hero amount not wrapping at 7 digits
+  (`adjustsFontSizeToFit` only works natively), and the dashed "+ Set budget" border (Android draws dashed borders
+  only with a border radius, which it has).

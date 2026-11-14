@@ -74,6 +74,69 @@ export function formatCurrency(
   }
 }
 
+/** Below half a cent an amount is zero: float noise from sums, never real money. */
+const NEAR_ZERO = 0.005;
+
+/**
+ * A whole amount with the currency's bare sign: `$` for every dollar currency
+ * (C$ becomes $), the narrow symbol for the rest (€, £, ¥). Only for a screen
+ * that names its currency once, since "$" alone no longer says which dollar.
+ */
+function formatBareWhole(whole: number, currency: string): string {
+  const sign = whole < 0 ? "-" : "";
+  if (DOLLAR_SYMBOLS[currency]) {
+    return `${sign}$${new Intl.NumberFormat("en-CA", { maximumFractionDigits: 0 }).format(Math.abs(whole))}`;
+  }
+  // Older Intl data lacks narrowSymbol (or the currency): try the plain symbol, then text.
+  for (const currencyDisplay of ["narrowSymbol", "symbol"] as const) {
+    try {
+      return new Intl.NumberFormat("en-CA", {
+        style: "currency",
+        currency,
+        currencyDisplay,
+        minimumFractionDigits: 0,
+        maximumFractionDigits: 0,
+      }).format(whole);
+    } catch {
+      // next display
+    }
+  }
+  return `${sign}${currency} ${Math.abs(whole)}`;
+}
+
+/** Rounds half away from zero (2.5 → 3, -2.5 → -3), never to -0. */
+export function roundWhole(amount: number): number {
+  const r = Math.sign(amount) * Math.round(Math.abs(amount));
+  return r === 0 ? 0 : r;
+}
+
+/**
+ * Whole units for a summary screen that states its currency once (Budgets,
+ * FINLYNQ-318): `$8,057`, `-$50`. Display only: callers keep full precision and
+ * total the raw values before formatting. An amount that is not zero but
+ * rounds to it reads `<$1`, so a small balance never looks settled.
+ */
+export function formatWholeMoney(amount: number, currency = "USD"): string {
+  if (!Number.isFinite(amount)) return formatBareWhole(0, currency);
+  const whole = roundWhole(amount);
+  if (whole === 0 && Math.abs(amount) >= NEAR_ZERO) {
+    return `${amount < 0 ? "-" : ""}<${formatBareWhole(1, currency)}`;
+  }
+  return formatBareWhole(whole, currency);
+}
+
+/**
+ * A short total for a heading: `$940`, `$39.9k`, `$1.2M` (one decimal, `.0`
+ * dropped). Under 1,000 it is the whole amount.
+ */
+export function formatCompactMoney(amount: number, currency = "USD"): string {
+  const abs = Math.abs(amount);
+  if (!Number.isFinite(amount) || abs < 999.5) return formatWholeMoney(amount, currency);
+  const [div, unit] = abs < 999_950 ? [1_000, "k"] : [1_000_000, "M"];
+  const short = (Math.round((abs / div) * 10) / 10).toFixed(1).replace(/\.0$/, "");
+  return `${amount < 0 ? "-" : ""}${formatBareWhole(1, currency).replace("1", `${short}${unit}`)}`;
+}
+
 /**
  * Decrypted display names can be `null` under a cold DEK (CLAUDE.md invariant).
  * Normalize at the boundary so `.charAt`/`.localeCompare`/render never crash.

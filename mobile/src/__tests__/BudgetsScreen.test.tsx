@@ -4,6 +4,7 @@ import AsyncStorage from "@react-native-async-storage/async-storage";
 import BudgetsScreen, { monthFromOffset } from "../screens/BudgetsScreen";
 import { endpoints } from "../api/client";
 import { leftToSpendSection } from "../lib/widgets/snapshot";
+import { formatWholeMoney } from "../lib/format";
 import { ThemeContext } from "../theme";
 import type { Theme } from "../theme";
 import { lightColors } from "../theme/colors";
@@ -202,13 +203,23 @@ describe("BudgetsScreen", () => {
   });
 
   describe("totals", () => {
-    it("shows the figures the Left to spend widget shows", async () => {
+    // The screen reads the Left to spend widget's own function, with its
+    // whole-dollar formatter (FINLYNQ-318), so the two can never disagree.
+    const screenLabels = (data: BudgetMonth) => leftToSpendSection(data, 0, (n) => formatWholeMoney(n, data.currency));
+
+    it("shows the figures the Left to spend widget shows, in whole dollars", async () => {
       const data = month();
       mockLoad(data);
-      const widget = leftToSpendSection(data, 0);
-      // What the phone's home screen shows for this response, the 215.50 of
-      // spending with no budget behind it included.
-      expect(widget).toMatchObject({ leftLabel: "$1,284.50", plannedLabel: "$3,000.00", spentLabel: "$1,715.50", tone: "ok" });
+      // What the phone's home screen shows for this response (cents kept there),
+      // the 215.50 of spending with no budget behind it included.
+      expect(leftToSpendSection(data, 0)).toMatchObject({
+        leftLabel: "$1,284.50",
+        plannedLabel: "$3,000.00",
+        spentLabel: "$1,715.50",
+        tone: "ok",
+      });
+      const widget = screenLabels(data);
+      expect(widget).toMatchObject({ leftLabel: "$1,285", plannedLabel: "$3,000", spentLabel: "$1,716", tone: "ok" });
 
       const { getByText } = renderScreen();
       await waitFor(() => expect(getByText("Left to spend")).toBeTruthy());
@@ -220,13 +231,13 @@ describe("BudgetsScreen", () => {
       const data = month();
       data.summary = { ...data.summary, plannedSpending: 1000, spent: 1200 };
       mockLoad(data);
-      const widget = leftToSpendSection(data, 0);
+      const widget = screenLabels(data);
       expect(widget.tone).toBe("over");
 
       const { getByText, queryByText } = renderScreen();
       await waitFor(() => expect(getByText("Over budget")).toBeTruthy());
       expect(getByText(widget.leftLabel)).toBeTruthy();
-      expect(widget.leftLabel).toBe("$200.00");
+      expect(widget.leftLabel).toBe("$200");
       expect(queryByText("Left to spend")).toBeNull();
     });
 
@@ -234,28 +245,80 @@ describe("BudgetsScreen", () => {
       const data = month();
       data.summary = { ...data.summary, plannedSpending: 0, spent: 250 };
       mockLoad(data);
-      const widget = leftToSpendSection(data, 0);
+      const widget = screenLabels(data);
 
       const { getByText, getAllByText } = renderScreen();
       await waitFor(() => expect(getByText("Spent this month")).toBeTruthy());
       expect(getAllByText(widget.spentLabel).length).toBeGreaterThan(0);
     });
 
-    it("shows the rest of the month: left to plan, income, debt, net", async () => {
+    it("shows the pace through the month and what is still due", async () => {
       mockLoad();
       const { getByText } = renderScreen();
-      await waitFor(() => expect(getByText("Left to plan")).toBeTruthy());
-      expect(getByText("$1,600.00")).toBeTruthy();
-      expect(getByText("Income received")).toBeTruthy();
-      expect(getByText("Debt paid")).toBeTruthy();
-      expect(getByText("+$384.50")).toBeTruthy();
+      await waitFor(() => expect(getByText("Left to spend")).toBeTruthy());
+      expect(getByText(/^Day 15 of \d\d$/)).toBeTruthy();
+      // 1,715.50 spent by day 15 of a 3,000 budget is more than 10% above an even pace.
+      expect(getByText(/^Spending fast · \$\d+ over pace$/)).toBeTruthy();
       expect(getByText("Still due this month")).toBeTruthy();
+      expect(getByText("$30 · 1 bill")).toBeTruthy();
     });
 
-    it("formats in the month's currency", async () => {
-      mockLoad({ ...month(), currency: "CAD" });
+    it("shows the rest of the month as tiles: left to plan, net, income, debt", async () => {
+      mockLoad();
+      const { getByText, getAllByText } = renderScreen();
+      await waitFor(() => expect(getByText("Left to plan")).toBeTruthy());
+      expect(getByText("$1,600")).toBeTruthy();
+      expect(getByText("of $5,000 expected")).toBeTruthy();
+      expect(getByText("+$385")).toBeTruthy();
+      expect(getByText("income − debt − spending")).toBeTruthy();
+      expect(getAllByText("Income").length).toBeGreaterThan(0); // the tile and the section
+      expect(getByText("50% of $5,000")).toBeTruthy();
+      expect(getByText("Debt paid")).toBeTruthy();
+      expect(getByText("100% of $400")).toBeTruthy();
+    });
+
+    it("marks income above plan", async () => {
+      const data = month();
+      data.summary = { ...data.summary, plannedIncome: 31020, receivedIncome: 39933.28 };
+      mockLoad(data);
       const { getByText } = renderScreen();
-      await waitFor(() => expect(getByText("C$1,284.50")).toBeTruthy());
+      await waitFor(() => expect(getByText("Above plan")).toBeTruthy());
+      expect(getByText("129% of $31,020")).toBeTruthy();
+    });
+
+    it("names the currency once and writes amounts with a bare $", async () => {
+      mockLoad({ ...month(), currency: "CAD" });
+      const { getByText, queryByText } = renderScreen();
+      await waitFor(() => expect(getByText("All amounts in CAD")).toBeTruthy());
+      expect(getByText("$1,285")).toBeTruthy();
+      expect(queryByText(/C\$/)).toBeNull();
+    });
+
+    it("gives each section a short total and a percent", async () => {
+      mockLoad();
+      const { getByText } = renderScreen();
+      await waitFor(() => expect(getByText("Spending")).toBeTruthy());
+      expect(getByText("$2.5k of $5k")).toBeTruthy();
+      expect(getByText("$400 of $400")).toBeTruthy();
+      expect(getByText("$1.7k of $3k")).toBeTruthy();
+      expect(getByText("57%")).toBeTruthy();
+    });
+
+    it("shows the tap-to-set hint only until something has a budget", async () => {
+      mockLoad();
+      const first = renderScreen();
+      await waitFor(() => expect(first.getByText("Groceries")).toBeTruthy());
+      expect(first.queryByText("Tap a line to set its budget.")).toBeNull();
+      first.unmount();
+
+      const empty = month();
+      empty.summary = { ...empty.summary, plannedIncome: 0, plannedSpending: 0, plannedDebt: 0, leftToPlan: 0 };
+      empty.income = [group({ key: "g:income:Income", name: "Income", lines: [line({ categoryId: 11, name: "Side gig" })] })];
+      empty.spending = [group({ key: "g:Other", name: "Other", lines: [line({ categoryId: 6, name: "Gifts" })] })];
+      empty.debt = [];
+      mockLoad(empty);
+      const second = renderScreen();
+      await waitFor(() => expect(second.getByText("Tap a line to set its budget.")).toBeTruthy());
     });
   });
 
@@ -273,11 +336,42 @@ describe("BudgetsScreen", () => {
       mockLoad();
       const { getByText, getAllByText } = renderScreen();
       await waitFor(() => expect(getByText("Groceries")).toBeTruthy());
-      expect(getAllByText("$1,800.00 left").length).toBe(2); // The line and its group.
-      expect(getByText("$1,000.00 of $2,800.00 · $30.00 due later")).toBeTruthy();
-      expect(getByText("$215.50 spent · avg $180")).toBeTruthy();
-      expect(getAllByText("Not budgeted").length).toBe(3); // Side gig, Transport, Gifts
-      expect(getByText("$2,500.00 to come")).toBeTruthy();
+      expect(getAllByText("$1,800 left").length).toBe(2); // The line and its group.
+      expect(getByText("$1,000 of $2,800 · $30 due later")).toBeTruthy();
+      expect(getByText("$216 spent · avg $180")).toBeTruthy();
+      expect(getAllByText("Set budget").length).toBe(3); // Side gig, Transport, Gifts
+      expect(getByText("$2,500 to come")).toBeTruthy();
+    });
+
+    it("opens the budget sheet from a line's Set budget mark", async () => {
+      mockLoad();
+      const { getByText, getAllByText, getByLabelText } = renderScreen();
+      await waitFor(() => expect(getByText("Transport")).toBeTruthy());
+      // Side gig, Transport, Gifts: the mark is part of its row, which opens the sheet.
+      fireEvent.press(getAllByText("Set budget")[1]);
+      await waitFor(() => expect(getByLabelText("Save budget")).toBeTruthy());
+      // The row and the sheet's title: the sheet is Transport's.
+      expect(getAllByText(/Transport/).length).toBeGreaterThanOrEqual(2);
+    });
+
+    it("says Almost spent on a line 95% or more spent", async () => {
+      const data = month();
+      data.spending = [
+        group({
+          key: "g:Bills",
+          name: "Bills",
+          budgeted: 486,
+          actual: 482,
+          left: 4,
+          lines: [line({ categoryId: 30, name: "Insurance", budgeted: 486, actual: 482, left: 4, status: "ok" })],
+        }),
+      ];
+      mockLoad(data);
+      const { getByText, getAllByText } = renderScreen();
+      await waitFor(() => expect(getByText("Insurance")).toBeTruthy());
+      expect(getByText("Almost spent")).toBeTruthy();
+      expect(getAllByText("$4 left").length).toBe(2); // the line and its group
+      expect(getByText("$482 of $486")).toBeTruthy();
     });
 
     it("shows a debt line as the server returns it and opens its loan", async () => {
@@ -287,7 +381,7 @@ describe("BudgetsScreen", () => {
       const { getByText, getByLabelText } = renderScreen();
       await waitFor(() => expect(getByText("Car Loan")).toBeTruthy());
       expect(getByText("Debt payments")).toBeTruthy();
-      expect(getByText("$400.00 of $400.00 · $60.00 interest")).toBeTruthy();
+      expect(getByText("$400 of $400 · $60 interest")).toBeTruthy();
       expect(getByText("Paid")).toBeTruthy();
 
       fireEvent.press(getByLabelText("Car Loan loan"));
@@ -307,10 +401,10 @@ describe("BudgetsScreen", () => {
       mockLoad();
       const { getByText, getByLabelText, queryByLabelText } = renderScreen();
       await waitFor(() => expect(getByText("One budget")).toBeTruthy());
-      expect(getByText("$50.00 over")).toBeTruthy();
-      expect(getByText("$250.00 of $200.00")).toBeTruthy();
+      expect(getByText("$50 over")).toBeTruthy();
+      expect(getByText("$250 of $200")).toBeTruthy();
       // Dining's row shows what it spent; it can't be budgeted on its own.
-      expect(getByText("$150.00")).toBeTruthy();
+      expect(getByText("$150")).toBeTruthy();
       fireEvent.press(getByLabelText("Dining"));
       await waitFor(() => expect(getByText("Its spending counts in its group's budget.")).toBeTruthy());
       expect(queryByLabelText("Budget amount")).toBeNull();
@@ -753,11 +847,11 @@ describe("BudgetsScreen", () => {
   describe("months and failures", () => {
     it("clears the previous month's rows when the next month fails to load", async () => {
       mockLoad();
-      const { getByText, queryByText } = renderScreen();
+      const { getByText, getByLabelText, queryByText } = renderScreen();
       await waitFor(() => expect(getByText("Groceries")).toBeTruthy());
 
       (endpoints.getBudgetMonth as jest.Mock).mockResolvedValueOnce({ success: false, error: "Server exploded" });
-      fireEvent.press(getByText("Next →"));
+      fireEvent.press(getByLabelText("Next month"));
 
       await waitFor(() => expect(getByText("Server exploded")).toBeTruthy());
       expect(queryByText("Groceries")).toBeNull();
@@ -779,16 +873,16 @@ describe("BudgetsScreen", () => {
 
     it("ignores a slow response for a month you already left", async () => {
       mockLoad();
-      const { getByText, queryByText } = renderScreen();
+      const { getByText, getByLabelText, queryByText } = renderScreen();
       await waitFor(() => expect(getByText("Groceries")).toBeTruthy());
 
       let finishOld: (v: unknown) => void = () => {};
       (endpoints.getBudgetMonth as jest.Mock).mockReturnValueOnce(new Promise((r) => (finishOld = r)));
-      fireEvent.press(getByText("Next →"));
+      fireEvent.press(getByLabelText("Next month"));
       const later = month(monthFromOffset(2));
       later.spending = [group({ key: "g:Later", name: "Later", lines: [line({ categoryId: 90, name: "Later line" })] })];
       (endpoints.getBudgetMonth as jest.Mock).mockResolvedValueOnce({ success: true, data: later });
-      fireEvent.press(getByText("Next →"));
+      fireEvent.press(getByLabelText("Next month"));
       await waitFor(() => expect(getByText("Later line")).toBeTruthy());
 
       await act(async () => finishOld({ success: true, data: month(monthFromOffset(1)) }));
@@ -798,11 +892,11 @@ describe("BudgetsScreen", () => {
 
     it("comes back to this month", async () => {
       mockLoad();
-      const { getByText, queryByText } = renderScreen();
+      const { getByText, getByLabelText, queryByText } = renderScreen();
       await waitFor(() => expect(getByText("Groceries")).toBeTruthy());
       expect(queryByText("This month")).toBeNull();
 
-      fireEvent.press(getByText("← Prev"));
+      fireEvent.press(getByLabelText("Previous month"));
       await waitFor(() => expect(getByText("This month")).toBeTruthy());
       fireEvent.press(getByText("This month"));
       await waitFor(() => expect(endpoints.getBudgetMonth).toHaveBeenLastCalledWith(monthFromOffset(0)));

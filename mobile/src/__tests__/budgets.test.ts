@@ -7,17 +7,22 @@ import {
   filterCounts,
   findBudgetTarget,
   groupView,
+  hasAnyBudget,
   incomeLineView,
   leftToPlanView,
   monthProgress,
   parseBudgetAmount,
+  percentOf,
   spendBar,
   spendingLineView,
+  spendingPace,
   visibleLinesFor,
   type BudgetGroup,
   type BudgetLine,
   type BudgetMonth,
+  type BudgetSummary,
   type DebtLine,
+  type MonthProgress,
 } from "../lib/budgets";
 
 const line = (over: Partial<BudgetLine> & { categoryId: number; name: string }): BudgetLine => ({
@@ -411,48 +416,79 @@ describe("leftToPlanView", () => {
 });
 
 describe("row wording", () => {
+  // Whole dollars with a bare $: the Budgets screen names its currency once (FINLYNQ-318).
   it("a budgeted line says what is left", () => {
     const v = spendingLineView(line({ categoryId: 1, name: "A", budgeted: 500, actual: 350, left: 150, status: "ok" }), "USD");
-    expect(v).toMatchObject({ right: "$150.00 left", tone: "ok", meta: "$350.00 of $500.00" });
+    expect(v).toMatchObject({ right: "$150 left", tone: "ok", meta: "$350 of $500" });
     expect(v.bar).toEqual({ value: 350, target: 500, tone: "ok" });
+    expect(v.state).toBeUndefined();
   });
 
   it("an overspent line says how far over, never a negative left", () => {
     const v = spendingLineView(line({ categoryId: 1, name: "A", budgeted: 200, actual: 250, left: -50, status: "over" }), "USD");
-    expect(v).toMatchObject({ right: "$50.00 over", tone: "over" });
+    expect(v).toMatchObject({ right: "$50 over", tone: "over" });
+    expect(v.state).toBeUndefined();
   });
 
-  it("a line with no budget says so and flags its spending", () => {
+  it("a line 95% or more spent turns amber and reads Almost spent", () => {
+    const at99 = spendingLineView(line({ categoryId: 1, name: "A", budgeted: 486, actual: 482, left: 4, status: "ok" }), "USD");
+    expect(at99).toMatchObject({ right: "$4 left", tone: "warn", state: "almost", bar: { value: 482, target: 486, tone: "warn" } });
+    const at95 = spendingLineView(line({ categoryId: 1, name: "A", budgeted: 100, actual: 95, left: 5, status: "ok" }), "USD");
+    expect(at95.state).toBe("almost");
+    const at94 = spendingLineView(line({ categoryId: 1, name: "A", budgeted: 100, actual: 94, left: 6, status: "ok" }), "USD");
+    expect(at94).toMatchObject({ tone: "ok", bar: { tone: "ok" } });
+    expect(at94.state).toBeUndefined();
+  });
+
+  it("keeps the server's warning (bills due exceed what is left) amber, without the chip", () => {
+    const v = spendingLineView(line({ categoryId: 1, name: "A", budgeted: 100, actual: 50, left: 50, status: "warn", upcoming: 80 }), "USD");
+    expect(v).toMatchObject({ tone: "warn", bar: { tone: "warn" } });
+    expect(v.state).toBeUndefined();
+  });
+
+  it("a line with no budget is marked for the Set budget button and keeps what it spent", () => {
     expect(spendingLineView(line({ categoryId: 1, name: "A", actual: 20, average3: 15.4 }), "USD")).toEqual({
-      right: "Not budgeted",
-      tone: "warn",
-      meta: "$20.00 spent · avg $15",
+      right: null,
+      tone: "muted",
+      meta: "$20 spent · avg $15",
       bar: null,
+      state: "unbudgeted",
     });
     // Nothing to say under the name: the row is one line.
-    expect(spendingLineView(line({ categoryId: 1, name: "A" }), "USD")).toEqual({ right: "Not budgeted", tone: "muted", meta: null, bar: null });
+    expect(spendingLineView(line({ categoryId: 1, name: "A" }), "USD")).toEqual({
+      right: null,
+      tone: "muted",
+      meta: null,
+      bar: null,
+      state: "unbudgeted",
+    });
   });
 
   it("a rollover line with no budget this month still has a left", () => {
     const v = spendingLineView(line({ categoryId: 1, name: "A", rollover: true, carriedIn: 40, actual: 10, left: 30, status: "ok" }), "USD");
-    expect(v.right).toBe("$30.00 left");
-    expect(v.meta).toBe("$10.00 spent · carried in $40.00");
+    expect(v.right).toBe("$30 left");
+    expect(v.meta).toBe("$10 spent · carried in $40");
   });
 
   it("income says what is to come, or that it came", () => {
-    expect(incomeLineView(line({ categoryId: 1, name: "A", budgeted: 100, actual: 40, left: 60, status: "expected" }), "USD").right).toBe("$60.00 to come");
+    expect(incomeLineView(line({ categoryId: 1, name: "A", budgeted: 100, actual: 40, left: 60, status: "expected" }), "USD").right).toBe("$60 to come");
     expect(incomeLineView(line({ categoryId: 1, name: "A", budgeted: 100, actual: 120, left: -20, status: "received" }), "USD").right).toBe("Received");
-    expect(incomeLineView(line({ categoryId: 1, name: "A", actual: 40 }), "USD")).toMatchObject({ right: "Not budgeted", meta: "$40.00 received" });
+    expect(incomeLineView(line({ categoryId: 1, name: "A", actual: 40 }), "USD")).toMatchObject({ right: null, state: "unbudgeted", meta: "$40 received" });
   });
 
   it("an ordinary group names its two amounts, since left only counts budgeted lines", () => {
     const g = group({ key: "g:A", name: "A", budgeted: 500, actual: 900, left: 100, lines: [] });
-    expect(groupView(g, "spending", "USD")).toMatchObject({ right: "$100.00 left", meta: "$900.00 spent · $500.00 budgeted" });
+    expect(groupView(g, "spending", "USD")).toMatchObject({ right: "$100 left", meta: "$900 spent · $500 budgeted" });
   });
 
   it("a one-line group reads like a budgeted line", () => {
     const g = group({ key: "g:A", name: "A", byGroup: true, budgeted: 500, actual: 350, left: 150, lines: [] });
-    expect(groupView(g, "spending", "USD")).toMatchObject({ right: "$150.00 left", meta: "$350.00 of $500.00" });
+    expect(groupView(g, "spending", "USD")).toMatchObject({ right: "$150 left", meta: "$350 of $500" });
+  });
+
+  it("writes CAD with a bare $, rounded to whole units", () => {
+    const v = spendingLineView(line({ categoryId: 1, name: "A", budgeted: 31020, actual: 39933.28, left: -8913.28, status: "over" }), "CAD");
+    expect(v).toMatchObject({ right: "$8,913 over", meta: "$39,933 of $31,020" });
   });
 
   it("a debt line follows its status", () => {
@@ -463,7 +499,7 @@ describe("row wording", () => {
     expect(debtView(debt({ status: "late", paid: 100 }), "2026-11-05", "USD")).toEqual({
       right: "Late",
       tone: "over",
-      meta: "$100.00 of $400.00 · $60.00 interest",
+      meta: "$100 of $400 · $60 interest",
       bar: { value: 100, target: 400, tone: "over" },
     });
     expect(debtView(debt({ status: "none", planned: 0, source: "none" }), "2026-11-05", "USD")).toMatchObject({
@@ -472,5 +508,53 @@ describe("row wording", () => {
       meta: "No payment scheduled this month",
       bar: null,
     });
+  });
+});
+
+describe("spendingPace (FINLYNQ-318)", () => {
+  const fmt = (n: number) => `$${Math.round(n)}`;
+  // Day 15 of 30 with 3,000 planned: an even pace has spent 1,500.
+  const mid: MonthProgress = { state: "current", day: 15, days: 30, fraction: 0.5 };
+
+  it("is on track at or under pace, and says by how much", () => {
+    expect(spendingPace(3000, 1200, mid, fmt)).toEqual({ tone: "ok", label: "On track · $300 under pace" });
+    expect(spendingPace(3000, 1500, mid, fmt)).toEqual({ tone: "ok", label: "On track · $0 under pace" });
+    expect(spendingPace(3000, 1500.004, mid, fmt)?.tone).toBe("ok"); // under half a cent: float noise
+  });
+
+  it("turns amber up to 10% of the expected amount above pace", () => {
+    expect(spendingPace(3000, 1501, mid, fmt)).toEqual({ tone: "warn", label: "Close to pace · $1 over pace" });
+    expect(spendingPace(3000, 1650, mid, fmt)).toEqual({ tone: "warn", label: "Close to pace · $150 over pace" });
+  });
+
+  it("turns red beyond 10% above pace", () => {
+    expect(spendingPace(3000, 1651, mid, fmt)).toEqual({ tone: "over", label: "Spending fast · $151 over pace" });
+    expect(spendingPace(3000, 3500, mid, fmt)?.tone).toBe("over");
+  });
+
+  it("has no pace for a past or future month, or with nothing planned", () => {
+    expect(spendingPace(3000, 100, { state: "past", day: 30, days: 30, fraction: 1 }, fmt)).toBeNull();
+    expect(spendingPace(3000, 0, { state: "future", day: 0, days: 30, fraction: 0 }, fmt)).toBeNull();
+    expect(spendingPace(0, 100, mid, fmt)).toBeNull();
+  });
+});
+
+describe("percentOf and hasAnyBudget (FINLYNQ-318)", () => {
+  it("rounds to a whole percent and has none without a plan", () => {
+    expect(percentOf(39933.28, 31020)).toBe(129);
+    expect(percentOf(4200, 4865)).toBe(86);
+    expect(percentOf(10, 0)).toBeNull();
+  });
+
+  it("is true once anything has a budget, a group budgeted as one line included", () => {
+    const summary = { plannedIncome: 0, plannedSpending: 0 } as BudgetSummary;
+    const unbudgeted = group({ key: "g:A", name: "A", lines: [line({ categoryId: 1, name: "A" })] });
+    expect(hasAnyBudget({ summary, income: [], spending: [] })).toBe(false);
+    expect(hasAnyBudget({ summary, income: [], spending: [unbudgeted] })).toBe(false);
+    const zero = group({ key: "g:A", name: "A", lines: [line({ categoryId: 1, name: "A", budgeted: 0 })] });
+    expect(hasAnyBudget({ summary, income: [], spending: [zero] })).toBe(true);
+    const byGroup = group({ key: "g:A", name: "A", byGroup: true, budgeted: 50, lines: [] });
+    expect(hasAnyBudget({ summary, income: [], spending: [byGroup] })).toBe(true);
+    expect(hasAnyBudget({ summary: { ...summary, plannedIncome: 5000 }, income: [], spending: [] })).toBe(true);
   });
 });

@@ -9,7 +9,7 @@
 // (monthProgress) and `app/(app)/budgets/_components/budget-rows.tsx`
 // (visibleLinesFor, spendBar); keep them in sync.
 
-import { formatCurrency } from "./format";
+import { formatWholeMoney } from "./format";
 
 export type BudgetLineStatus = "unbudgeted" | "ok" | "warn" | "over" | "received" | "expected";
 export type DebtStatus = "paid" | "due" | "late" | "none";
@@ -530,44 +530,57 @@ export function leftToPlanView(s: Pick<BudgetSummary, "plannedIncome" | "leftToP
   };
 }
 
-/** What one row says, beside its name and under it. */
+/**
+ * What one row says, beside its name and under it. `state` marks the two rows
+ * the screen draws differently (FINLYNQ-318): a line 95% or more spent gets an
+ * "Almost spent" chip, and a line with no budget a dimmed name and a
+ * "+ Set budget" button where its right-hand figure would be.
+ */
 export interface RowView {
   right: string | null;
   tone: BarTone | "muted";
   meta: string | null;
   bar: BarSpec | null;
+  state?: "almost" | "unbudgeted";
 }
 
 const joinBits = (bits: Array<string | null>) => bits.filter(Boolean).join(" · ") || null;
+
+/** Share of a line's money spent at which it reads "Almost spent" and turns amber. */
+export const ALMOST_SPENT_AT = 0.95;
 
 /** A category with its own budget, or a group budgeted as one line. */
 export function spendingLineView(
   x: Pick<BudgetLine, "budgeted" | "actual" | "left" | "carriedIn" | "rollover" | "upcoming" | "average3" | "status">,
   currency: string,
 ): RowView {
-  const fmt = (n: number) => formatCurrency(n, currency);
+  const fmt = (n: number) => formatWholeMoney(n, currency);
   const carried = x.rollover && x.carriedIn ? `carried in ${fmt(x.carriedIn)}` : null;
   const due = x.upcoming > 0 ? `${fmt(x.upcoming)} due later` : null;
   if (x.status === "unbudgeted" || x.left == null) {
     const spent = x.actual !== 0 ? `${fmt(x.actual)} spent` : null;
-    const average = x.average3 > 0 ? `avg ${formatCurrency(x.average3, currency, { decimals: 0 })}` : null;
-    // Spending with no plan behind it is worth a second look.
-    return { right: "Not budgeted", tone: x.actual > 0.005 ? "warn" : "muted", meta: joinBits([spent, average, due]), bar: null };
+    const average = x.average3 > 0 ? `avg ${fmt(x.average3)}` : null;
+    return { right: null, tone: "muted", meta: joinBits([spent, average, due]), bar: null, state: "unbudgeted" };
   }
   const amounts = x.budgeted != null ? `${fmt(x.actual)} of ${fmt(x.budgeted)}` : `${fmt(x.actual)} spent`;
   const over = x.left < -0.005;
+  const bar = spendBar(x);
+  const almost = !over && bar != null && bar.value / bar.target >= ALMOST_SPENT_AT;
+  // The server's warn means bills still due are more than what is left.
+  const tone: BarTone = over ? "over" : almost || x.status === "warn" ? "warn" : "ok";
   return {
     right: over ? `${fmt(-x.left)} over` : `${fmt(x.left)} left`,
-    tone: over ? "over" : x.status === "warn" ? "warn" : "ok",
+    tone,
     meta: joinBits([amounts, carried, due]),
-    bar: spendBar(x),
+    bar: bar ? { ...bar, tone } : null,
+    ...(almost ? { state: "almost" as const } : {}),
   };
 }
 
 export function incomeLineView(x: Pick<BudgetLine, "budgeted" | "actual" | "left" | "status">, currency: string): RowView {
-  const fmt = (n: number) => formatCurrency(n, currency);
+  const fmt = (n: number) => formatWholeMoney(n, currency);
   if (x.budgeted == null) {
-    return { right: "Not budgeted", tone: "muted", meta: x.actual !== 0 ? `${fmt(x.actual)} received` : null, bar: null };
+    return { right: null, tone: "muted", meta: x.actual !== 0 ? `${fmt(x.actual)} received` : null, bar: null, state: "unbudgeted" };
   }
   return {
     right: x.status === "received" ? "Received" : `${fmt(Math.max(0, x.left ?? 0))} to come`,
@@ -579,12 +592,12 @@ export function incomeLineView(x: Pick<BudgetLine, "budgeted" | "actual" | "left
 
 /** A category inside a one-line group: what it spent, and no budget of its own. */
 export function inGroupLineView(x: Pick<BudgetLine, "actual">, currency: string): RowView {
-  return { right: formatCurrency(x.actual, currency), tone: "muted", meta: null, bar: null };
+  return { right: formatWholeMoney(x.actual, currency), tone: "muted", meta: null, bar: null };
 }
 
 export function groupView(group: BudgetGroup, section: "income" | "spending", currency: string): RowView {
   if (group.byGroup) return spendingLineView(group, currency);
-  const fmt = (n: number) => formatCurrency(n, currency);
+  const fmt = (n: number) => formatWholeMoney(n, currency);
   if (section === "income") {
     const meta = group.budgeted != null ? `${fmt(group.actual)} of ${fmt(group.budgeted)}` : group.actual !== 0 ? `${fmt(group.actual)} received` : null;
     return { right: null, tone: "muted", meta, bar: null };
@@ -603,7 +616,7 @@ export function groupView(group: BudgetGroup, section: "income" | "spending", cu
 }
 
 export function debtView(d: DebtLine, today: string, currency: string): RowView {
-  const fmt = (n: number) => formatCurrency(n, currency);
+  const fmt = (n: number) => formatWholeMoney(n, currency);
   const tone = DEBT_TONE[d.status];
   const interest = d.source === "schedule" && d.planned > 0 ? `${fmt(d.interest)} interest` : null;
   return {
@@ -612,6 +625,54 @@ export function debtView(d: DebtLine, today: string, currency: string): RowView 
     meta: d.planned > 0 || d.paid !== 0 ? joinBits([`${fmt(d.paid)} of ${fmt(d.planned)}`, interest]) : "No payment scheduled this month",
     bar: d.planned > 0 ? { value: d.paid, target: d.planned, tone: tone ?? "ok" } : null,
   };
+}
+
+// ─── Budgets screen summary (FINLYNQ-318) ────────────────────────────────────
+
+/** Whole percent of `actual` against `planned`; null when nothing is planned. */
+export function percentOf(actual: number, planned: number): number | null {
+  if (!(planned > 0.005)) return null;
+  return Math.round((actual / planned) * 100);
+}
+
+export interface PaceView {
+  tone: BarTone;
+  label: string;
+}
+
+/** How far above an even pace spending may run before the chip turns red. */
+export const PACE_WARN_BAND = 0.1;
+
+/**
+ * This month's spending against an even pace through the month. Expected
+ * spend = planned × day / days in month. At or under it → ok ("On track"); above
+ * it by up to 10% of the expected amount → warn; further above → over. Only for
+ * the month in progress with something planned; past and future months have no
+ * pace.
+ */
+export function spendingPace(
+  planned: number,
+  spent: number,
+  progress: MonthProgress,
+  fmt: (n: number) => string,
+): PaceView | null {
+  if (progress.state !== "current" || !(planned > 0.005) || progress.days <= 0) return null;
+  const expected = (planned * progress.day) / progress.days;
+  const ahead = spent - expected;
+  if (ahead <= 0.005) return { tone: "ok", label: `On track · ${fmt(Math.max(0, -ahead))} under pace` };
+  if (ahead <= expected * PACE_WARN_BAND) return { tone: "warn", label: `Close to pace · ${fmt(ahead)} over pace` };
+  return { tone: "over", label: `Spending fast · ${fmt(ahead)} over pace` };
+}
+
+/**
+ * Whether anything this month has a budget. The "Tap a line to set its budget"
+ * hint only shows until the user has set one.
+ */
+export function hasAnyBudget(month: Pick<BudgetMonth, "summary" | "income" | "spending">): boolean {
+  if (month.summary.plannedSpending > 0.005 || month.summary.plannedIncome > 0.005) return true;
+  return [...month.income, ...month.spending].some(
+    (g) => g.budgeted != null || g.lines.some((l) => l.budgeted != null),
+  );
 }
 
 /** What a route-not-found looks like: `request()` reports a body-less 404 this way. */
