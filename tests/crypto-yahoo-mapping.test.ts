@@ -3,10 +3,10 @@
  * Yahoo became the primary crypto price source (live + historical) and CoinGecko
  * the fallback only for coins Yahoo can't price:
  *   - `coinGeckoIdToSymbol` — reverse of SYMBOL_TO_COINGECKO, first-wins so the
- *     matic-network collision (MATIC + POL) resolves to MATIC (Yahoo's deep
- *     history is under MATIC-USD). A coin id with no entry → null (routes to the
- *     CoinGecko fallback).
- *   - `cryptoSymbolToYahooTicker` — POL override points at MATIC-USD.
+ *     MATIC + POL shared coin id resolves to MATIC. A coin id with no entry →
+ *     null (routes to the CoinGecko fallback).
+ *   - `cryptoSymbolToYahooTicker` — overrides for coins whose Yahoo ticker
+ *     differs (id-suffixed clashes, renames); null = no Yahoo listing.
  *   - `stripYahooCryptoNameSuffix` — Yahoo names crypto "<Name> USD"; strip it.
  *
  * `@/db` is stubbed so importing crypto-service.ts never touches Postgres; the
@@ -50,10 +50,12 @@ describe("coinGeckoIdToSymbol", () => {
     expect(coinGeckoIdToSymbol("ethereum")).toBe("ETH");
   });
 
-  it("resolves the matic-network collision to MATIC (first-wins), not POL", () => {
-    // Both MATIC and POL map to matic-network; the reverse map must pick MATIC
-    // so the Yahoo ticker resolves to MATIC-USD (which has the deep history).
-    expect(coinGeckoIdToSymbol("matic-network")).toBe("MATIC");
+  it("resolves the MATIC/POL shared coin id to MATIC (first-wins), not POL", () => {
+    // Both price as POL; MATIC wins the reverse lookup so the live path keeps
+    // the CRYPTO:MATIC cache key it always wrote.
+    expect(symbolToCoinGeckoId("MATIC")).toBe("polygon-ecosystem-token");
+    expect(symbolToCoinGeckoId("POL")).toBe("polygon-ecosystem-token");
+    expect(coinGeckoIdToSymbol("polygon-ecosystem-token")).toBe("MATIC");
   });
 
   it("returns null for an unmapped coin id (→ CoinGecko fallback)", () => {
@@ -67,8 +69,29 @@ describe("cryptoSymbolToYahooTicker", () => {
     expect(cryptoSymbolToYahooTicker("eth")).toBe("ETH-USD");
   });
 
-  it("routes POL to MATIC-USD (Polygon rename — Yahoo history under MATIC)", () => {
-    expect(cryptoSymbolToYahooTicker("POL")).toBe("MATIC-USD");
+  it("routes MATIC and POL to POL28321-USD (Yahoo dropped MATIC-USD and POL-USD)", () => {
+    expect(cryptoSymbolToYahooTicker("POL")).toBe("POL28321-USD");
+    expect(cryptoSymbolToYahooTicker("MATIC")).toBe("POL28321-USD");
+  });
+
+  // Checked live 2026-11-14: Yahoo appends an id to a coin whose ticker clashes
+  // with another coin. Plain ARB-USD is "ARbit" at a fraction of a cent, so an
+  // Arbitrum holding was valued near zero with no fallback.
+  it("uses Yahoo's id-suffixed tickers for clashing or renamed coins", () => {
+    expect(cryptoSymbolToYahooTicker("ARB")).toBe("ARB11841-USD");
+    expect(cryptoSymbolToYahooTicker("APT")).toBe("APT21794-USD");
+    expect(cryptoSymbolToYahooTicker("SUI")).toBe("SUI20947-USD");
+    expect(cryptoSymbolToYahooTicker("UNI-USD")).toBe("UNI7083-USD");
+    expect(cryptoSymbolToYahooTicker("S")).toBe("S32684-USD");
+  });
+
+  it("returns null for a coin Yahoo has no listing for (FTM → CoinGecko only)", () => {
+    expect(cryptoSymbolToYahooTicker("FTM")).toBeNull();
+    expect(cryptoSymbolToYahooTicker("ftm-usd")).toBeNull();
+  });
+
+  it("does not treat inherited object keys as overrides", () => {
+    expect(cryptoSymbolToYahooTicker("constructor")).toBe("CONSTRUCTOR-USD");
   });
 
   it("strips an existing pair suffix before mapping", () => {

@@ -14,12 +14,14 @@
  *     symbol". Two shapes:
  *       - with `suggestedSymbol`: the SAME shares now trade under another
  *         ticker (a rename, or a notation Yahoo wants spelled differently), so
- *         the UI can offer a one-click "Change to <suggested>". Seeded with POL
- *         (Polygon): the network migrated MATIC → POL 1:1 (Sept 2024), but
- *         Yahoo carries the price history only under the old `MATIC` ticker —
- *         `POL-USD` returns no closes. The 2026-10-31 batch adds the renamed
- *         US listings prod kept 404-ing every 10 minutes (SQ, VIAC, HCP) and
- *         two Hong Kong codes entered without the `.HK` suffix.
+ *         the UI can offer a one-click "Change to <suggested>". The 2026-10-31
+ *         batch holds the renamed US listings prod kept 404-ing every 10
+ *         minutes (SQ, VIAC, HCP) and two Hong Kong codes entered without the
+ *         `.HK` suffix. (A POL → MATIC entry was removed 2026-11-14: Yahoo
+ *         dropped MATIC-USD, and crypto-service now asks Yahoo for POL28321-USD
+ *         for both symbols, so a ticker change no longer helps. Renamed or
+ *         clashing COINS are fixed in crypto-service's Yahoo ticker map, not
+ *         here.)
  *       - WITHOUT `suggestedSymbol`: the position was converted at a share
  *         RATIO (SWN → 0.0867 EXE), so swapping the ticker alone would misstate
  *         the holding. The message names the successor and the ratio, and the
@@ -59,13 +61,6 @@ export interface TickerAdvisory {
 }
 
 const ADVISORIES: Record<string, Omit<TickerAdvisory, "kind">> = {
-  POL: {
-    symbol: "POL",
-    suggestedSymbol: "MATIC",
-    message:
-      "Polygon renamed MATIC to POL, but price history is only available under the MATIC ticker — POL prices may be missing or stale. Change this holding's ticker to MATIC (same asset, 1:1) for full pricing.",
-  },
-
   // ── Renamed US listings (verified live 2026-10-31). Yahoo serves the full
   // history under the NEW ticker and 404s the old one forever; the shares are
   // the same, so a ticker change is the whole fix.
