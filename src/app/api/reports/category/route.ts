@@ -7,19 +7,28 @@ import { getDisplayCurrency, getRateMap, convertWithRateMap } from "@/lib/fx-ser
 import { convertReportingSlice, selfHealReportingAmounts } from "@/lib/fx/reporting-amount";
 import { todayISO } from "@/lib/utils/date";
 import {
+  allTimeMonths,
+  allTimeYears,
   buildCategoryDetail,
+  buildCategoryYearly,
   categoryWindow,
+  categoryYearWindow,
   CATEGORY_WINDOWS,
+  CATEGORY_YEAR_WINDOWS,
   type CategoryTxRow,
   type CategoryType,
 } from "@/lib/reports/category-detail";
 
 /**
- * GET /api/reports/category?categoryId=&months=6|12|24[&currency=]
+ * GET /api/reports/category?categoryId=&months=6|12|24|all[&currency=]
+ * GET /api/reports/category?categoryId=&period=year&years=3|5|10|all[&currency=]
  *
- * One category's detail for the `/categories/[id]` page: monthly series with
- * budget, average / median / comparisons, share of all spending (or income),
- * top payees and recent transactions. Math lives in the pure
+ * One category's detail for the `/categories/[id]` page: a monthly series
+ * (default) or a calendar-year series (`period=year`, 2026-11-13) with budget,
+ * average / median / comparisons, share of all spending (or income), top
+ * payees and recent transactions. `all` reaches back to the category's first
+ * transaction. The monthly response shape is unchanged (the phone app reads
+ * it); both add `period` + `range`. Math lives in the pure
  * lib/reports/category-detail.ts.
  *
  * Money follows the Reports rules (FINLYNQ-123): each row uses its STORED
@@ -33,8 +42,7 @@ export const GET = apiHandler({ auth: "auth" }, async ({ request, userId, dek })
   const params = request.nextUrl.searchParams;
   const categoryId = Number(params.get("categoryId"));
   if (!Number.isInteger(categoryId) || categoryId <= 0) throw new AppError("categoryId is required", 400);
-  const requested = Number(params.get("months") ?? 12);
-  const months = (CATEGORY_WINDOWS as readonly number[]).includes(requested) ? requested : 12;
+  const period = params.get("period") === "year" ? "year" : "month";
 
   const cat = await db
     .select({
@@ -54,7 +62,33 @@ export const GET = apiHandler({ auth: "auth" }, async ({ request, userId, dek })
   void selfHealReportingAmounts(userId, displayCurrency);
 
   const today = todayISO();
-  const { windowStart, windowStartMonth, queryStart } = categoryWindow(today, months);
+
+  // Range: a fixed count, or "all" = back to the category's first transaction.
+  const rangeParam = params.get(period === "year" ? "years" : "months") ?? (period === "year" ? "all" : "12");
+  const allowed: readonly number[] = period === "year" ? CATEGORY_YEAR_WINDOWS : CATEGORY_WINDOWS;
+  let range: number | "all";
+  let count: number;
+  if (rangeParam === "all") {
+    const first = await db
+      .select({ minDate: sql<string | null>`MIN(${schema.transactions.date})` })
+      .from(schema.transactions)
+      .where(and(
+        eq(schema.transactions.userId, userId),
+        eq(schema.transactions.categoryId, categoryId),
+        lte(schema.transactions.date, today),
+      ))
+      .get();
+    const firstDate = first?.minDate ?? null;
+    range = "all";
+    count = period === "year" ? allTimeYears(today, firstDate) : allTimeMonths(today, firstDate);
+  } else {
+    const n = Number(rangeParam);
+    range = allowed.includes(n) ? n : period === "year" ? CATEGORY_YEAR_WINDOWS[1] : 12;
+    count = range;
+  }
+  const months = count;
+  const { windowStart, windowStartMonth, queryStart } =
+    period === "year" ? categoryYearWindow(today, count) : categoryWindow(today, count);
 
   const rawRows = await db
     .select({
@@ -133,15 +167,32 @@ export const GET = apiHandler({ auth: "auth" }, async ({ request, userId, dek })
   const sign = type === "I" ? 1 : -1;
   const typeTotal = sign * typeSlices.reduce((s, row) => s + convertReportingSlice(row, displayCurrency, rateMap), 0);
 
+  const category = {
+    id: cat.id,
+    name: decryptName(cat.nameCt, dek, null),
+    type,
+    group: cat.group ?? "",
+  };
+
+  if (period === "year") {
+    const yearly = buildCategoryYearly({ type, rows, budgets, today, years: count, toDisplay, typeTotal });
+    return {
+      period: "year" as const,
+      range,
+      category,
+      windowYears: count,
+      displayCurrency,
+      payeesLocked: !dek,
+      ...yearly,
+    };
+  }
+
   const detail = buildCategoryDetail({ type, rows, budgets, today, months, toDisplay, typeTotal });
 
   return {
-    category: {
-      id: cat.id,
-      name: decryptName(cat.nameCt, dek, null),
-      type,
-      group: cat.group ?? "",
-    },
+    period: "month" as const,
+    range,
+    category,
     windowMonths: months,
     displayCurrency,
     payeesLocked: !dek,

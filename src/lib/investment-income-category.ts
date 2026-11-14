@@ -126,6 +126,36 @@ export async function resolveOrCreateInvestmentIncomeCategory(
 }
 
 /**
+ * The category a portfolio income/expense entry is booked in, ONE rule for
+ * every surface that records one (web cash + income-as-shares branches, MCP
+ * `portfolio_record_entry` income_expense): an explicit `categoryId` wins;
+ * otherwise `dividend` / `interest` map to their canonical category when the
+ * entry is income (amount > 0) and `fee` when it is an expense (amount < 0),
+ * created if missing; `other`, no type, or a sign that doesn't fit leaves it
+ * null. Income received as shares is always positive, so the same rule covers
+ * it. It was three hand-copied blocks until 2026-11-13.
+ */
+export async function pickInvestmentIncomeCategoryId(
+  db: DbLike,
+  userId: string,
+  dek: Buffer | null,
+  opts: {
+    categoryId?: number | null;
+    incomeType?: InvestmentIncomeKind | "other" | null;
+    amount: number;
+  },
+): Promise<number | null> {
+  if (opts.categoryId != null) return opts.categoryId;
+  const kind = opts.incomeType;
+  if (!kind || kind === "other") return null;
+  const income = kind === "dividend" || kind === "interest";
+  if ((income && opts.amount > 0) || (kind === "fee" && opts.amount < 0)) {
+    return resolveOrCreateInvestmentIncomeCategory(db, userId, dek, kind);
+  }
+  return null;
+}
+
+/**
  * The user's investment-INCOME category ids: every existing category named
  * like a dividend or interest category (the same candidate names the
  * resolver above uses). Performance treats reinvested income in any OTHER
