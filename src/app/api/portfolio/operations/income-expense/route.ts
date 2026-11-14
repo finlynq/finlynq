@@ -6,7 +6,7 @@ import {
   recordPortfolioIncomeOrExpense,
   recordReinvestedIncomeInShares,
 } from "@/lib/portfolio/operations";
-import { resolveOrCreateInvestmentIncomeCategory } from "@/lib/investment-income-category";
+import { pickInvestmentIncomeCategoryId } from "@/lib/investment-income-category";
 import { invalidateUser as invalidateUserTxCache } from "@/lib/mcp/user-tx-cache";
 import { markSnapshotsDirty } from "@/lib/portfolio/snapshots/dirty";
 import { mapOperationError, replacePortfolioOperation } from "../_helpers";
@@ -68,22 +68,13 @@ export const POST = apiHandler(
           { status: 400 },
         );
       }
-      // Category resolution mirrors the cash path: an explicit categoryId
-      // (any category the user picked) always wins; otherwise a dividend/
-      // interest preset resolves-or-creates its canonical category. "other"/
-      // unset leaves the category null.
-      let sharesCategoryId = input.categoryId ?? null;
-      if (
-        sharesCategoryId == null &&
-        (incomeType === "dividend" || incomeType === "interest")
-      ) {
-        sharesCategoryId = await resolveOrCreateInvestmentIncomeCategory(
-          db,
-          userId,
-          dek,
-          incomeType,
-        );
-      }
+      // Same category rule as the cash path and MCP (explicit wins, else the
+      // dividend/interest preset); the amount is positive here.
+      const sharesCategoryId = await pickInvestmentIncomeCategoryId(db, userId, dek, {
+        categoryId: input.categoryId,
+        incomeType,
+        amount: input.amount,
+      });
       // Delete + record in ONE transaction on edit — a failure in the record
       // step used to leave the original share-dividend row destroyed.
       const recordShares = () => recordReinvestedIncomeInShares({
@@ -128,18 +119,11 @@ export const POST = apiHandler(
     // creating it if missing, so dividends/interest/fees report correctly.
     // 'dividend'/'interest' only make sense for income (amount>0); 'fee' for
     // expense (amount<0). 'other' (or unset) leaves the category untouched.
-    let categoryId = input.categoryId ?? null;
-    if (categoryId == null && incomeType && incomeType !== "other") {
-      const wantIncome = incomeType === "dividend" || incomeType === "interest";
-      if ((wantIncome && input.amount > 0) || (incomeType === "fee" && input.amount < 0)) {
-        categoryId = await resolveOrCreateInvestmentIncomeCategory(
-          db,
-          userId,
-          dek,
-          incomeType,
-        );
-      }
-    }
+    const categoryId = await pickInvestmentIncomeCategoryId(db, userId, dek, {
+      categoryId: input.categoryId,
+      incomeType,
+      amount: input.amount,
+    });
     const recordCash = () => recordPortfolioIncomeOrExpense({
       ...input,
       currency,

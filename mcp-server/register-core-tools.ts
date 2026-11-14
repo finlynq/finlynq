@@ -1364,23 +1364,34 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
       ).get(userId, id) as { id: number } | undefined;
       if (!cat) return sqliteErr(`Category #${id} not found or not owned by you.`);
 
-      const txCount = (await sqlite.prepare(
-        `SELECT COUNT(*) as cnt FROM transactions WHERE user_id = ? AND category_id = ?`
-      ).get(userId, id) as { cnt: number }).cnt;
-      // FINLYNQ-84: actions are JSONB. Count rules whose actions JSONB array
-      // contains a set_category action with this category id.
-      const ruleCount = (await sqlite.prepare(
+      // Every ON DELETE NO ACTION referent, through the same helper as the web
+      // route and the HTTP tool (budgets, budget templates, recurring
+      // transactions and splits used to reach Postgres as a raw 23503). The
+      // helper runs on the shared `@/db` adapter the stdio entry bootstraps;
+      // if that check can't run, refuse rather than attempt the delete.
+      let blockedMessage: string | null = null;
+      try {
+        const [{ db }, { getCategoryDeleteBlockers, categoryDeleteBlockedMessage }] = await Promise.all([
+          import("../src/db/index.js"),
+          import("../src/lib/categories/delete-blockers.js"),
+        ]);
+        const blockers = await getCategoryDeleteBlockers(db, userId, id);
+        if (blockers.length > 0) blockedMessage = categoryDeleteBlockedMessage(blockers);
+      } catch (e) {
+        return sqliteErr(
+          `Could not check what still uses category #${id}, so it was not deleted: ${e instanceof Error ? e.message : String(e)}`,
+        );
+      }
+      // FINLYNQ-84: actions are JSONB, not a foreign key. Count rules whose
+      // actions array contains a set_category action with this category id.
+      const ruleCount = Number((await sqlite.prepare(
         `SELECT COUNT(*) as cnt FROM transaction_rules
          WHERE user_id = ? AND actions @> ?::jsonb`
-      ).get(userId, JSON.stringify([{ kind: "set_category", categoryId: id }])) as { cnt: number }).cnt;
-      const subscriptionCount = (await sqlite.prepare(
-        `SELECT COUNT(*) as cnt FROM subscriptions WHERE user_id = ? AND category_id = ?`
-      ).get(userId, id) as { cnt: number }).cnt;
+      ).get(userId, JSON.stringify([{ kind: "set_category", categoryId: id }])) as { cnt: number }).cnt);
 
-      if (Number(txCount) + Number(ruleCount) + Number(subscriptionCount) > 0) {
-        return sqliteErr(
-          `Category #${id} still referenced by ${txCount} transaction(s), ${ruleCount} rule(s), ${subscriptionCount} subscription(s). Reassign dependents first.`
-        );
+      if (blockedMessage || ruleCount > 0) {
+        const parts = [blockedMessage, ruleCount > 0 ? `${ruleCount} rule(s) still set this category; change or delete them first.` : null];
+        return sqliteErr(`Category #${id}: ${parts.filter(Boolean).join(" ")}`);
       }
 
       await sqlite.prepare(`DELETE FROM categories WHERE id = ? AND user_id = ?`).run(id, userId);

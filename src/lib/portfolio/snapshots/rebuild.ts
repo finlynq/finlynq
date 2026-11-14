@@ -219,8 +219,11 @@ export function dayspanInclusive(from: string, to: string): number {
  * an investment snapshot for. DEK-free (ids only). Mirrors `holdingsAccountIds`
  * in cash-builder.ts (kept local to avoid an import cycle: cash-builder imports
  * THIS module's in-flight guards).
+ *
+ * This is also the set the post-walk reaper KEEPS, so the chart's "orphaned
+ * snapshot" self-heal trigger reads it too (see {@link reapableInvestmentAccounts}).
  */
-async function getHoldingAccountIds(userId: string): Promise<Set<number>> {
+export async function getHoldingAccountIds(userId: string): Promise<Set<number>> {
   const set = new Set<number>();
   const fromHoldings = await db
     .selectDistinct({ accountId: schema.portfolioHoldings.accountId })
@@ -238,6 +241,31 @@ async function getHoldingAccountIds(userId: string): Promise<Set<number>> {
     .where(eq(schema.holdingAccounts.userId, userId));
   for (const r of fromHa) set.add(Number(r.accountId));
   return set;
+}
+
+/**
+ * Accounts whose per-account investment snapshot rows the rebuild's reaper
+ * ({@link deleteInvestmentOrphanSnapshots}) deletes: every snapshot account NOT
+ * in `keepAccountIds` (= {@link getHoldingAccountIds}). An empty keep set means
+ * every account's rows go.
+ *
+ * The chart-load self-heal uses this to decide whether orphans exist, and it
+ * MUST use the reaper's rule, never "no live holdings value": an EMPTIED
+ * account (every position sold, holdings rows still there) has no live value
+ * but legitimately keeps a zero row every day (the builder writes one), and the
+ * reaper keeps those rows. Judging it an orphan started a full-history rebuild
+ * that could never clear it, so every chart load rebuilt all history, the cash
+ * leg included (2026-11-13).
+ */
+export function reapableInvestmentAccounts(
+  snapshotAccountIds: Iterable<number>,
+  keepAccountIds: Set<number>,
+): number[] {
+  const out = new Set<number>();
+  for (const id of snapshotAccountIds) {
+    if (!keepAccountIds.has(id)) out.add(id);
+  }
+  return [...out];
 }
 
 /**

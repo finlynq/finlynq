@@ -9,7 +9,7 @@ import { marketFetch } from "@/lib/market-fetch";
 // so crypto VALUATIONS (dashboard / net-worth / getHoldingsValueByAccount) refresh
 // intraday instead of freezing at the first cache fill of the UTC day. (The
 // overview's *displayed* crypto day-change already reads CoinGecko live.)
-import { isPriceCacheRowStale, fetchYahooDailyCloses, fetchQuoteLive } from "@/lib/price-service";
+import { isPriceCacheRowStale, fetchYahooDailyCloses, fetchQuoteLive, fetchQuoteLiveBackoff } from "@/lib/price-service";
 
 const COINGECKO_BASE = "https://api.coingecko.com/api/v3";
 
@@ -211,7 +211,10 @@ export async function getCryptoPrices(coinIds: string[]): Promise<CryptoPrice[]>
     uniqIds.map(async (coinId) => {
       const sym = coinGeckoIdToSymbol(coinId);
       if (!sym) return { coinId, cp: null as CryptoPrice | null };
-      const q = await fetchQuoteLive(cryptoSymbolToYahooTicker(sym));
+      // Backoff variant: a pair Yahoo refuses (FTM-USD, UNI-USD, MATIC-USD) is
+      // skipped until its back-off ends and goes straight to CoinGecko, instead
+      // of being re-asked on every portfolio load.
+      const q = await fetchQuoteLiveBackoff(cryptoSymbolToYahooTicker(sym));
       if (!q || !(q.price > 0)) return { coinId, cp: null };
       const currency = q.currency || "USD";
       await cacheCryptoPrice(sym, q.price, currency);

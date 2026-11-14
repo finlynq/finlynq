@@ -43,6 +43,8 @@ import {
   reportRebuildProgress,
   tryBeginCashRebuild,
   endCashRebuild,
+  getHoldingAccountIds,
+  reapableInvestmentAccounts,
 } from "@/lib/portfolio/snapshots/rebuild";
 import { rebuildCashSnapshots } from "@/lib/portfolio/snapshots/cash-builder";
 import {
@@ -397,15 +399,30 @@ async function handleGet(request: NextRequest) {
     if (dek) {
       const needsInitialBackfill =
         liveInvestmentByAccount.size > 0 && snapshots.length === 0;
-      // Orphaned investment snapshots: a stored per-account row whose account no
-      // longer reports a live holdings value (its holdings/transactions were
-      // deleted). Such rows keep feeding the chart's historical line until a
-      // rebuild reaps them, so trigger the self-heal (which now deletes orphans)
-      // the moment we see one. Catches both the all-deleted and the
-      // some-accounts-emptied cases.
-      const hasInvestmentOrphans = snapshots.some(
-        (s) => !liveInvestmentByAccount.has(s.accountId),
+      // Orphaned investment snapshots: a stored per-account row the rebuild's
+      // reaper would delete (its account no longer has any holding). Such rows
+      // keep feeding the chart's historical line until a rebuild reaps them, so
+      // trigger the self-heal the moment we see one. Judged by the REAPER's
+      // rule (reapableInvestmentAccounts), not "no live holdings value": an
+      // emptied account has no live value but keeps a legitimate zero row every
+      // day, and treating it as an orphan rebuilt ALL history (investment +
+      // cash) on every chart load, since the rebuild never removes those rows.
+      // Accounts with a live value hold positions, so only the rest are probed.
+      const orphanCandidates = new Set(
+        snapshots
+          .map((s) => s.accountId)
+          .filter((id) => !liveInvestmentByAccount.has(id)),
       );
+      let hasInvestmentOrphans = false;
+      if (orphanCandidates.size > 0) {
+        try {
+          const keep = await getHoldingAccountIds(userId);
+          hasInvestmentOrphans =
+            reapableInvestmentAccounts(orphanCandidates, keep).length > 0;
+        } catch {
+          /* orphan probe is best-effort */
+        }
+      }
       let dirtyFrom: string | null = null;
       let dirtyMarkedAt: string | null = null;
       try {
