@@ -353,6 +353,25 @@ export function TransactionsWorkspace({
    * initialState seed in startEdit and refreshes the table via onSaved. */
 
 
+  /** Open a new transaction pre-filled from an existing ordinary transaction. */
+  function duplicateTransaction(t: Transaction) {
+    setDialogInitial({
+      kind: "transaction-prefill",
+      values: {
+        date: todayISO(),
+        accountId: String(t.accountId),
+        categoryId: String(t.categoryId),
+        currency: t.enteredCurrency ?? t.currency,
+        amount: String(t.enteredAmount ?? t.amount),
+        payee: t.payee || "",
+        note: t.note || "",
+        tags: t.tags || "",
+        isBusiness: t.isBusiness === 1,
+      },
+    });
+    setDialogOpen(true);
+  }
+
   /** Edit-row entry point. Runs the four-check transfer detection by
    *  fetching siblings off `linkId` and decides which TransactionDialog
    *  initialState shape to seed. Async to keep the dialog from flickering
@@ -1154,6 +1173,7 @@ export function TransactionsWorkspace({
             onColDragOver={onColDragOver}
             onColDragEnd={onColDragEnd}
             startEdit={startEdit}
+            duplicateTransaction={duplicateTransaction}
             openSplitDialog={openSplitDialog}
             confirmDelete={confirmDelete}
           />
