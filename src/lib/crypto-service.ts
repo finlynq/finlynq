@@ -45,17 +45,38 @@ export function isWithinCryptoHistoryWindow(
 // stock path uses, no API key. We use it as the >365-day history tier (beyond
 // CoinGecko's free window). Most coins map to "<SYM>-USD"; add an override only
 // where Yahoo's ticker differs from the holding's symbol.
-const YAHOO_CRYPTO_TICKER_OVERRIDES: Record<string, string> = {
-  // Polygon rename: a POL-symboled holding has no deep history under POL-USD —
-  // Yahoo keeps it under MATIC-USD (both map to CoinGecko's matic-network), so
-  // point POL at MATIC-USD. FTM-USD / S-USD resolve under their own symbols.
-  POL: "MATIC-USD",
+//
+// Yahoo gives a coin whose ticker clashes with another coin a numeric id
+// (Arbitrum is ARB11841-USD), and drops a renamed coin's old ticker outright.
+// A clash is the dangerous case: plain ARB-USD answers 200 for a DIFFERENT coin
+// ("ARbit", a fraction of a cent), so an Arbitrum holding was valued near zero
+// and no fallback ever ran. Every entry was checked live on 2026-11-14 against
+// /v8/finance/chart (name and price matching CoinGecko's coin). `null` = Yahoo
+// has no listing: skip Yahoo and price from CoinGecko only.
+const YAHOO_CRYPTO_TICKER_OVERRIDES: Record<string, string | null> = {
+  ARB: "ARB11841-USD", // ARB-USD is "ARbit", not Arbitrum
+  APT: "APT21794-USD", // APT-USD 404s
+  SUI: "SUI20947-USD", // SUI-USD 404s
+  UNI: "UNI7083-USD", // UNI-USD 404s
+  // Polygon migrated MATIC to POL 1:1 (Sept 2024). Yahoo no longer serves
+  // MATIC-USD or POL-USD; POL is POL28321-USD, with history from 2023-10-30.
+  // A MATIC holding is priced as the POL it converts to.
+  MATIC: "POL28321-USD",
+  POL: "POL28321-USD",
+  S: "S32684-USD", // Sonic; S-USD 404s
+  FTM: null, // Fantom: FTM-USD 404s and Yahoo has no replacement
 };
 
-/** Base crypto symbol → Yahoo crypto ticker (e.g. BTC → BTC-USD). Pure. */
-export function cryptoSymbolToYahooTicker(symbol: string): string {
+/**
+ * Base crypto symbol → Yahoo crypto ticker (e.g. BTC → BTC-USD), or null when
+ * Yahoo has no listing for the coin (price it from CoinGecko). Pure.
+ */
+export function cryptoSymbolToYahooTicker(symbol: string): string | null {
   const base = (symbol ?? "").toUpperCase().split("-")[0];
-  return YAHOO_CRYPTO_TICKER_OVERRIDES[base] ?? `${base}-USD`;
+  if (Object.prototype.hasOwnProperty.call(YAHOO_CRYPTO_TICKER_OVERRIDES, base)) {
+    return YAHOO_CRYPTO_TICKER_OVERRIDES[base];
+  }
+  return `${base}-USD`;
 }
 
 // Yahoo names crypto as "<Name> USD" (e.g. "Bitcoin USD"). Strip the trailing
@@ -73,6 +94,7 @@ export function stripYahooCryptoNameSuffix(name: string | null | undefined): str
 // fetchYahooDailyCloses, so a coin Yahoo lacks isn't re-hit per old date.
 async function fetchCryptoHistoryFromYahooToCache(symbol: string, fromDate: string): Promise<void> {
   const ticker = cryptoSymbolToYahooTicker(symbol);
+  if (!ticker) return; // no Yahoo listing (FTM): CoinGecko's window is all there is
   const bars = await fetchYahooDailyCloses(ticker, fromDate, todayISO());
   if (bars.length === 0) return;
   try {
@@ -143,8 +165,9 @@ async function coinGeckoFetch(endpoint: string): Promise<Response> {
 // name). CoinGecko is the fallback ONLY when Yahoo can't price the symbol.
 export async function getCryptoPrice(coinId: string): Promise<CryptoPrice | null> {
   const sym = coinGeckoIdToSymbol(coinId);
-  if (sym) {
-    const q = await fetchQuoteLive(cryptoSymbolToYahooTicker(sym));
+  const ticker = sym ? cryptoSymbolToYahooTicker(sym) : null;
+  if (sym && ticker) {
+    const q = await fetchQuoteLive(ticker);
     if (q && q.price > 0) {
       const currency = q.currency || "USD";
       await cacheCryptoPrice(sym, q.price, currency);
@@ -210,11 +233,12 @@ export async function getCryptoPrices(coinIds: string[]): Promise<CryptoPrice[]>
   const yahoo = await Promise.all(
     uniqIds.map(async (coinId) => {
       const sym = coinGeckoIdToSymbol(coinId);
-      if (!sym) return { coinId, cp: null as CryptoPrice | null };
-      // Backoff variant: a pair Yahoo refuses (FTM-USD, UNI-USD, MATIC-USD) is
-      // skipped until its back-off ends and goes straight to CoinGecko, instead
-      // of being re-asked on every portfolio load.
-      const q = await fetchQuoteLiveBackoff(cryptoSymbolToYahooTicker(sym));
+      const ticker = sym ? cryptoSymbolToYahooTicker(sym) : null;
+      if (!sym || !ticker) return { coinId, cp: null as CryptoPrice | null };
+      // Backoff variant: a pair Yahoo refuses is skipped until its back-off
+      // ends and goes straight to CoinGecko, instead of being re-asked on every
+      // portfolio load.
+      const q = await fetchQuoteLiveBackoff(ticker);
       if (!q || !(q.price > 0)) return { coinId, cp: null };
       const currency = q.currency || "USD";
       await cacheCryptoPrice(sym, q.price, currency);
@@ -350,7 +374,7 @@ export function splitCryptoCacheHits(
  *
  * Each entry passes BOTH the CoinGecko coin id and the holding's base symbol so
  * the returned `symbol` matches what symbol-keyed callers look up by, even when
- * CoinGecko's returned symbol differs (e.g. MATIC vs POL share matic-network).
+ * CoinGecko's returned symbol differs (e.g. MATIC and POL share one coin id).
  */
 export async function getCryptoSpotPrices(
   coins: Array<{ coinId: string; symbol: string }>,
@@ -618,8 +642,10 @@ const SYMBOL_TO_COINGECKO: Record<string, string> = {
   DOT: "polkadot",
   LINK: "chainlink",
   AVAX: "avalanche-2",
-  MATIC: "matic-network",
-  POL: "matic-network",
+  // Both price as POL (MATIC converts to it 1:1). CoinGecko still lists the
+  // old token as matic-network, but at a stale price well above POL's.
+  MATIC: "polygon-ecosystem-token",
+  POL: "polygon-ecosystem-token",
   ATOM: "cosmos",
   UNI: "uniswap",
   LTC: "litecoin",
@@ -660,8 +686,9 @@ export function symbolToCoinGeckoId(symbol: string): string | null {
 }
 
 // Reverse of SYMBOL_TO_COINGECKO: CoinGecko coin id → base symbol. First-wins on
-// collisions, so `matic-network` (MATIC + POL both map to it) resolves to MATIC —
-// Yahoo's deep history is under MATIC-USD. Used to recover a Yahoo ticker for the
+// collisions, so `polygon-ecosystem-token` (MATIC + POL both map to it) resolves
+// to MATIC, keeping the CRYPTO:MATIC cache key it always had (both symbols ask
+// Yahoo for the same POL28321-USD). Used to recover a Yahoo ticker for the
 // bare-coinId live paths (getCryptoPrices / getCryptoPrice); a coin id with no
 // entry has no Yahoo mapping and routes to the CoinGecko fallback.
 const COINGECKO_ID_TO_SYMBOL: Record<string, string> = (() => {

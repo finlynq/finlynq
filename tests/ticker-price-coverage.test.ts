@@ -128,13 +128,17 @@ describe("resolveTickerAdvisory", () => {
   });
 
   it("prefers the curated entry — it names a concrete replacement", () => {
-    const a = resolveTickerAdvisory("pol", { neverPriced: true });
+    const a = resolveTickerAdvisory("sq", { neverPriced: true });
     expect(a?.kind).toBe("curated");
-    expect(a?.suggestedSymbol).toBe("MATIC");
+    expect(a?.suggestedSymbol).toBe("XYZ");
   });
 
   it("still returns the curated entry when nothing was detected", () => {
-    expect(resolveTickerAdvisory("POL")?.suggestedSymbol).toBe("MATIC");
+    expect(resolveTickerAdvisory("SQ")?.suggestedSymbol).toBe("XYZ");
+  });
+
+  it("no longer tells POL holders to switch to MATIC (Yahoo dropped MATIC-USD)", () => {
+    expect(resolveTickerAdvisory("POL")).toBeNull();
   });
 
   it("ignores blank symbols", () => {
@@ -145,7 +149,7 @@ describe("resolveTickerAdvisory", () => {
 
 describe("curated registry", () => {
   it("tags curated hits and is case-insensitive", () => {
-    expect(getTickerAdvisory(" pol ")?.kind).toBe("curated");
+    expect(getTickerAdvisory(" sq ")?.kind).toBe("curated");
     expect(getTickerAdvisory("AMZN401K")).toBeNull();
   });
 
@@ -211,7 +215,8 @@ describe("curated registry — renamed and re-notated tickers", () => {
 
   it("every entry is keyed by its own uppercased symbol and never suggests itself", () => {
     const keys = curatedAdvisorySymbols();
-    expect(keys.length).toBeGreaterThanOrEqual(7);
+    // 6 since POL was removed (2026-11-14): SQ, VIAC, HCP, 03690, 9633, SWN.
+    expect(keys.length).toBeGreaterThanOrEqual(6);
     for (const key of keys) {
       const a = getTickerAdvisory(key)!;
       expect(key).toBe(key.toUpperCase());

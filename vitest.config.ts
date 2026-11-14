@@ -39,7 +39,6 @@ const QUARANTINE = [
   "tests/auth/wipe-clears-mfa.test.ts",
   // Pricing / rebuild unit suites (stale assertions, mock export drift)
   "tests/crypto-cache-ttl.test.ts",
-  "tests/crypto-yahoo-ticker.test.ts",
   "tests/rebuild-progress-registry.test.ts",
   "tests/upgrade-staging-encryption.test.ts",
   // Real-Postgres aggregator harness (needs a seeded *_test database)

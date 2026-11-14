@@ -31,9 +31,9 @@ describe("cryptoSymbolToYahooTicker", () => {
     expect(cryptoSymbolToYahooTicker("doge-usd")).toBe("DOGE-USD");
   });
 
-  it("handles the MATIC/POL rebrand pair (both resolve to their own -USD)", () => {
-    expect(cryptoSymbolToYahooTicker("MATIC")).toBe("MATIC-USD");
-    expect(cryptoSymbolToYahooTicker("POL")).toBe("POL-USD");
+  it("prices the MATIC/POL rebrand pair as POL (Yahoo dropped MATIC-USD and POL-USD)", () => {
+    expect(cryptoSymbolToYahooTicker("MATIC")).toBe("POL28321-USD");
+    expect(cryptoSymbolToYahooTicker("POL")).toBe("POL28321-USD");
   });
 
   it("is null-safe", () => {
