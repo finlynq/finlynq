@@ -17,6 +17,7 @@ import {
   attachmentLabel,
   countUnreadThreads,
   feedbackMeta,
+  feedbackStatusLabel,
   feedbackWebUrl,
   replyCountLabel,
   replyErrorText,
@@ -128,6 +129,13 @@ describe("feedback wording", () => {
     expect(replyCountLabel(0)).toBeNull();
     expect(replyCountLabel(1)).toBe("1 reply");
     expect(replyCountLabel(4)).toBe("4 replies");
+  });
+
+  it("names every status, including a ticket reopened by a reply", () => {
+    expect(feedbackStatusLabel("new")).toBe("New");
+    expect(feedbackStatusLabel("reopened")).toBe("Reopened");
+    expect(feedbackStatusLabel("triaged")).toBe("Triaged");
+    expect(feedbackStatusLabel("resolved")).toBe("Resolved");
   });
 
   it("counts the threads with an unread reply", () => {

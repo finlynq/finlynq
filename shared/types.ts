@@ -282,7 +282,8 @@ export interface Announcement {
 
 // --- Feedback ---
 export type FeedbackType = "bug" | "idea" | "question" | "other";
-export type FeedbackStatus = "new" | "triaged" | "resolved";
+/** "reopened" = was resolved, then the user wrote again (src/lib/feedback/status.ts). */
+export type FeedbackStatus = "new" | "reopened" | "triaged" | "resolved";
 /** POST /api/feedback body. */
 export interface FeedbackFormData {
   type: FeedbackType;

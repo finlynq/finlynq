@@ -34,6 +34,7 @@ const TYPE_LABELS: Record<FeedbackType, string> = {
 
 const STATUS_LABELS: Record<FeedbackStatus, string> = {
   new: "New",
+  reopened: "Reopened",
   triaged: "Triaged",
   resolved: "Resolved",
 };
