@@ -50,10 +50,11 @@ interface FeedbackRow {
 const FILTERS = ["all", ...FEEDBACK_STATUSES] as const;
 type Filter = (typeof FILTERS)[number];
 
-// Tickets that need the maintainer's attention stand out in the list.
+// Tickets that need the maintainer's attention stand out in the list. Reopened
+// gets its own hue: amber reads as the same orange as the primary New badge.
 const statusColor: Record<string, string> = {
   new: "border-primary/40 text-primary",
-  reopened: "border-amber-500/50 bg-amber-500/10 text-amber-600 dark:text-amber-400",
+  reopened: "border-violet-500/50 bg-violet-500/10 text-violet-600 dark:text-violet-400",
 };
 
 const typeColor: Record<string, string> = {
