@@ -3,8 +3,9 @@
  *
  * Gated by requireAdmin + managed-mode guard. Inserts a feedback_messages row
  * (author_role='admin'), bumps feedback.updated_at + admin_last_read_at, and
- * soft-promotes status 'new' → 'triaged' (an admin reply implies triage; never
- * auto-resolve/demote). Audit-logged as `feedback_replied`. In-app only — the
+ * soft-promotes status 'new' / 'reopened' → 'triaged' (an admin reply implies
+ * triage; never auto-resolve/demote — statusAfterAdminReply in
+ * src/lib/feedback/status.ts). Audit-logged as `feedback_replied`. In-app only — the
  * user sees it via the "Your feedback" nav badge; no email is sent.
  *
  * FINLYNQ-228 — accepts multipart/form-data with one optional attachment (same
@@ -18,6 +19,7 @@ import fs from "fs/promises";
 import { z } from "zod";
 import { db, schema, getDialect } from "@/db";
 import { eq } from "drizzle-orm";
+import { statusAfterAdminReply } from "@/lib/feedback/status";
 import { requireAdmin } from "@/lib/auth/require-admin";
 import { validateBody, safeErrorMessage } from "@/lib/validate";
 import { logAdminAction, clientIp } from "@/lib/admin-audit";
@@ -107,7 +109,7 @@ export async function POST(
     }
 
     // Replying implies triage — but never demote or auto-resolve.
-    const newStatus = existing.status === "new" ? "triaged" : existing.status;
+    const newStatus = statusAfterAdminReply(existing.status);
     await db
       .update(schema.feedback)
       .set({ updatedAt: now, adminLastReadAt: now, status: newStatus })

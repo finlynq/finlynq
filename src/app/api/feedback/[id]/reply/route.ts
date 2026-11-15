@@ -5,7 +5,11 @@
  * Ownership-checked (404 on a non-owned id). Rate-limited on a DISTINCT bucket
  * (`feedback-reply:`) so replies don't starve the submit bucket (`feedback:`).
  * Inserts a feedback_messages row (author_role='user'), bumps feedback.updated_at
- * and the author's own user_last_read_at. Fires a best-effort admin email
+ * and the author's own user_last_read_at, and REOPENS a resolved ticket
+ * (status 'resolved' → 'reopened', src/lib/feedback/status.ts) so the follow-up
+ * doesn't sit unseen in the Resolved bucket. The reopen is a CASE in the same
+ * UPDATE, so an admin resolving the ticket at the same moment is never
+ * overwritten with a stale status. Fires a best-effort admin email
  * notification (fire-and-forget) so the maintainer sees thread replies too.
  *
  * FINLYNQ-228 — accepts multipart/form-data with one optional attachment (same
@@ -18,13 +22,14 @@ import { NextRequest, NextResponse } from "next/server";
 import fs from "fs/promises";
 import { z } from "zod";
 import { db, schema } from "@/db";
-import { and, eq } from "drizzle-orm";
+import { and, eq, sql } from "drizzle-orm";
 import { requireAuth } from "@/lib/auth/require-auth";
 import { validateBody, safeErrorMessage } from "@/lib/validate";
 import { checkRateLimit } from "@/lib/rate-limit";
 import { toFeedbackMessage } from "@/lib/feedback/thread";
 import { saveFeedbackAttachment } from "@/lib/feedback/attachment-io";
 import { notifyAdminsFeedbackReply } from "@/lib/feedback/notify";
+import { REOPENED_STATUS, REOPENS_ON_USER_REPLY } from "@/lib/feedback/status";
 
 export const dynamic = "force-dynamic";
 
@@ -78,7 +83,11 @@ export async function POST(
 
     // Ownership — 404 (not 403) on a stranger's id.
     const [fb] = await db
-      .select({ id: schema.feedback.id, type: schema.feedback.type })
+      .select({
+        id: schema.feedback.id,
+        type: schema.feedback.type,
+        status: schema.feedback.status,
+      })
       .from(schema.feedback)
       .where(
         and(eq(schema.feedback.id, feedbackId), eq(schema.feedback.userId, userId)),
@@ -111,10 +120,19 @@ export async function POST(
       if (attachment) await fs.unlink(attachment.attachmentPath).catch(() => {});
       throw e;
     }
-    await db
+    // A reply on a resolved ticket reopens it (statusAfterUserReply's rule,
+    // written as SQL so it reads the status at write time, not our earlier read).
+    const [after] = await db
       .update(schema.feedback)
-      .set({ updatedAt: now, userLastReadAt: now })
-      .where(eq(schema.feedback.id, feedbackId));
+      .set({
+        updatedAt: now,
+        userLastReadAt: now,
+        status: sql`CASE WHEN ${schema.feedback.status} = ${REOPENS_ON_USER_REPLY} THEN ${REOPENED_STATUS} ELSE ${schema.feedback.status} END`,
+      })
+      .where(eq(schema.feedback.id, feedbackId))
+      .returning({ status: schema.feedback.status });
+    const reopened =
+      fb.status === REOPENS_ON_USER_REPLY && after?.status === REOPENED_STATUS;
 
     // Fire-and-forget: notify admins of the new reply. Never block/500 the
     // user's reply on email failure.
@@ -123,6 +141,7 @@ export async function POST(
       feedbackId,
       feedbackType: fb.type,
       body,
+      reopened,
     }).catch((err) => {
       console.error("[feedback-email] reply notify failed", err);
     });

@@ -2,7 +2,7 @@
  * GET /api/admin/feedback — list user feedback for review (paginated).
  *
  * Joins `users` for the submitter's username/email (plaintext identity fields).
- * Optional ?status=new|triaged|resolved filter. Gated by requireAdmin +
+ * Optional ?status=new|reopened|triaged|resolved filter. Gated by requireAdmin +
  * managed-mode guard.
  */
 
@@ -10,6 +10,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { db, schema, getDialect } from "@/db";
 import { desc, eq, inArray } from "drizzle-orm";
 import { requireAdmin } from "@/lib/auth/require-admin";
+import { isFeedbackStatus } from "@/lib/feedback/status";
 
 export const dynamic = "force-dynamic";
 
@@ -25,10 +26,7 @@ export async function GET(request: NextRequest) {
 
   const url = new URL(request.url);
   const statusParam = url.searchParams.get("status");
-  const status =
-    statusParam === "new" || statusParam === "triaged" || statusParam === "resolved"
-      ? statusParam
-      : null;
+  const status = isFeedbackStatus(statusParam) ? statusParam : null;
   const limit = Math.min(Number(url.searchParams.get("limit")) || 50, 100);
   const offset = Math.max(Number(url.searchParams.get("offset")) || 0, 0);
 

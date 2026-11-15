@@ -936,7 +936,7 @@ export const feedback = pgTable(
     message: text("message").notNull(),
     pageUrl: text("page_url"), // route the user was on when submitting
     appVersion: text("app_version"), // 'web' | mobile version string
-    status: text("status").notNull().default("new"), // 'new' | 'triaged' | 'resolved'
+    status: text("status").notNull().default("new"), // 'new' | 'reopened' | 'triaged' | 'resolved' (src/lib/feedback/status.ts)
     adminNote: text("admin_note"),
     // FINLYNQ-226/228 — optional single attachment on the INITIAL submission
     // (the immutable thread seed). Stored ON DISK under the DURABLE uploads root

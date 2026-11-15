@@ -401,14 +401,17 @@ export function feedbackReplyNotificationEmail(opts: {
   body: string;
   userId: string;
   userLabel?: string | null;
+  /** The reply reopened a resolved ticket. */
+  reopened?: boolean;
 }): EmailMessage {
   const to = opts.to;
   const safeType = escapeHtml(opts.feedbackType || "feedback");
   const safeBody = escapeHtml(opts.body).replace(/\n/g, "<br>");
   const safeUser = escapeHtml(opts.userLabel || opts.userId);
   const reviewUrl = `${APP_URL()}/admin/feedback`;
+  const reopenedNote = opts.reopened ? " (reopened)" : "";
   const html = baseLayout(
-    `New reply on ${safeType} feedback`,
+    `New reply on ${safeType} feedback${reopenedNote}`,
     `<table style="width:100%;border-collapse:collapse;color:#3f3f46;font-size:14px;margin-bottom:16px">
        <tr><td style="padding:4px 0;color:#71717a;width:90px">Thread</td><td style="padding:4px 0"><strong>#${opts.feedbackId}</strong> (${safeType})</td></tr>
        <tr><td style="padding:4px 0;color:#71717a">From</td><td style="padding:4px 0">${safeUser}</td></tr>
@@ -418,9 +421,9 @@ export function feedbackReplyNotificationEmail(opts: {
   );
   return {
     to,
-    subject: `[Finlynq feedback] reply on #${opts.feedbackId}`,
+    subject: `[Finlynq feedback] reply on #${opts.feedbackId}${reopenedNote}`,
     html,
-    text: `New reply on feedback #${opts.feedbackId} (${opts.feedbackType || "feedback"}) from ${opts.userLabel || opts.userId}:\n\n${opts.body}`,
+    text: `New reply on feedback #${opts.feedbackId} (${opts.feedbackType || "feedback"})${reopenedNote} from ${opts.userLabel || opts.userId}:\n\n${opts.body}`,
   };
 }
 
