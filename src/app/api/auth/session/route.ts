@@ -12,6 +12,7 @@ import { db, getDialect, schema } from "@/db";
 import { getUserById } from "@/lib/auth/queries";
 import { and, eq } from "drizzle-orm";
 import { getFxRatesInverted } from "@/lib/settings/fx-rate-view";
+import { enqueueAutoSyncOnAppOpen } from "@/lib/external-import/simplefin-orchestrator";
 
 export async function GET(request: NextRequest) {
   const auth = await requireAuth(request);
@@ -33,6 +34,12 @@ export async function GET(request: NextRequest) {
   let displayCurrency = "USD";
   let fxRatesInverted = false;
   if (getDialect() === "postgres" && auth.context.userId) {
+    // Opening the app (web page load, phone resume) offers the 12h SimpleFIN
+    // auto-sync, not only signing in. Signed-in sessions only, never API keys;
+    // fire-and-forget, throttled per user (in-app feedback #29).
+    if (auth.context.method === "account") {
+      enqueueAutoSyncOnAppOpen(auth.context.userId, auth.context.dek);
+    }
     const user = await getUserById(auth.context.userId).catch(() => null);
     onboardingComplete = Boolean(user?.onboardingComplete);
     isAdmin = user?.role === "admin";
