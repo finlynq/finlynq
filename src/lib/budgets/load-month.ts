@@ -204,7 +204,7 @@ export async function loadActualsByMonth(
     await db.execute(sql`
       SELECT t.category_id, SUBSTRING(t.date, 1, 7) AS month, c.type, t.currency, t.reporting_currency,
              SUM(t.amount) AS total_amount, SUM(t.reporting_amount) AS total_reporting
-        FROM transactions t
+        FROM transaction_category_flows t
         JOIN categories c ON c.id = t.category_id AND c.user_id = ${ctx.userId}
        WHERE t.user_id = ${ctx.userId}
          AND t.date >= ${monthStartDate(fromMonth)} AND t.date <= ${monthEndDate(toMonth)}
@@ -425,7 +425,7 @@ export async function loadDebtLines(ctx: BudgetContext, month: string): Promise<
     const rows = normalizeDbRows<{ currency: string | null; reporting_currency: string | null; total_amount: number | null; total_reporting: number | null }>(
       await db.execute(sql`
         SELECT currency, reporting_currency, SUM(amount) AS total_amount, SUM(reporting_amount) AS total_reporting
-          FROM transactions
+          FROM transaction_category_flows
          WHERE user_id = ${ctx.userId} AND account_id = ${accountId}
            AND category_id IN (${sql.join(catIds.map((id) => sql`${id}`), sql`, `)})
            AND link_id IS NULL AND date >= ${start} AND date <= ${end}

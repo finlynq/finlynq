@@ -47,25 +47,25 @@ export const GET = apiHandler({ auth: "auth" }, async ({ request, userId, dek })
     .where(and(eq(schema.categories.userId, userId), eq(schema.categories.type, type)))
     .all();
 
-  const monthExpr = sql<string>`SUBSTR(${schema.transactions.date}, 1, 7)`;
+  const monthExpr = sql<string>`SUBSTR(${schema.transactionCategoryFlows.date}, 1, 7)`;
   const rows = await db
     .select({
-      categoryId: schema.transactions.categoryId,
+      categoryId: schema.transactionCategoryFlows.categoryId,
       month: monthExpr,
-      currency: schema.transactions.currency,
-      reportingCurrency: schema.transactions.reportingCurrency,
-      totalAmount: sql<number>`SUM(${schema.transactions.amount})`,
-      totalReporting: sql<number | null>`SUM(${schema.transactions.reportingAmount})`,
+      currency: schema.transactionCategoryFlows.currency,
+      reportingCurrency: schema.transactionCategoryFlows.reportingCurrency,
+      totalAmount: sql<number>`SUM(${schema.transactionCategoryFlows.amount})`,
+      totalReporting: sql<number | null>`SUM(${schema.transactionCategoryFlows.reportingAmount})`,
     })
-    .from(schema.transactions)
-    .innerJoin(schema.categories, eq(schema.transactions.categoryId, schema.categories.id))
+    .from(schema.transactionCategoryFlows)
+    .innerJoin(schema.categories, eq(schema.transactionCategoryFlows.categoryId, schema.categories.id))
     .where(and(
-      eq(schema.transactions.userId, userId),
+      eq(schema.transactionCategoryFlows.userId, userId),
       eq(schema.categories.type, type),
-      gte(schema.transactions.date, windowStart),
-      lte(schema.transactions.date, windowEnd),
+      gte(schema.transactionCategoryFlows.date, windowStart),
+      lte(schema.transactionCategoryFlows.date, windowEnd),
     ))
-    .groupBy(schema.transactions.categoryId, monthExpr, schema.transactions.currency, schema.transactions.reportingCurrency)
+    .groupBy(schema.transactionCategoryFlows.categoryId, monthExpr, schema.transactionCategoryFlows.currency, schema.transactionCategoryFlows.reportingCurrency)
     .all();
 
   const slices: OverviewSlice[] = rows

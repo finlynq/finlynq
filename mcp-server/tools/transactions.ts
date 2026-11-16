@@ -28,6 +28,7 @@ import {
 import type { BudgetRuleView, RuleIncrease } from "../../src/lib/budgets/rules";
 import type { BudgetRole } from "../../src/lib/budgets/lines";
 import { getDisplayCurrency } from "../../src/lib/fx-service";
+import { splitMismatch, splitMismatchMessage } from "../../src/lib/transactions/split-balance";
 import {
   q,
   text,
@@ -2483,6 +2484,20 @@ export function registerTransactionsTools(server: McpServer, ctx: PgToolContext)
       return text({ success: true, data: decrypted });
   }
 
+  // Split rows must add up to their transaction (2026-11-16): reports count a
+  // split transaction through its rows. `amounts` is the set as it would be
+  // after this write; an empty set (no splits) is always fine.
+  async function splitSetRefusal(transactionId: number, amounts: number[]): Promise<string | null> {
+    const parent = await q(db, sql`SELECT amount FROM transactions WHERE id = ${transactionId} AND user_id = ${userId}`);
+    const m = splitMismatch(Number(parent[0]?.amount ?? 0), amounts);
+    return m ? `${splitMismatchMessage(m)} Use op:"replace" to set every split row at once.` : null;
+  }
+
+  async function currentSplitAmounts(transactionId: number): Promise<Array<{ id: number; amount: number }>> {
+    const rows = await q(db, sql`SELECT id, amount FROM transaction_splits WHERE transaction_id = ${transactionId}`);
+    return rows.map((r) => ({ id: Number(r.id), amount: Number(r.amount) }));
+  }
+
   async function opSplitAdd(args: {
     transaction_id: number;
     category_id?: number;
@@ -2495,6 +2510,9 @@ export function registerTransactionsTools(server: McpServer, ctx: PgToolContext)
       const { transaction_id, category_id, account_id, amount, note, description, tags } = args;
       const owner = await q(db, sql`SELECT id FROM transactions WHERE id = ${transaction_id} AND user_id = ${userId}`);
       if (!owner.length) return err(`Transaction #${transaction_id} not found`);
+      const existing = await currentSplitAmounts(transaction_id);
+      const refusal = await splitSetRefusal(transaction_id, [...existing.map((r) => r.amount), amount]);
+      if (refusal) return err(refusal);
 
       const encNote = dek ? encryptField(dek, note ?? "") : (note ?? "");
       const encDesc = dek ? encryptField(dek, description ?? "") : (description ?? "");
@@ -2521,11 +2539,17 @@ export function registerTransactionsTools(server: McpServer, ctx: PgToolContext)
       const { split_id, category_id, account_id, amount, note, description, tags } = args;
       // Ownership: split → txn → user
       const owner = await q(db, sql`
-        SELECT s.id FROM transaction_splits s
+        SELECT s.id, s.transaction_id FROM transaction_splits s
         JOIN transactions t ON t.id = s.transaction_id
         WHERE s.id = ${split_id} AND t.user_id = ${userId}
       `);
       if (!owner.length) return err(`Split #${split_id} not found`);
+      if (amount !== undefined) {
+        const txId = Number(owner[0].transaction_id);
+        const next = (await currentSplitAmounts(txId)).map((r) => (r.id === split_id ? amount : r.amount));
+        const refusal = await splitSetRefusal(txId, next);
+        if (refusal) return err(refusal);
+      }
 
       const updates: ReturnType<typeof sql>[] = [];
       if (category_id !== undefined) updates.push(sql`category_id = ${category_id}`);
@@ -2559,13 +2583,19 @@ export function registerTransactionsTools(server: McpServer, ctx: PgToolContext)
   }): Promise<ToolResult> {
       const { split_id, expected } = args;
       const owner = await q(db, sql`
-        SELECT s.id, s.amount FROM transaction_splits s
+        SELECT s.id, s.amount, s.transaction_id FROM transaction_splits s
         JOIN transactions t ON t.id = s.transaction_id
         WHERE s.id = ${split_id} AND t.user_id = ${userId}
       `);
       if (!owner.length) return err(`Split #${split_id} not found`);
       const mismatch = checkExpectedEcho(expected, { amount: Number(owner[0].amount) }, `split #${split_id}`);
       if (mismatch) return err(mismatch);
+      {
+        const txId = Number(owner[0].transaction_id);
+        const remaining = (await currentSplitAmounts(txId)).filter((r) => r.id !== split_id).map((r) => r.amount);
+        const refusal = await splitSetRefusal(txId, remaining);
+        if (refusal) return err(refusal);
+      }
       await db.execute(sql`DELETE FROM transaction_splits WHERE id = ${split_id}`);
       invalidateUserTxCache(userId);
       return text({ success: true, data: { id: split_id, message: `Split #${split_id} deleted` } });
@@ -2585,11 +2615,8 @@ export function registerTransactionsTools(server: McpServer, ctx: PgToolContext)
       const { transaction_id, splits } = args;
       const owner = await q(db, sql`SELECT id, amount FROM transactions WHERE id = ${transaction_id} AND user_id = ${userId}`);
       if (!owner.length) return err(`Transaction #${transaction_id} not found`);
-      const parentAmount = Number(owner[0].amount);
-      const sum = splits.reduce((s, x) => s + Number(x.amount), 0);
-      if (Math.abs(sum - parentAmount) > 0.01) {
-        return err(`Splits sum (${sum.toFixed(2)}) must equal parent transaction amount (${parentAmount.toFixed(2)})`);
-      }
+      const sumMismatch = splitMismatch(Number(owner[0].amount), splits.map((x) => Number(x.amount)));
+      if (sumMismatch) return err(splitMismatchMessage(sumMismatch));
 
       // Delete + bulk insert. Not wrapped in a transaction — Drizzle's execute
       // is per-statement here. Risk window is small; if the insert fails the
@@ -2615,7 +2642,7 @@ export function registerTransactionsTools(server: McpServer, ctx: PgToolContext)
   registerManageTool(
     server,
     "manage_splits",
-    "Manage transaction splits: `op` selects list / add / update / delete / replace. list: all splits for a transaction. add: one split. update: change a split's fields by id. delete: remove a split by id (optional `expected.amount` echo guards a mis-copied id). replace: atomically replace ALL splits on a transaction (must sum to the parent amount ±$0.01).",
+    "Manage transaction splits: `op` selects list / add / update / delete / replace. list: all splits for a transaction. add: one split. update: change a split's fields by id. delete: remove a split by id (optional `expected.amount` echo guards a mis-copied id). replace: atomically replace ALL splits on a transaction. Split rows carry the transaction's sign and must add up to it (±$0.01) after every write, so add/update/delete are refused when they would leave them unbalanced; use replace to set several rows at once. Reports count a split transaction by its split rows' categories.",
     z.discriminatedUnion("op", [
       z.object({
         op: z.literal("list"),

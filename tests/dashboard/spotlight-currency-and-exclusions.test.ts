@@ -108,11 +108,12 @@ describe("spotlight — currency", () => {
 
   it("converts mixed-currency spend per slice instead of summing natively", () => {
     // FINLYNQ-123: SUM(amount) across currencies under one label is meaningless.
-    // Budgets and anomalies must group by transactions.currency and convert.
+    // Budgets and anomalies must group by the flow row's currency and convert
+    // (they read transaction_category_flows so split rows count).
     for (const name of ["getOverspentBudgets", "getSpendingAnomalies"]) {
       const start = SPOTLIGHT.indexOf(`async function ${name}(`);
       const body = SPOTLIGHT.slice(start, SPOTLIGHT.indexOf("\n}\n", start));
-      expect(body, `${name} must group by currency`).toContain("transactions.currency");
+      expect(body, `${name} must group by currency`).toContain("flows.currency");
       expect(body, `${name} must convert each slice`).toContain("convertWithRateMap(");
     }
   });

@@ -70,12 +70,12 @@ export const GET = apiHandler({ auth: "auth" }, async ({ request, userId, dek })
   let count: number;
   if (rangeParam === "all") {
     const first = await db
-      .select({ minDate: sql<string | null>`MIN(${schema.transactions.date})` })
-      .from(schema.transactions)
+      .select({ minDate: sql<string | null>`MIN(${schema.transactionCategoryFlows.date})` })
+      .from(schema.transactionCategoryFlows)
       .where(and(
-        eq(schema.transactions.userId, userId),
-        eq(schema.transactions.categoryId, categoryId),
-        lte(schema.transactions.date, today),
+        eq(schema.transactionCategoryFlows.userId, userId),
+        eq(schema.transactionCategoryFlows.categoryId, categoryId),
+        lte(schema.transactionCategoryFlows.date, today),
       ))
       .get();
     const firstDate = first?.minDate ?? null;
@@ -92,22 +92,22 @@ export const GET = apiHandler({ auth: "auth" }, async ({ request, userId, dek })
 
   const rawRows = await db
     .select({
-      id: schema.transactions.id,
-      date: schema.transactions.date,
-      payee: schema.transactions.payee,
-      amount: schema.transactions.amount,
-      currency: schema.transactions.currency,
-      reportingAmount: schema.transactions.reportingAmount,
-      reportingCurrency: schema.transactions.reportingCurrency,
+      id: schema.transactionCategoryFlows.id,
+      date: schema.transactionCategoryFlows.date,
+      payee: schema.transactionCategoryFlows.payee,
+      amount: schema.transactionCategoryFlows.amount,
+      currency: schema.transactionCategoryFlows.currency,
+      reportingAmount: schema.transactionCategoryFlows.reportingAmount,
+      reportingCurrency: schema.transactionCategoryFlows.reportingCurrency,
       accountNameCt: schema.accounts.nameCt,
     })
-    .from(schema.transactions)
-    .leftJoin(schema.accounts, eq(schema.transactions.accountId, schema.accounts.id))
+    .from(schema.transactionCategoryFlows)
+    .leftJoin(schema.accounts, eq(schema.transactionCategoryFlows.accountId, schema.accounts.id))
     .where(and(
-      eq(schema.transactions.userId, userId),
-      eq(schema.transactions.categoryId, categoryId),
-      gte(schema.transactions.date, queryStart),
-      lte(schema.transactions.date, today),
+      eq(schema.transactionCategoryFlows.userId, userId),
+      eq(schema.transactionCategoryFlows.categoryId, categoryId),
+      gte(schema.transactionCategoryFlows.date, queryStart),
+      lte(schema.transactionCategoryFlows.date, today),
     ))
     .all();
 
@@ -149,20 +149,20 @@ export const GET = apiHandler({ auth: "auth" }, async ({ request, userId, dek })
   // type over the window, sliced by currency so each slice converts correctly.
   const typeSlices = await db
     .select({
-      currency: schema.transactions.currency,
-      reportingCurrency: schema.transactions.reportingCurrency,
-      totalAmount: sql<number>`SUM(${schema.transactions.amount})`,
-      totalReporting: sql<number | null>`SUM(${schema.transactions.reportingAmount})`,
+      currency: schema.transactionCategoryFlows.currency,
+      reportingCurrency: schema.transactionCategoryFlows.reportingCurrency,
+      totalAmount: sql<number>`SUM(${schema.transactionCategoryFlows.amount})`,
+      totalReporting: sql<number | null>`SUM(${schema.transactionCategoryFlows.reportingAmount})`,
     })
-    .from(schema.transactions)
-    .innerJoin(schema.categories, eq(schema.transactions.categoryId, schema.categories.id))
+    .from(schema.transactionCategoryFlows)
+    .innerJoin(schema.categories, eq(schema.transactionCategoryFlows.categoryId, schema.categories.id))
     .where(and(
-      eq(schema.transactions.userId, userId),
+      eq(schema.transactionCategoryFlows.userId, userId),
       eq(schema.categories.type, cat.type),
-      gte(schema.transactions.date, windowStart),
-      lte(schema.transactions.date, today),
+      gte(schema.transactionCategoryFlows.date, windowStart),
+      lte(schema.transactionCategoryFlows.date, today),
     ))
-    .groupBy(schema.transactions.currency, schema.transactions.reportingCurrency)
+    .groupBy(schema.transactionCategoryFlows.currency, schema.transactionCategoryFlows.reportingCurrency)
     .all();
   const sign = type === "I" ? 1 : -1;
   const typeTotal = sign * typeSlices.reduce((s, row) => s + convertReportingSlice(row, displayCurrency, rateMap), 0);

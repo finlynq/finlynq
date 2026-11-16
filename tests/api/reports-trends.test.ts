@@ -18,6 +18,7 @@ vi.mock("@/db", () => ({
   }),
   schema: {
     transactions: { id: "id", date: "date", amount: "amount", categoryId: "categoryId", currency: "currency", reportingCurrency: "reportingCurrency", reportingAmount: "reportingAmount", userId: "userId" },
+    transactionCategoryFlows: { id: "id", date: "date", amount: "amount", categoryId: "categoryId", currency: "currency", reportingCurrency: "reportingCurrency", reportingAmount: "reportingAmount", userId: "userId", isBusiness: "isBusiness", accountId: "accountId" },
     categories: { id: "id", type: "type", group: "group", name: "name" },
   },
 }));

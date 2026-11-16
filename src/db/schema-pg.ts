@@ -26,6 +26,7 @@ import {
   bigint,
   real,
   smallint,
+  pgView,
 } from "drizzle-orm/pg-core";
 import { sql } from "drizzle-orm";
 
@@ -1233,7 +1234,78 @@ export const transactionSplits = pgTable("transaction_splits", {
   note: text("note").default(""),
   description: text("description").default(""),
   tags: text("tags").default(""),
-});
+}, (t) => [
+  index("transaction_splits_transaction_idx").on(t.transactionId),
+]);
+
+/**
+ * The SELECT behind the `transaction_category_flows` view (2026-11-16). The
+ * ONE place a transaction's split rows turn into report rows: an unsplit
+ * transaction is one row exactly as stored; a split transaction is one row
+ * per non-zero split (its own category, the parent's account/date/currency/
+ * link ids) plus a remainder row under the parent's category when the splits
+ * don't add up to the transaction. reporting_amount is shared out in
+ * proportion to amount. Every report that totals money BY CATEGORY reads the
+ * view instead of `transactions`.
+ *
+ * KEEP IN LOCKSTEP with scripts/migrations/20261116_transaction_category_flows_view.sql
+ * (tests/transaction-category-flows-view.test.ts compares the two).
+ */
+export const TRANSACTION_CATEGORY_FLOWS_SELECT = `SELECT t.id, NULL::integer AS split_id, t.user_id, t.date, t.account_id, t.category_id, t.currency,
+  CASE WHEN s.split_total IS NULL THEN t.amount ELSE t.amount - s.split_total END AS amount,
+  t.reporting_currency,
+  CASE
+    WHEN s.split_total IS NULL OR t.reporting_amount IS NULL THEN t.reporting_amount
+    WHEN t.amount <> 0 THEN t.reporting_amount * (t.amount - s.split_total) / t.amount
+    WHEN t.reporting_rate IS NOT NULL THEN t.reporting_amount - s.split_total * t.reporting_rate
+    ELSE NULL
+  END AS reporting_amount,
+  t.is_business, t.kind, t.link_id, t.trade_link_id, t.swap_link_id, t.portfolio_holding_id,
+  t.payee, t.note, t.tags, t.source, t.quantity
+FROM transactions t
+LEFT JOIN (
+  SELECT transaction_id, SUM(amount) AS split_total FROM transaction_splits GROUP BY transaction_id
+) s ON s.transaction_id = t.id
+WHERE s.split_total IS NULL OR abs(t.amount - s.split_total) >= 0.005
+UNION ALL
+SELECT t.id, sp.id AS split_id, t.user_id, t.date, t.account_id, sp.category_id, t.currency,
+  sp.amount,
+  t.reporting_currency,
+  CASE
+    WHEN t.reporting_amount IS NULL THEN NULL
+    WHEN t.amount <> 0 THEN t.reporting_amount * sp.amount / t.amount
+    WHEN t.reporting_rate IS NOT NULL THEN sp.amount * t.reporting_rate
+    ELSE NULL
+  END AS reporting_amount,
+  t.is_business, t.kind, t.link_id, t.trade_link_id, t.swap_link_id, t.portfolio_holding_id,
+  t.payee, t.note, t.tags, t.source, t.quantity
+FROM transaction_splits sp
+JOIN transactions t ON t.id = sp.transaction_id
+WHERE sp.amount <> 0`;
+
+export const transactionCategoryFlows = pgView("transaction_category_flows", {
+  id: integer("id").notNull(),
+  splitId: integer("split_id"),
+  userId: text("user_id").notNull(),
+  date: text("date").notNull(),
+  accountId: integer("account_id"),
+  categoryId: integer("category_id"),
+  currency: text("currency").notNull(),
+  amount: doublePrecision("amount").notNull(),
+  reportingCurrency: text("reporting_currency"),
+  reportingAmount: doublePrecision("reporting_amount"),
+  isBusiness: integer("is_business"),
+  kind: text("kind"),
+  linkId: text("link_id"),
+  tradeLinkId: text("trade_link_id"),
+  swapLinkId: text("swap_link_id"),
+  portfolioHoldingId: integer("portfolio_holding_id"),
+  payee: text("payee"),
+  note: text("note"),
+  tags: text("tags"),
+  source: text("source"),
+  quantity: doublePrecision("quantity"),
+}).as(sql.raw(TRANSACTION_CATEGORY_FLOWS_SELECT));
 
 // ─── OAuth 2.1 Tables ──────────────────────────────────────────────────────
 

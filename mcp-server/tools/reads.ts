@@ -421,7 +421,7 @@ export function registerReadsTools(server: McpServer, ctx: PgToolContext) {
         SELECT ${truncExpr} AS period, c.id AS category_id,
                c.name_ct AS category_ct,
                c."group" AS category_group, SUM(t.amount) AS total
-        FROM transactions t
+        FROM transaction_category_flows t
         LEFT JOIN categories c ON t.category_id = c.id
         WHERE t.user_id = ${userId} AND t.date >= ${startDate} AND c.type = 'E'
         GROUP BY ${truncExpr}, c.id, c.name_ct, c."group"
@@ -506,7 +506,7 @@ export function registerReadsTools(server: McpServer, ctx: PgToolContext) {
         SELECT c.id AS category_id, c.type AS category_type, c."group" AS category_group,
                c.name_ct AS category_ct,
                SUM(t.amount) AS total, COUNT(*) AS count
-        FROM transactions t
+        FROM transaction_category_flows t
         LEFT JOIN categories c ON t.category_id = c.id
         WHERE t.user_id = ${userId}
           AND t.date >= ${start_date}
@@ -976,7 +976,7 @@ export function registerReadsTools(server: McpServer, ctx: PgToolContext) {
                c.name_ct AS category_ct,
                COALESCE(t.currency, a.currency) AS currency,
                SUM(t.amount) AS total
-        FROM transactions t
+        FROM transaction_category_flows t
         LEFT JOIN categories c ON t.category_id = c.id
         LEFT JOIN accounts a ON a.id = t.account_id
         WHERE t.user_id = ${userId} AND t.date >= ${startDate} AND c.type = 'E'
@@ -1151,7 +1151,7 @@ export function registerReadsTools(server: McpServer, ctx: PgToolContext) {
         SELECT c.id AS cat_id, c.name_ct,
                COALESCE(t.currency, a.currency) AS currency,
                ABS(SUM(t.amount)) AS total
-        FROM transactions t
+        FROM transaction_category_flows t
         LEFT JOIN categories c ON t.category_id = c.id
         LEFT JOIN accounts a ON a.id = t.account_id
         WHERE t.user_id = ${userId} AND c.type = 'E' AND t.date >= ${ws} AND t.date <= ${we}
@@ -1175,7 +1175,7 @@ export function registerReadsTools(server: McpServer, ctx: PgToolContext) {
 
       const prevRow = await q(db, sql`
         SELECT COALESCE(t.currency, a.currency) AS currency, ABS(SUM(t.amount)) AS total
-        FROM transactions t
+        FROM transaction_category_flows t
         LEFT JOIN categories c ON t.category_id = c.id
         LEFT JOIN accounts a ON a.id = t.account_id
         WHERE t.user_id = ${userId} AND c.type = 'E' AND t.date >= ${ps} AND t.date <= ${pe}
@@ -1190,7 +1190,7 @@ export function registerReadsTools(server: McpServer, ctx: PgToolContext) {
 
       const incRow = await q(db, sql`
         SELECT COALESCE(t.currency, a.currency) AS currency, COALESCE(SUM(t.amount), 0) AS total
-        FROM transactions t
+        FROM transaction_category_flows t
         LEFT JOIN categories c ON t.category_id = c.id
         LEFT JOIN accounts a ON a.id = t.account_id
         WHERE t.user_id = ${userId} AND c.type = 'I' AND t.date >= ${ws} AND t.date <= ${we}
@@ -1206,7 +1206,7 @@ export function registerReadsTools(server: McpServer, ctx: PgToolContext) {
       const notableRaw = await q(db, sql`
         SELECT t.date, t.payee, c.name_ct AS category_ct,
                COALESCE(t.currency, a.currency) AS currency, ABS(t.amount) AS amt
-        FROM transactions t
+        FROM transaction_category_flows t
         LEFT JOIN categories c ON t.category_id = c.id
         LEFT JOIN accounts a ON a.id = t.account_id
         WHERE t.user_id = ${userId} AND c.type = 'E' AND t.date >= ${ws} AND t.date <= ${we}

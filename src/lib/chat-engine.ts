@@ -204,22 +204,22 @@ async function flowTotals(
   const slices = await db
     .select({
       type: schema.categories.type,
-      currency: schema.transactions.currency,
-      reportingCurrency: schema.transactions.reportingCurrency,
-      totalAmount: sql<number>`COALESCE(SUM(${schema.transactions.amount}), 0)`,
-      totalReporting: sql<number | null>`SUM(${schema.transactions.reportingAmount})`,
+      currency: schema.transactionCategoryFlows.currency,
+      reportingCurrency: schema.transactionCategoryFlows.reportingCurrency,
+      totalAmount: sql<number>`COALESCE(SUM(${schema.transactionCategoryFlows.amount}), 0)`,
+      totalReporting: sql<number | null>`SUM(${schema.transactionCategoryFlows.reportingAmount})`,
     })
-    .from(schema.transactions)
-    .leftJoin(schema.categories, eq(schema.transactions.categoryId, schema.categories.id))
+    .from(schema.transactionCategoryFlows)
+    .leftJoin(schema.categories, eq(schema.transactionCategoryFlows.categoryId, schema.categories.id))
     .where(
       and(
-        eq(schema.transactions.userId, userId),
-        gte(schema.transactions.date, start),
-        lte(schema.transactions.date, end),
+        eq(schema.transactionCategoryFlows.userId, userId),
+        gte(schema.transactionCategoryFlows.date, start),
+        lte(schema.transactionCategoryFlows.date, end),
         sql`${schema.categories.type} IN ('E', 'I')`
       )
     )
-    .groupBy(schema.categories.type, schema.transactions.currency, schema.transactions.reportingCurrency)
+    .groupBy(schema.categories.type, schema.transactionCategoryFlows.currency, schema.transactionCategoryFlows.reportingCurrency)
     .all();
   let income = 0;
   let spending = 0;
@@ -263,22 +263,22 @@ async function budgetStatuses(ctx: IntentCtx, month: string, money: Money): Prom
 
   const slices = await db
     .select({
-      categoryId: schema.transactions.categoryId,
-      currency: schema.transactions.currency,
-      reportingCurrency: schema.transactions.reportingCurrency,
-      totalAmount: sql<number>`COALESCE(SUM(${schema.transactions.amount}), 0)`,
-      totalReporting: sql<number | null>`SUM(${schema.transactions.reportingAmount})`,
+      categoryId: schema.transactionCategoryFlows.categoryId,
+      currency: schema.transactionCategoryFlows.currency,
+      reportingCurrency: schema.transactionCategoryFlows.reportingCurrency,
+      totalAmount: sql<number>`COALESCE(SUM(${schema.transactionCategoryFlows.amount}), 0)`,
+      totalReporting: sql<number | null>`SUM(${schema.transactionCategoryFlows.reportingAmount})`,
     })
-    .from(schema.transactions)
+    .from(schema.transactionCategoryFlows)
     .where(
       and(
-        eq(schema.transactions.userId, ctx.userId),
-        inArray(schema.transactions.categoryId, rows.map((r) => r.categoryId)),
-        gte(schema.transactions.date, startOfMonth(0)),
-        lte(schema.transactions.date, endOfMonth(0))
+        eq(schema.transactionCategoryFlows.userId, ctx.userId),
+        inArray(schema.transactionCategoryFlows.categoryId, rows.map((r) => r.categoryId)),
+        gte(schema.transactionCategoryFlows.date, startOfMonth(0)),
+        lte(schema.transactionCategoryFlows.date, endOfMonth(0))
       )
     )
-    .groupBy(schema.transactions.categoryId, schema.transactions.currency, schema.transactions.reportingCurrency)
+    .groupBy(schema.transactionCategoryFlows.categoryId, schema.transactionCategoryFlows.currency, schema.transactionCategoryFlows.reportingCurrency)
     .all();
   const spentBy = new Map<number, number>();
   for (const s of slices) {
@@ -498,25 +498,25 @@ const handleTransactions: IntentHandler = async (msg, ctx) => {
     // Stream D Phase 4 — ciphertext only.
     const rawResult = await db
       .select({
-        date: schema.transactions.date,
-        payee: schema.transactions.payee,
-        amount: schema.transactions.amount,
-        currency: schema.transactions.currency,
+        date: schema.transactionCategoryFlows.date,
+        payee: schema.transactionCategoryFlows.payee,
+        amount: schema.transactionCategoryFlows.amount,
+        currency: schema.transactionCategoryFlows.currency,
         categoryNameCt: schema.categories.nameCt,
       })
-      .from(schema.transactions)
-      .leftJoin(schema.categories, eq(schema.transactions.categoryId, schema.categories.id))
+      .from(schema.transactionCategoryFlows)
+      .leftJoin(schema.categories, eq(schema.transactionCategoryFlows.categoryId, schema.categories.id))
       .where(
         and(
-          eq(schema.transactions.userId, ctx.userId),
+          eq(schema.transactionCategoryFlows.userId, ctx.userId),
           eq(schema.categories.type, "E"),
-          gte(schema.transactions.date, range.start),
-          lte(schema.transactions.date, range.end)
+          gte(schema.transactionCategoryFlows.date, range.start),
+          lte(schema.transactionCategoryFlows.date, range.end)
         )
       )
       // "Largest" across currencies is ranked on the stored reporting amount
       // (FINLYNQ-123); a row without one falls back to its own amount.
-      .orderBy(asc(sql`COALESCE(${schema.transactions.reportingAmount}, ${schema.transactions.amount})`))
+      .orderBy(asc(sql`COALESCE(${schema.transactionCategoryFlows.reportingAmount}, ${schema.transactionCategoryFlows.amount})`))
       .limit(5)
       .all();
     const result = rawResult.map((r) => ({
