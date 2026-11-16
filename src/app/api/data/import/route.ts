@@ -427,7 +427,15 @@ export async function POST(request: NextRequest) {
         // holding_accounts on (holding_id, account_id, user_id); an inserted
         // holding without that pairing is silently invisible to the portfolio
         // page, get_portfolio_analysis, etc.
-        const stripped = strip(d.portfolioHoldings, userId, { accountIdMap }) as (typeof schema.portfolioHoldings.$inferInsert)[];
+        // `securities` is not in the backup, so a backup's `securityId` points at
+        // the SOURCE account's security rows. Restored into another account that
+        // was a cross-tenant link (prod, 2026-11-07). Drop it: an unlinked holding
+        // falls back to the legacy grouping, and the login backfill
+        // (`backfillSecuritiesForUser`) links it to this user's own security.
+        const stripped = strip(d.portfolioHoldings, userId, { accountIdMap }).map((row) => ({
+          ...row,
+          securityId: null,
+        })) as (typeof schema.portfolioHoldings.$inferInsert)[];
         const insertedHoldings = await db
           .insert(schema.portfolioHoldings)
           .values(withDates(schema.portfolioHoldings, stripped) as typeof stripped)
@@ -451,6 +459,12 @@ export async function POST(request: NextRequest) {
         if (haRows.length > 0) {
           await db.insert(schema.holdingAccounts).values(haRows).onConflictDoNothing();
         }
+        // Re-arm the login backfill so the next sign-in links the restored
+        // holdings (it short-circuits once this marker is set).
+        await db
+          .update(schema.users)
+          .set({ securitiesBackfilledAt: null })
+          .where(eq(schema.users.id, userId));
       }
 
       // Phase 4 of import-modes refactor (2026-05-25) — restore

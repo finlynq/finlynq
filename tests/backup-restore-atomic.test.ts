@@ -145,6 +145,36 @@ describeDb("POST /api/data/import — a restore is all-or-nothing", () => {
     expect(tpl).toHaveLength(1);
   });
 
+  it("never links a restored holding to another account's security", async () => {
+    // The backup came from another account: its holding points at THAT
+    // account's security row (securities are not in the backup).
+    const otherUser = await createTestUser();
+    const [foreign] = await db
+      .insert(schema.securities)
+      .values({ userId: otherUser, clusterKey: "test-cluster", assetType: "stock", currency: "CAD" })
+      .returning({ id: schema.securities.id });
+    await db.update(schema.users).set({ securitiesBackfilledAt: new Date() }).where(eq(schema.users.id, userId));
+    const backup = backupWith();
+    (backup.data as Record<string, unknown>).portfolioHoldings = [
+      { id: 905, accountId: 900, currency: "CAD", isCash: false, securityId: foreign.id, ...buildNameFields(TEST_DEK, { name: "Restored fund" }) },
+    ];
+
+    const res = await POST(restoreRequest(backup));
+    expect(res.status).toBe(200);
+    const holdings = await db
+      .select({ securityId: schema.portfolioHoldings.securityId })
+      .from(schema.portfolioHoldings)
+      .where(eq(schema.portfolioHoldings.userId, userId));
+    expect(holdings).toEqual([{ securityId: null }]);
+    // The login backfill is re-armed so the next sign-in links it to this
+    // account's own security.
+    const [u] = await db
+      .select({ at: schema.users.securitiesBackfilledAt })
+      .from(schema.users)
+      .where(eq(schema.users.id, userId));
+    expect(u.at).toBeNull();
+  });
+
   it("changes nothing when the backup has a row the restore refuses", async () => {
     const res = await POST(restoreRequest(backupWith({ txCategoryId: 999 })));
     expect(res.status).toBe(400);
