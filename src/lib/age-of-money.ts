@@ -1,7 +1,9 @@
 import { db, schema } from "@/db";
 import { eq, and, desc, asc } from "drizzle-orm";
 
-const { transactions, categories } = schema;
+const { categories } = schema;
+/** Category-level money flows: split rows count under their own category. */
+const flows = schema.transactionCategoryFlows;
 
 type IncomeRecord = { date: string; amount: number; remaining: number };
 type AgeEntry = { date: string; ageInDays: number };
@@ -19,25 +21,25 @@ export async function calculateAgeOfMoney(userId: string): Promise<{
   // Get all income transactions ordered by date ascending (FIFO pool)
   const incomeRows = await db
     .select({
-      date: transactions.date,
-      amount: transactions.amount,
+      date: flows.date,
+      amount: flows.amount,
     })
-    .from(transactions)
-    .leftJoin(categories, eq(transactions.categoryId, categories.id))
-    .where(and(eq(transactions.userId, userId), eq(categories.type, "I")))
-    .orderBy(asc(transactions.date))
+    .from(flows)
+    .leftJoin(categories, eq(flows.categoryId, categories.id))
+    .where(and(eq(flows.userId, userId), eq(categories.type, "I")))
+    .orderBy(asc(flows.date))
     .all();
 
   // Get the last 10 expense transactions ordered by date descending
   const expenseRows = await db
     .select({
-      date: transactions.date,
-      amount: transactions.amount,
+      date: flows.date,
+      amount: flows.amount,
     })
-    .from(transactions)
-    .leftJoin(categories, eq(transactions.categoryId, categories.id))
-    .where(and(eq(transactions.userId, userId), eq(categories.type, "E")))
-    .orderBy(desc(transactions.date))
+    .from(flows)
+    .leftJoin(categories, eq(flows.categoryId, categories.id))
+    .where(and(eq(flows.userId, userId), eq(categories.type, "E")))
+    .orderBy(desc(flows.date))
     .limit(10)
     .all();
 
@@ -110,13 +112,13 @@ export async function calculateAgeOfMoney(userId: string): Promise<{
   // Calculate 30-day trend: compare current age to what it was ~30 days ago
   const olderExpenseRows = await db
     .select({
-      date: transactions.date,
-      amount: transactions.amount,
+      date: flows.date,
+      amount: flows.amount,
     })
-    .from(transactions)
-    .leftJoin(categories, eq(transactions.categoryId, categories.id))
-    .where(and(eq(transactions.userId, userId), eq(categories.type, "E")))
-    .orderBy(desc(transactions.date))
+    .from(flows)
+    .leftJoin(categories, eq(flows.categoryId, categories.id))
+    .where(and(eq(flows.userId, userId), eq(categories.type, "E")))
+    .orderBy(desc(flows.date))
     .limit(10)
     .offset(10)
     .all();

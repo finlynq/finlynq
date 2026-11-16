@@ -58,7 +58,7 @@ describe("chat engine money answers", () => {
   it("income and spending go through the flow rules, never a raw cross-currency sum", () => {
     const helper = SRC.slice(SRC.indexOf("async function flowTotals"), SRC.indexOf("type BudgetStatus"));
     expect(helper).toContain("convertReportingSlice(s, money.displayCurrency, money.rateMap)");
-    expect(helper).toMatch(/groupBy\(schema\.categories\.type, schema\.transactions\.currency, schema\.transactions\.reportingCurrency\)/);
+    expect(helper).toMatch(/groupBy\(schema\.categories\.type, schema\.transactionCategoryFlows\.currency, schema\.transactionCategoryFlows\.reportingCurrency\)/);
     expect(handler("handleTrends")).toContain("flowTotals(");
     expect(handler("handleSummary")).toContain("flowTotals(");
   });

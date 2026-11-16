@@ -8,6 +8,8 @@ import { convertReportingSlice } from "@/lib/fx/reporting-amount";
 import { advanceStaleSubscriptionDatesSafe } from "@/lib/subscriptions/advance-next-dates";
 
 const { categories, transactions, budgets } = schema;
+/** Category-level money flows: split rows count under their own category. */
+const flows = schema.transactionCategoryFlows;
 
 type RateCtx = { displayCurrency: string; rateMap: Map<string, number> };
 
@@ -73,22 +75,22 @@ async function getSpendingForPeriod(userId: string, start: string, end: string, 
     .select({
       categoryId: categories.id,
       categoryNameCt: categories.nameCt,
-      currency: transactions.currency,
-      reportingCurrency: transactions.reportingCurrency,
-      totalAmount: sql<number>`SUM(${transactions.amount})`,
-      totalReporting: sql<number | null>`SUM(${transactions.reportingAmount})`,
+      currency: flows.currency,
+      reportingCurrency: flows.reportingCurrency,
+      totalAmount: sql<number>`SUM(${flows.amount})`,
+      totalReporting: sql<number | null>`SUM(${flows.reportingAmount})`,
     })
-    .from(transactions)
-    .leftJoin(categories, eq(transactions.categoryId, categories.id))
+    .from(flows)
+    .leftJoin(categories, eq(flows.categoryId, categories.id))
     .where(
       and(
-        eq(transactions.userId, userId),
-        gte(transactions.date, start),
-        lte(transactions.date, end),
+        eq(flows.userId, userId),
+        gte(flows.date, start),
+        lte(flows.date, end),
         eq(categories.type, "E")
       )
     )
-    .groupBy(categories.id, categories.nameCt, transactions.currency, transactions.reportingCurrency)
+    .groupBy(categories.id, categories.nameCt, flows.currency, flows.reportingCurrency)
     .all();
 
   // Collapse the per-currency slices back to one converted total per category.
@@ -116,22 +118,22 @@ async function getIncomeForPeriod(userId: string, start: string, end: string, fx
   // (currency, reporting_currency) slice via stored reporting_amount.
   const rows = await db
     .select({
-      currency: transactions.currency,
-      reportingCurrency: transactions.reportingCurrency,
-      totalAmount: sql<number>`SUM(${transactions.amount})`,
-      totalReporting: sql<number | null>`SUM(${transactions.reportingAmount})`,
+      currency: flows.currency,
+      reportingCurrency: flows.reportingCurrency,
+      totalAmount: sql<number>`SUM(${flows.amount})`,
+      totalReporting: sql<number | null>`SUM(${flows.reportingAmount})`,
     })
-    .from(transactions)
-    .leftJoin(categories, eq(transactions.categoryId, categories.id))
+    .from(flows)
+    .leftJoin(categories, eq(flows.categoryId, categories.id))
     .where(
       and(
-        eq(transactions.userId, userId),
-        gte(transactions.date, start),
-        lte(transactions.date, end),
+        eq(flows.userId, userId),
+        gte(flows.date, start),
+        lte(flows.date, end),
         eq(categories.type, "I")
       )
     )
-    .groupBy(transactions.currency, transactions.reportingCurrency)
+    .groupBy(flows.currency, flows.reportingCurrency)
     .all();
   const total = rows.reduce((s, r) => s + convertReportingSlice(r, fx.displayCurrency, fx.rateMap), 0);
   return Math.round(total * 100) / 100;
@@ -180,17 +182,17 @@ export async function generateWeeklyRecap(userId: string, endDate?: string, dek?
       categoryId: categories.id,
       categoryCt: categories.nameCt,
       budget: budgets.amount,
-      currency: transactions.currency,
-      reportingCurrency: transactions.reportingCurrency,
-      totalAmount: sql<number>`COALESCE(SUM(CASE WHEN ${transactions.date} >= ${monthStart} AND ${transactions.date} <= ${monthEnd} THEN ${transactions.amount} ELSE 0 END), 0)`,
-      totalReporting: sql<number | null>`SUM(CASE WHEN ${transactions.date} >= ${monthStart} AND ${transactions.date} <= ${monthEnd} THEN ${transactions.reportingAmount} ELSE 0 END)`,
+      currency: flows.currency,
+      reportingCurrency: flows.reportingCurrency,
+      totalAmount: sql<number>`COALESCE(SUM(CASE WHEN ${flows.date} >= ${monthStart} AND ${flows.date} <= ${monthEnd} THEN ${flows.amount} ELSE 0 END), 0)`,
+      totalReporting: sql<number | null>`SUM(CASE WHEN ${flows.date} >= ${monthStart} AND ${flows.date} <= ${monthEnd} THEN ${flows.reportingAmount} ELSE 0 END)`,
     })
     .from(budgets)
     .leftJoin(categories, eq(budgets.categoryId, categories.id))
-    .leftJoin(transactions, eq(transactions.categoryId, budgets.categoryId))
+    .leftJoin(flows, eq(flows.categoryId, budgets.categoryId))
     // Spending budgets only (income can be budgeted since Budget v2).
     .where(and(eq(budgets.month, month), eq(budgets.userId, userId), eq(categories.type, "E")))
-    .groupBy(budgets.id, categories.id, categories.nameCt, budgets.amount, transactions.currency, transactions.reportingCurrency)
+    .groupBy(budgets.id, categories.id, categories.nameCt, budgets.amount, flows.currency, flows.reportingCurrency)
     .all();
 
   const budgetMap = new Map<number, { category: string; budget: number; spent: number }>();
@@ -224,25 +226,25 @@ export async function generateWeeklyRecap(userId: string, endDate?: string, dek?
   // so the "largest" expenses are correct across currencies.
   const notable = await db
     .select({
-      date: transactions.date,
-      payee: transactions.payee,
+      date: flows.date,
+      payee: flows.payee,
       categoryNameCt: categories.nameCt,
-      amount: transactions.amount,
-      currency: transactions.currency,
-      reportingCurrency: transactions.reportingCurrency,
-      reportingAmount: transactions.reportingAmount,
+      amount: flows.amount,
+      currency: flows.currency,
+      reportingCurrency: flows.reportingCurrency,
+      reportingAmount: flows.reportingAmount,
     })
-    .from(transactions)
-    .leftJoin(categories, eq(transactions.categoryId, categories.id))
+    .from(flows)
+    .leftJoin(categories, eq(flows.categoryId, categories.id))
     .where(
       and(
-        eq(transactions.userId, userId),
-        gte(transactions.date, weekStart),
-        lte(transactions.date, weekEnd),
+        eq(flows.userId, userId),
+        gte(flows.date, weekStart),
+        lte(flows.date, weekEnd),
         eq(categories.type, "E")
       )
     )
-    .orderBy(sql`${transactions.amount} ASC`)
+    .orderBy(sql`${flows.amount} ASC`)
     .limit(50)
     .all();
 

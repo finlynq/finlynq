@@ -17,6 +17,7 @@ import {
 } from "@/lib/crypto/encrypted-columns";
 import { invalidateUser as invalidateUserTxCache } from "@/lib/mcp/user-tx-cache";
 import { round2 } from "@/lib/utils/number";
+import { enteredSplitsToAccount, splitMismatch, splitMismatchMessage } from "@/lib/transactions/split-balance";
 import { db, schema } from "@/db";
 import { eq, and, inArray, sql } from "drizzle-orm";
 import { validateBody, safeErrorMessage } from "@/lib/validate";
@@ -35,6 +36,12 @@ const splitSchema = z.object({
 const postSchema = z.object({
   transactionId: z.number(),
   splits: z.array(splitSchema).min(1),
+  /**
+   * "account" (default): split amounts are in the account currency, as
+   * stored. "entered": they are in the transaction's entered currency (what
+   * the edit dialog shows) and are converted at the transaction's locked rate.
+   */
+  amountsIn: z.enum(["account", "entered"]).optional(),
 });
 
 /** Verify the transaction belongs to the requesting user */
@@ -127,11 +134,29 @@ export async function POST(request: NextRequest) {
     const parentEnteredCurrency = parent?.enteredCurrency ?? parentCurrency;
     const parentEnteredFxRate = parent?.enteredFxRate ?? 1;
     const sameCurrency = parentEnteredCurrency.toUpperCase() === parentCurrency.toUpperCase();
+    const parentAmount = Number(parent?.amount ?? 0);
+
+    // Stored split amounts are in the account currency.
+    const fromEntered = parsed.data.amountsIn === "entered" && !sameCurrency && !!parentEnteredFxRate;
+    const accountAmounts = fromEntered
+      ? enteredSplitsToAccount(splits.map((s) => s.amount), parentEnteredFxRate, parentAmount)
+      : splits.map((s) => s.amount);
+
+    // Split rows must add up to the transaction (reports count a split
+    // transaction through its rows). Refuse before anything is deleted.
+    const mismatch = splitMismatch(parentAmount, accountAmounts);
+    if (mismatch) {
+      return NextResponse.json(
+        { error: splitMismatchMessage(mismatch), code: "split_sum_mismatch", ...mismatch },
+        { status: 400 },
+      );
+    }
 
     // Replace existing splits atomically
     await db.delete(transactionSplits).where(eq(transactionSplits.transactionId, transactionId));
 
-    const rows = splits.map((s) => {
+    const rows = splits.map((s, i) => {
+      const amount = accountAmounts[i];
       const encrypted = encryptSplitWrite(dek, {
         note: s.note ?? "",
         description: s.description ?? "",
@@ -140,14 +165,16 @@ export async function POST(request: NextRequest) {
       // amount = account-currency value; entered_* mirror the parent.
       // For cross-currency parents, invert the locked rate to get the
       // user-typed (entered) amount: entered = amount / enteredFxRate.
-      const enteredAmount = sameCurrency || !parentEnteredFxRate
+      const enteredAmount = fromEntered
         ? s.amount
-        : round2(s.amount / parentEnteredFxRate);
+        : sameCurrency || !parentEnteredFxRate
+          ? amount
+          : round2(amount / parentEnteredFxRate);
       return {
         transactionId,
         categoryId: s.categoryId ?? null,
         accountId: s.accountId ?? null,
-        amount: s.amount,
+        amount,
         enteredAmount,
         enteredCurrency: parentEnteredCurrency,
         enteredFxRate: parentEnteredFxRate,

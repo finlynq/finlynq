@@ -23,6 +23,7 @@ vi.mock("@/db", () => ({
     budgets: { id: "id", categoryId: "categoryId", month: "month", amount: "amount", userId: "userId" },
     categories: { id: "id", name: "name" },
     transactions: { date: "date", amount: "amount", categoryId: "categoryId" },
+    transactionCategoryFlows: { date: "date", amount: "amount", categoryId: "categoryId" },
   },
 }));
 

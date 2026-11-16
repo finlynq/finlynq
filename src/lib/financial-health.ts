@@ -230,7 +230,7 @@ export async function calculateFinancialHealth(
     SELECT TO_CHAR(t.date::date, 'YYYY-MM') AS month, c.type AS cat_type,
            COALESCE(t.currency, a.currency) AS currency,
            SUM(t.amount) AS total
-    FROM transactions t
+    FROM transaction_category_flows t
     LEFT JOIN categories c ON t.category_id = c.id
     LEFT JOIN accounts a ON a.id = t.account_id
     WHERE t.user_id = ${userId} AND t.date >= ${threeStart} AND c.type IN ('E','I')
@@ -271,7 +271,7 @@ export async function calculateFinancialHealth(
   const incomeRows = asRows(await db.execute(sql`
     SELECT COALESCE(t.currency, a.currency) AS currency,
            SUM(t.amount) AS total
-    FROM transactions t
+    FROM transaction_category_flows t
     LEFT JOIN categories c ON t.category_id = c.id
     LEFT JOIN accounts a ON a.id = t.account_id
     WHERE t.user_id = ${userId} AND t.date >= ${twelveStart}

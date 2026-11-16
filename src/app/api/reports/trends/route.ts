@@ -14,16 +14,16 @@ type GroupBy = "category" | "group";
 function periodExpr(period: Period) {
   switch (period) {
     case "daily":
-      return sql<string>`${schema.transactions.date}`;
+      return sql<string>`${schema.transactionCategoryFlows.date}`;
     case "weekly":
       // ISO week: YYYY-Www — native Postgres (transactions.date is TEXT 'YYYY-MM-DD', cast to date)
-      return sql<string>`to_char(${schema.transactions.date}::date, 'IYYY"-W"IW')`;
+      return sql<string>`to_char(${schema.transactionCategoryFlows.date}::date, 'IYYY"-W"IW')`;
     case "monthly":
-      return sql<string>`SUBSTR(${schema.transactions.date}, 1, 7)`;
+      return sql<string>`SUBSTR(${schema.transactionCategoryFlows.date}, 1, 7)`;
     case "quarterly":
-      return sql<string>`SUBSTR(${schema.transactions.date}, 1, 4) || '-Q' || ((CAST(SUBSTR(${schema.transactions.date}, 6, 2) AS INTEGER) - 1) / 3 + 1)`;
+      return sql<string>`SUBSTR(${schema.transactionCategoryFlows.date}, 1, 4) || '-Q' || ((CAST(SUBSTR(${schema.transactionCategoryFlows.date}, 6, 2) AS INTEGER) - 1) / 3 + 1)`;
     case "yearly":
-      return sql<string>`SUBSTR(${schema.transactions.date}, 1, 4)`;
+      return sql<string>`SUBSTR(${schema.transactionCategoryFlows.date}, 1, 4)`;
   }
 }
 
@@ -99,27 +99,27 @@ export async function GET(request: NextRequest) {
   // independently (stored reporting_amount when it matches the display
   // currency, else a fallback conversion of the raw amount).
   const conditions = [
-    eq(schema.transactions.userId, userId),
-    gte(schema.transactions.date, startDate),
-    lte(schema.transactions.date, endDate),
+    eq(schema.transactionCategoryFlows.userId, userId),
+    gte(schema.transactionCategoryFlows.date, startDate),
+    lte(schema.transactionCategoryFlows.date, endDate),
     sql`${schema.categories.type} IN ('I', 'E')`,
   ];
-  if (isBusiness) conditions.push(eq(schema.transactions.isBusiness, 1));
-  if (accountIds) conditions.push(inArray(schema.transactions.accountId, accountIds));
+  if (isBusiness) conditions.push(eq(schema.transactionCategoryFlows.isBusiness, 1));
+  if (accountIds) conditions.push(inArray(schema.transactionCategoryFlows.accountId, accountIds));
 
   const timeseriesRows = await db
     .select({
       period: periodCol,
       categoryType: schema.categories.type,
-      currency: schema.transactions.currency,
-      reportingCurrency: schema.transactions.reportingCurrency,
-      totalAmount: sql<number>`SUM(${schema.transactions.amount})`,
-      totalReporting: sql<number | null>`SUM(${schema.transactions.reportingAmount})`,
+      currency: schema.transactionCategoryFlows.currency,
+      reportingCurrency: schema.transactionCategoryFlows.reportingCurrency,
+      totalAmount: sql<number>`SUM(${schema.transactionCategoryFlows.amount})`,
+      totalReporting: sql<number | null>`SUM(${schema.transactionCategoryFlows.reportingAmount})`,
     })
-    .from(schema.transactions)
-    .leftJoin(schema.categories, eq(schema.transactions.categoryId, schema.categories.id))
+    .from(schema.transactionCategoryFlows)
+    .leftJoin(schema.categories, eq(schema.transactionCategoryFlows.categoryId, schema.categories.id))
     .where(and(...conditions))
-    .groupBy(periodCol, schema.categories.type, schema.transactions.currency, schema.transactions.reportingCurrency)
+    .groupBy(periodCol, schema.categories.type, schema.transactionCategoryFlows.currency, schema.transactionCategoryFlows.reportingCurrency)
     .orderBy(periodCol)
     .all();
 
@@ -160,14 +160,14 @@ export async function GET(request: NextRequest) {
           categoryId: schema.categories.id,
           categoryNameCt: schema.categories.nameCt,
           categoryGroup: schema.categories.group,
-          currency: schema.transactions.currency,
-          reportingCurrency: schema.transactions.reportingCurrency,
-          totalAmount: sql<number>`SUM(${schema.transactions.amount})`,
-          totalReporting: sql<number | null>`SUM(${schema.transactions.reportingAmount})`,
+          currency: schema.transactionCategoryFlows.currency,
+          reportingCurrency: schema.transactionCategoryFlows.reportingCurrency,
+          totalAmount: sql<number>`SUM(${schema.transactionCategoryFlows.amount})`,
+          totalReporting: sql<number | null>`SUM(${schema.transactionCategoryFlows.reportingAmount})`,
           count: sql<number>`COUNT(*)`,
         })
-        .from(schema.transactions)
-        .leftJoin(schema.categories, eq(schema.transactions.categoryId, schema.categories.id))
+        .from(schema.transactionCategoryFlows)
+        .leftJoin(schema.categories, eq(schema.transactionCategoryFlows.categoryId, schema.categories.id))
         .where(and(...conditions))
         .groupBy(
           periodCol,
@@ -175,8 +175,8 @@ export async function GET(request: NextRequest) {
           schema.categories.nameCt,
           schema.categories.type,
           schema.categories.group,
-          schema.transactions.currency,
-          schema.transactions.reportingCurrency,
+          schema.transactionCategoryFlows.currency,
+          schema.transactionCategoryFlows.reportingCurrency,
         )
         .orderBy(periodCol, schema.categories.type, schema.categories.group)
         .all()
@@ -187,16 +187,16 @@ export async function GET(request: NextRequest) {
           categoryId: sql<number | null>`NULL`,
           categoryNameCt: sql<string | null>`NULL`,
           categoryGroup: schema.categories.group,
-          currency: schema.transactions.currency,
-          reportingCurrency: schema.transactions.reportingCurrency,
-          totalAmount: sql<number>`SUM(${schema.transactions.amount})`,
-          totalReporting: sql<number | null>`SUM(${schema.transactions.reportingAmount})`,
+          currency: schema.transactionCategoryFlows.currency,
+          reportingCurrency: schema.transactionCategoryFlows.reportingCurrency,
+          totalAmount: sql<number>`SUM(${schema.transactionCategoryFlows.amount})`,
+          totalReporting: sql<number | null>`SUM(${schema.transactionCategoryFlows.reportingAmount})`,
           count: sql<number>`COUNT(*)`,
         })
-        .from(schema.transactions)
-        .leftJoin(schema.categories, eq(schema.transactions.categoryId, schema.categories.id))
+        .from(schema.transactionCategoryFlows)
+        .leftJoin(schema.categories, eq(schema.transactionCategoryFlows.categoryId, schema.categories.id))
         .where(and(...conditions))
-        .groupBy(periodCol, schema.categories.group, schema.categories.type, schema.transactions.currency, schema.transactions.reportingCurrency)
+        .groupBy(periodCol, schema.categories.group, schema.categories.type, schema.transactionCategoryFlows.currency, schema.transactionCategoryFlows.reportingCurrency)
         .orderBy(periodCol, schema.categories.type, schema.categories.group)
         .all();
 

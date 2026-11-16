@@ -8,9 +8,11 @@ import { computeReportingFields } from "@/lib/fx/reporting-amount";
 import { getDisplayCurrency } from "@/lib/fx-service";
 
 const { accounts, categories, transactions, portfolioHoldings, securities, budgets, budgetTemplates } = schema;
+/** Category-level money flows: split rows count under their own category (see schema-pg TRANSACTION_CATEGORY_FLOWS_SELECT). */
+const flows = schema.transactionCategoryFlows;
 
 /** Dialect-safe month extraction: strftime for SQLite, to_char for PG */
-function monthExpr(dateCol: typeof transactions.date | typeof transactions.date): SQL<string> {
+function monthExpr(dateCol: AnyColumn): SQL<string> {
   return getDialect() === "postgres"
     ? sql<string>`to_char(${dateCol}::date, 'YYYY-MM')`
     : sql<string>`strftime('%Y-%m', ${dateCol})`;
@@ -897,20 +899,20 @@ export async function getMonthlySpending(userId: string, startDate: string, endD
   // category).
   return db
     .select({
-      month: monthExpr(transactions.date),
+      month: monthExpr(flows.date),
       categoryGroup: categories.group,
       categoryNameCt: categories.nameCt,
       categoryType: categories.type,
-      currency: transactions.currency,
-      reportingCurrency: transactions.reportingCurrency,
-      totalAmount: sql<number>`SUM(${transactions.amount})`,
-      totalReporting: sql<number | null>`SUM(${transactions.reportingAmount})`,
+      currency: flows.currency,
+      reportingCurrency: flows.reportingCurrency,
+      totalAmount: sql<number>`SUM(${flows.amount})`,
+      totalReporting: sql<number | null>`SUM(${flows.reportingAmount})`,
     })
-    .from(transactions)
-    .leftJoin(categories, eq(transactions.categoryId, categories.id))
-    .where(and(eq(transactions.userId, userId), gte(transactions.date, startDate), lte(transactions.date, endDate)))
-    .groupBy(monthExpr(transactions.date), categories.nameCt, categories.group, categories.type, transactions.currency, transactions.reportingCurrency)
-    .orderBy(monthExpr(transactions.date))
+    .from(flows)
+    .leftJoin(categories, eq(flows.categoryId, categories.id))
+    .where(and(eq(flows.userId, userId), gte(flows.date, startDate), lte(flows.date, endDate)))
+    .groupBy(monthExpr(flows.date), categories.nameCt, categories.group, categories.type, flows.currency, flows.reportingCurrency)
+    .orderBy(monthExpr(flows.date))
     .all();
 }
 
@@ -922,20 +924,20 @@ export async function getSpendingByCategory(userId: string, startDate: string, e
       categoryNameCt: categories.nameCt,
       categoryGroup: categories.group,
       categoryType: categories.type,
-      total: sql<number>`SUM(${transactions.amount})`,
+      total: sql<number>`SUM(${flows.amount})`,
     })
-    .from(transactions)
-    .leftJoin(categories, eq(transactions.categoryId, categories.id))
+    .from(flows)
+    .leftJoin(categories, eq(flows.categoryId, categories.id))
     .where(
       and(
-        eq(transactions.userId, userId),
-        gte(transactions.date, startDate),
-        lte(transactions.date, endDate),
+        eq(flows.userId, userId),
+        gte(flows.date, startDate),
+        lte(flows.date, endDate),
         eq(categories.type, "E")
       )
     )
     .groupBy(categories.id, categories.nameCt, categories.group, categories.type)
-    .orderBy(sql`SUM(${transactions.amount})`)
+    .orderBy(sql`SUM(${flows.amount})`)
     .all();
 }
 
@@ -947,21 +949,21 @@ export async function getSpendingByCategoryAndCurrency(userId: string, startDate
       categoryNameCt: categories.nameCt,
       categoryGroup: categories.group,
       categoryType: categories.type,
-      currency: transactions.currency,
-      total: sql<number>`SUM(${transactions.amount})`,
+      currency: flows.currency,
+      total: sql<number>`SUM(${flows.amount})`,
     })
-    .from(transactions)
-    .leftJoin(categories, eq(transactions.categoryId, categories.id))
+    .from(flows)
+    .leftJoin(categories, eq(flows.categoryId, categories.id))
     .where(
       and(
-        eq(transactions.userId, userId),
-        gte(transactions.date, startDate),
-        lte(transactions.date, endDate),
+        eq(flows.userId, userId),
+        gte(flows.date, startDate),
+        lte(flows.date, endDate),
         eq(categories.type, "E")
       )
     )
-    .groupBy(categories.id, categories.nameCt, categories.group, categories.type, transactions.currency)
-    .orderBy(sql`SUM(${transactions.amount})`)
+    .groupBy(categories.id, categories.nameCt, categories.group, categories.type, flows.currency)
+    .orderBy(sql`SUM(${flows.amount})`)
     .all();
 }
 
@@ -972,25 +974,25 @@ export async function getSpendingByCategoryAndCurrency(userId: string, startDate
 export async function getIncomeVsExpenses(userId: string, startDate: string, endDate: string) {
   return db
     .select({
-      month: monthExpr(transactions.date),
+      month: monthExpr(flows.date),
       type: categories.type,
-      currency: transactions.currency,
-      reportingCurrency: transactions.reportingCurrency,
-      totalAmount: sql<number>`SUM(${transactions.amount})`,
-      totalReporting: sql<number | null>`SUM(${transactions.reportingAmount})`,
+      currency: flows.currency,
+      reportingCurrency: flows.reportingCurrency,
+      totalAmount: sql<number>`SUM(${flows.amount})`,
+      totalReporting: sql<number | null>`SUM(${flows.reportingAmount})`,
     })
-    .from(transactions)
-    .leftJoin(categories, eq(transactions.categoryId, categories.id))
+    .from(flows)
+    .leftJoin(categories, eq(flows.categoryId, categories.id))
     .where(
       and(
-        eq(transactions.userId, userId),
-        gte(transactions.date, startDate),
-        lte(transactions.date, endDate),
+        eq(flows.userId, userId),
+        gte(flows.date, startDate),
+        lte(flows.date, endDate),
         sql`${categories.type} IN ('E', 'I')`
       )
     )
-    .groupBy(monthExpr(transactions.date), categories.type, transactions.currency, transactions.reportingCurrency)
-    .orderBy(monthExpr(transactions.date))
+    .groupBy(monthExpr(flows.date), categories.type, flows.currency, flows.reportingCurrency)
+    .orderBy(monthExpr(flows.date))
     .all();
 }
 
@@ -1004,34 +1006,34 @@ export async function getIncomeVsExpenses(userId: string, startDate: string, end
 export async function getIncomeExpenseByCategory(userId: string, startDate: string, endDate: string) {
   return db
     .select({
-      month: monthExpr(transactions.date),
+      month: monthExpr(flows.date),
       type: categories.type,
       categoryId: categories.id,
       categoryNameCt: categories.nameCt,
-      currency: transactions.currency,
-      reportingCurrency: transactions.reportingCurrency,
-      totalAmount: sql<number>`SUM(${transactions.amount})`,
-      totalReporting: sql<number | null>`SUM(${transactions.reportingAmount})`,
+      currency: flows.currency,
+      reportingCurrency: flows.reportingCurrency,
+      totalAmount: sql<number>`SUM(${flows.amount})`,
+      totalReporting: sql<number | null>`SUM(${flows.reportingAmount})`,
     })
-    .from(transactions)
-    .leftJoin(categories, eq(transactions.categoryId, categories.id))
+    .from(flows)
+    .leftJoin(categories, eq(flows.categoryId, categories.id))
     .where(
       and(
-        eq(transactions.userId, userId),
-        gte(transactions.date, startDate),
-        lte(transactions.date, endDate),
+        eq(flows.userId, userId),
+        gte(flows.date, startDate),
+        lte(flows.date, endDate),
         sql`${categories.type} IN ('E', 'I')`
       )
     )
     .groupBy(
-      monthExpr(transactions.date),
+      monthExpr(flows.date),
       categories.type,
       categories.id,
       categories.nameCt,
-      transactions.currency,
-      transactions.reportingCurrency,
+      flows.currency,
+      flows.reportingCurrency,
     )
-    .orderBy(monthExpr(transactions.date))
+    .orderBy(monthExpr(flows.date))
     .all();
 }
 
@@ -1045,22 +1047,22 @@ export async function getSpendingByCategoryWithReporting(userId: string, startDa
       categoryNameCt: categories.nameCt,
       categoryGroup: categories.group,
       categoryType: categories.type,
-      currency: transactions.currency,
-      reportingCurrency: transactions.reportingCurrency,
-      totalAmount: sql<number>`SUM(${transactions.amount})`,
-      totalReporting: sql<number | null>`SUM(${transactions.reportingAmount})`,
+      currency: flows.currency,
+      reportingCurrency: flows.reportingCurrency,
+      totalAmount: sql<number>`SUM(${flows.amount})`,
+      totalReporting: sql<number | null>`SUM(${flows.reportingAmount})`,
     })
-    .from(transactions)
-    .leftJoin(categories, eq(transactions.categoryId, categories.id))
+    .from(flows)
+    .leftJoin(categories, eq(flows.categoryId, categories.id))
     .where(
       and(
-        eq(transactions.userId, userId),
-        gte(transactions.date, startDate),
-        lte(transactions.date, endDate),
+        eq(flows.userId, userId),
+        gte(flows.date, startDate),
+        lte(flows.date, endDate),
         eq(categories.type, "E")
       )
     )
-    .groupBy(categories.id, categories.nameCt, categories.group, categories.type, transactions.currency, transactions.reportingCurrency)
+    .groupBy(categories.id, categories.nameCt, categories.group, categories.type, flows.currency, flows.reportingCurrency)
     .all();
 }
 

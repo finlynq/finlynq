@@ -18,6 +18,8 @@ import { advanceStaleSubscriptionDatesSafe } from "@/lib/subscriptions/advance-n
 import { assessAllLoansInterest, assessmentWindowNote } from "@/lib/loans/interest-check";
 
 const { accounts, categories, transactions, budgets, goals, subscriptions } = schema;
+/** Category-level money flows: split rows count under their own category. */
+const flows = schema.transactionCategoryFlows;
 
 export type SpotlightSeverity = "critical" | "warning" | "info";
 
@@ -81,12 +83,12 @@ async function getOverspentBudgets(
       categoryNameCt: categories.nameCt,
       budgetAmount: budgets.amount,
       budgetCurrency: budgets.currency,
-      txCurrency: transactions.currency,
-      spent: sql<number>`COALESCE(ABS(SUM(CASE WHEN ${transactions.date} >= ${startDate} AND ${transactions.date} <= ${endDate} THEN ${transactions.amount} ELSE 0 END)), 0)`,
+      txCurrency: flows.currency,
+      spent: sql<number>`COALESCE(ABS(SUM(CASE WHEN ${flows.date} >= ${startDate} AND ${flows.date} <= ${endDate} THEN ${flows.amount} ELSE 0 END)), 0)`,
     })
     .from(budgets)
     .leftJoin(categories, eq(budgets.categoryId, categories.id))
-    .leftJoin(transactions, eq(transactions.categoryId, budgets.categoryId))
+    .leftJoin(flows, eq(flows.categoryId, budgets.categoryId))
     // Budget v2: income categories can have budgets (expected income); only
     // spending budgets can be overspent.
     .where(and(eq(budgets.month, month), eq(budgets.userId, userId), eq(categories.type, "E")))
@@ -95,7 +97,7 @@ async function getOverspentBudgets(
       categories.nameCt,
       budgets.amount,
       budgets.currency,
-      transactions.currency,
+      flows.currency,
     )
     .all();
 
@@ -286,39 +288,39 @@ async function getSpendingAnomalies(
     .select({
       categoryId: categories.id,
       categoryNameCt: categories.nameCt,
-      currency: transactions.currency,
-      total: sql<number>`ABS(SUM(${transactions.amount}))`,
+      currency: flows.currency,
+      total: sql<number>`ABS(SUM(${flows.amount}))`,
     })
-    .from(transactions)
-    .leftJoin(categories, eq(transactions.categoryId, categories.id))
+    .from(flows)
+    .leftJoin(categories, eq(flows.categoryId, categories.id))
     .where(
       and(
-        eq(transactions.userId, userId),
-        gte(transactions.date, startDate),
-        lte(transactions.date, endDate),
+        eq(flows.userId, userId),
+        gte(flows.date, startDate),
+        lte(flows.date, endDate),
         eq(categories.type, "E")
       )
     )
-    .groupBy(categories.id, categories.nameCt, transactions.currency)
+    .groupBy(categories.id, categories.nameCt, flows.currency)
     .all();
 
   const prevSpend = await db
     .select({
       categoryId: categories.id,
-      currency: transactions.currency,
-      avgTotal: sql<number>`ABS(SUM(${transactions.amount})) / 3.0`,
+      currency: flows.currency,
+      avgTotal: sql<number>`ABS(SUM(${flows.amount})) / 3.0`,
     })
-    .from(transactions)
-    .leftJoin(categories, eq(transactions.categoryId, categories.id))
+    .from(flows)
+    .leftJoin(categories, eq(flows.categoryId, categories.id))
     .where(
       and(
-        eq(transactions.userId, userId),
-        gte(transactions.date, prevStart),
-        lte(transactions.date, prevEnd),
+        eq(flows.userId, userId),
+        gte(flows.date, prevStart),
+        lte(flows.date, prevEnd),
         eq(categories.type, "E")
       )
     )
-    .groupBy(categories.id, transactions.currency)
+    .groupBy(categories.id, flows.currency)
     .all();
 
   const convert = (amount: number, currency: string | null) =>
@@ -389,19 +391,22 @@ async function getUncategorizedTransactions(
   const startDate = `${month}-01`;
   const endDate = `${month}-${new Date(y, m, 0).getDate()}`;
 
+  // A split transaction is uncategorized only if part of it still is: count
+  // distinct transactions with an uncategorized flow row (split rows count
+  // under their own category; see transaction_category_flows).
   const result = await db
-    .select({ count: sql<number>`COUNT(*)` })
-    .from(transactions)
+    .select({ count: sql<number>`COUNT(DISTINCT ${flows.id})` })
+    .from(flows)
     .where(
       and(
-        eq(transactions.userId, userId),
-        gte(transactions.date, startDate),
-        lte(transactions.date, endDate),
-        sql`${transactions.categoryId} IS NULL`,
-        sql`${transactions.portfolioHoldingId} IS NULL`,
-        sql`${transactions.linkId} IS NULL`,
-        sql`${transactions.tradeLinkId} IS NULL`,
-        sql`${transactions.swapLinkId} IS NULL`,
+        eq(flows.userId, userId),
+        gte(flows.date, startDate),
+        lte(flows.date, endDate),
+        sql`${flows.categoryId} IS NULL`,
+        sql`${flows.portfolioHoldingId} IS NULL`,
+        sql`${flows.linkId} IS NULL`,
+        sql`${flows.tradeLinkId} IS NULL`,
+        sql`${flows.swapLinkId} IS NULL`,
       )
     )
     .get();

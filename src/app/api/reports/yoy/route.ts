@@ -53,19 +53,19 @@ export async function GET(request: NextRequest) {
         categoryNameCt: schema.categories.nameCt,
         categoryType: schema.categories.type,
         categoryGroup: schema.categories.group,
-        currency: schema.transactions.currency,
-        reportingCurrency: schema.transactions.reportingCurrency,
-        totalAmount: sql<number>`SUM(${schema.transactions.amount})`,
-        totalReporting: sql<number | null>`SUM(${schema.transactions.reportingAmount})`,
+        currency: schema.transactionCategoryFlows.currency,
+        reportingCurrency: schema.transactionCategoryFlows.reportingCurrency,
+        totalAmount: sql<number>`SUM(${schema.transactionCategoryFlows.amount})`,
+        totalReporting: sql<number | null>`SUM(${schema.transactionCategoryFlows.reportingAmount})`,
       })
-      .from(schema.transactions)
-      .leftJoin(schema.categories, eq(schema.transactions.categoryId, schema.categories.id))
+      .from(schema.transactionCategoryFlows)
+      .leftJoin(schema.categories, eq(schema.transactionCategoryFlows.categoryId, schema.categories.id))
       .where(
         and(
-          eq(schema.transactions.userId, userId),
-          gte(schema.transactions.date, `${year}-01-01`),
-          lte(schema.transactions.date, `${year}-12-31`),
-          ...(accountIds ? [inArray(schema.transactions.accountId, accountIds)] : []),
+          eq(schema.transactionCategoryFlows.userId, userId),
+          gte(schema.transactionCategoryFlows.date, `${year}-01-01`),
+          lte(schema.transactionCategoryFlows.date, `${year}-12-31`),
+          ...(accountIds ? [inArray(schema.transactionCategoryFlows.accountId, accountIds)] : []),
         )
       )
       .groupBy(
@@ -73,8 +73,8 @@ export async function GET(request: NextRequest) {
         schema.categories.nameCt,
         schema.categories.type,
         schema.categories.group,
-        schema.transactions.currency,
-        schema.transactions.reportingCurrency,
+        schema.transactionCategoryFlows.currency,
+        schema.transactionCategoryFlows.reportingCurrency,
       )
       .all();
     const byCat = new Map<string | number, {
@@ -108,29 +108,29 @@ export async function GET(request: NextRequest) {
   async function getMonthlyTotals(year: number) {
     const rows = await db
       .select({
-        month: sql<string>`SUBSTR(${schema.transactions.date}, 6, 2)`,
+        month: sql<string>`SUBSTR(${schema.transactionCategoryFlows.date}, 6, 2)`,
         categoryType: schema.categories.type,
-        currency: schema.transactions.currency,
-        reportingCurrency: schema.transactions.reportingCurrency,
-        totalAmount: sql<number>`SUM(${schema.transactions.amount})`,
-        totalReporting: sql<number | null>`SUM(${schema.transactions.reportingAmount})`,
+        currency: schema.transactionCategoryFlows.currency,
+        reportingCurrency: schema.transactionCategoryFlows.reportingCurrency,
+        totalAmount: sql<number>`SUM(${schema.transactionCategoryFlows.amount})`,
+        totalReporting: sql<number | null>`SUM(${schema.transactionCategoryFlows.reportingAmount})`,
       })
-      .from(schema.transactions)
-      .leftJoin(schema.categories, eq(schema.transactions.categoryId, schema.categories.id))
+      .from(schema.transactionCategoryFlows)
+      .leftJoin(schema.categories, eq(schema.transactionCategoryFlows.categoryId, schema.categories.id))
       .where(
         and(
-          eq(schema.transactions.userId, userId),
-          gte(schema.transactions.date, `${year}-01-01`),
-          lte(schema.transactions.date, `${year}-12-31`),
+          eq(schema.transactionCategoryFlows.userId, userId),
+          gte(schema.transactionCategoryFlows.date, `${year}-01-01`),
+          lte(schema.transactionCategoryFlows.date, `${year}-12-31`),
           sql`${schema.categories.type} IN ('I', 'E')`,
-          ...(accountIds ? [inArray(schema.transactions.accountId, accountIds)] : []),
+          ...(accountIds ? [inArray(schema.transactionCategoryFlows.accountId, accountIds)] : []),
         )
       )
       .groupBy(
-        sql`SUBSTR(${schema.transactions.date}, 6, 2)`,
+        sql`SUBSTR(${schema.transactionCategoryFlows.date}, 6, 2)`,
         schema.categories.type,
-        schema.transactions.currency,
-        schema.transactions.reportingCurrency,
+        schema.transactionCategoryFlows.currency,
+        schema.transactionCategoryFlows.reportingCurrency,
       )
       .all();
     return rows.map((r) => ({ month: r.month, categoryType: r.categoryType, total: convertGroup(r) }));

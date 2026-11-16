@@ -127,7 +127,8 @@ vi.mock("drizzle-orm", () => ({
   and: (...conds: unknown[]) => ({ __kind: "and", conds }),
   sql: Object.assign(
     (..._args: unknown[]) => ({ __kind: "sql" }),
-    { raw: (..._args: unknown[]) => ({ __kind: "sql.raw" }) },
+    // schema-pg's pgView(...).as(sql.raw(...)) calls inlineParams at import.
+    { raw: (..._args: unknown[]) => ({ __kind: "sql.raw", inlineParams() { return this; } }) },
   ),
   desc: vi.fn(),
   asc: vi.fn(),

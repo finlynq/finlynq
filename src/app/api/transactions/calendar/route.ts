@@ -60,7 +60,8 @@ export const GET = apiHandler({ auth: "auth" }, async ({ request, userId }) => {
   const rateMap = await getRateMap(displayCurrency, userId);
   void selfHealReportingAmounts(userId, displayCurrency);
 
-  const t = schema.transactions;
+  // Split rows count under their own category (transaction_category_flows).
+  const t = schema.transactionCategoryFlows;
   const conditions = [eq(t.userId, userId), gte(t.date, start), lte(t.date, end)];
   if (accountId) conditions.push(eq(t.accountId, accountId));
   if (categoryId) conditions.push(eq(t.categoryId, categoryId));

@@ -73,6 +73,7 @@ import {
 } from "@/components/rules/rule-editor-dialog";
 import { buildPayeeCategoryRule } from "@/lib/rules/build-payee-category-rule";
 import { parseSaveError } from "@/lib/save-error";
+import { SPLIT_SUM_TOLERANCE, splitMismatch } from "@/lib/transactions/split-balance";
 import type { Condition, Action } from "@/lib/rules/schema";
 import { LotReallocationNotice } from "@/components/portfolio/lot-reallocation-notice";
 import type { LotReallocationPreview } from "@/lib/portfolio/lots/types";
@@ -422,12 +423,17 @@ export function TransactionDialog({
       // Async load existing splits
       fetch(`/api/transactions/splits?transactionId=${t.id}`)
         .then((r) => (r.ok ? r.json() : []))
-        .then((rows: Array<{ categoryId: number | null; amount: number; note: string | null }>) => {
+        .then((rows: Array<{ categoryId: number | null; amount: number; enteredAmount?: number | null; note: string | null }>) => {
           if (Array.isArray(rows) && rows.length > 0) {
             setSplitRows(
               rows.map((r) => ({
                 categoryId: r.categoryId ? String(r.categoryId) : "",
-                amount: String(r.amount),
+                // Rows are typed as positive numbers in the form's (entered)
+                // currency; the transaction's sign is applied on save. Stored
+                // rows carry the sign and the account currency, so show the
+                // entered amount without its sign, or the "left" badge counts
+                // a -63.85 purchase's -63.85 of splits as 127.70 short.
+                amount: String(Math.abs(r.enteredAmount ?? r.amount)),
                 note: r.note ?? "",
               })),
             );
@@ -770,6 +776,21 @@ export function TransactionDialog({
       setSubmitError({ message: `Pick a portfolio holding — ${sel.name} is an investment account.` });
       return;
     }
+    // Split rows must add up to the transaction (the server refuses them
+    // otherwise, AFTER the transaction itself has saved). Check first.
+    if (showSplits) {
+      const filled = splitRows.filter((r) => r.amount).map((r) => Math.abs(parseFloat(r.amount) || 0));
+      const total = Math.abs(parseFloat(form.amount) || 0);
+      const mismatch = splitMismatch(total, filled);
+      if (mismatch) {
+        setSubmitError({
+          message: mismatch.left > 0
+            ? `The split rows add up to ${formatCurrency(mismatch.splitTotal, form.currency)}: ${formatCurrency(mismatch.left, form.currency)} is still left to split.`
+            : `The split rows add up to ${formatCurrency(mismatch.splitTotal, form.currency)}: ${formatCurrency(-mismatch.left, form.currency)} more than the transaction.`,
+        });
+        return;
+      }
+    }
 
     const body: Record<string, unknown> = {
       ...(editId ? { id: editId } : {}),
@@ -856,13 +877,16 @@ export function TransactionDialog({
       // transaction itself is already committed, so onSaved (reconcile link,
       // list refresh) still runs — but the dialog stays open with the error.
       let splitsError: string | null = null;
-      if (showSplits && splitRows.filter((r) => r.amount).length >= 2 && savedTxId) {
+      if (showSplits && splitRows.some((r) => r.amount) && savedTxId) {
         const sign = parseFloat(form.amount) < 0 ? -1 : 1;
         const splitRes = await fetch("/api/transactions/splits", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
             transactionId: savedTxId,
+            // Rows are in the form's currency; the server converts them to the
+            // account currency at the transaction's own rate.
+            amountsIn: "entered",
             splits: splitRows
               .filter((r) => r.amount)
               .map((r) => ({
@@ -1141,12 +1165,15 @@ export function TransactionDialog({
   }
 
   // ─── Computed ───────────────────────────────────────────────────────
+  // Split rows are entered without a sign and saved with the transaction's
+  // sign (see the splits POST in handleSubmit), so they are totalled the same
+  // way: sizes against the transaction's size.
   const splitAllocated = useMemo(
-    () => splitRows.reduce((s, r) => s + (parseFloat(r.amount) || 0), 0),
+    () => splitRows.reduce((s, r) => s + Math.abs(parseFloat(r.amount) || 0), 0),
     [splitRows],
   );
   const splitRemaining = Math.abs(parseFloat(form.amount) || 0) - splitAllocated;
-  const splitBalanced = Math.abs(splitRemaining) < 0.01;
+  const splitBalanced = Math.abs(splitRemaining) <= SPLIT_SUM_TOLERANCE;
 
   // ─── Rule suggestion eligibility (FINLYNQ-125) ──────────────────────
   // Render the affordance ONLY when explicitly opted-in AND in new-entry

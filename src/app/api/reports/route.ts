@@ -64,12 +64,12 @@ export async function GET(request: NextRequest) {
 
   if (type === "income-statement") {
     const conditions = [
-      eq(schema.transactions.userId, userId),
-      gte(schema.transactions.date, startDate),
-      lte(schema.transactions.date, endDate),
+      eq(schema.transactionCategoryFlows.userId, userId),
+      gte(schema.transactionCategoryFlows.date, startDate),
+      lte(schema.transactionCategoryFlows.date, endDate),
     ];
-    if (isBusiness) conditions.push(eq(schema.transactions.isBusiness, 1));
-    if (accountIds) conditions.push(inArray(schema.transactions.accountId, accountIds));
+    if (isBusiness) conditions.push(eq(schema.transactionCategoryFlows.isBusiness, 1));
+    if (accountIds) conditions.push(inArray(schema.transactionCategoryFlows.accountId, accountIds));
 
     // Stream D Phase 4 â€” plaintext name dropped. Group on stable id +
     // category metadata; decrypt name_ct in-memory after aggregation.
@@ -79,16 +79,16 @@ export async function GET(request: NextRequest) {
         categoryType: schema.categories.type,
         categoryGroup: schema.categories.group,
         categoryNameCt: schema.categories.nameCt,
-        currency: schema.transactions.currency,
-        reportingCurrency: schema.transactions.reportingCurrency,
-        total: sql<number>`SUM(${schema.transactions.amount})`,
-        totalReporting: sql<number | null>`SUM(${schema.transactions.reportingAmount})`,
+        currency: schema.transactionCategoryFlows.currency,
+        reportingCurrency: schema.transactionCategoryFlows.reportingCurrency,
+        total: sql<number>`SUM(${schema.transactionCategoryFlows.amount})`,
+        totalReporting: sql<number | null>`SUM(${schema.transactionCategoryFlows.reportingAmount})`,
         count: sql<number>`COUNT(*)`,
       })
-      .from(schema.transactions)
-      .leftJoin(schema.categories, eq(schema.transactions.categoryId, schema.categories.id))
+      .from(schema.transactionCategoryFlows)
+      .leftJoin(schema.categories, eq(schema.transactionCategoryFlows.categoryId, schema.categories.id))
       .where(and(...conditions))
-      .groupBy(schema.categories.id, schema.categories.type, schema.categories.group, schema.categories.nameCt, schema.transactions.currency, schema.transactions.reportingCurrency)
+      .groupBy(schema.categories.id, schema.categories.type, schema.categories.group, schema.categories.nameCt, schema.transactionCategoryFlows.currency, schema.transactionCategoryFlows.reportingCurrency)
       .orderBy(schema.categories.type, schema.categories.group)
       .all();
 
@@ -264,23 +264,23 @@ export async function GET(request: NextRequest) {
         categoryId: schema.categories.id,
         categoryGroup: schema.categories.group,
         categoryNameCt: schema.categories.nameCt,
-        currency: schema.transactions.currency,
-        reportingCurrency: schema.transactions.reportingCurrency,
-        total: sql<number>`SUM(${schema.transactions.amount})`,
-        totalReporting: sql<number | null>`SUM(${schema.transactions.reportingAmount})`,
+        currency: schema.transactionCategoryFlows.currency,
+        reportingCurrency: schema.transactionCategoryFlows.reportingCurrency,
+        total: sql<number>`SUM(${schema.transactionCategoryFlows.amount})`,
+        totalReporting: sql<number | null>`SUM(${schema.transactionCategoryFlows.reportingAmount})`,
       })
-      .from(schema.transactions)
-      .leftJoin(schema.categories, eq(schema.transactions.categoryId, schema.categories.id))
+      .from(schema.transactionCategoryFlows)
+      .leftJoin(schema.categories, eq(schema.transactionCategoryFlows.categoryId, schema.categories.id))
       .where(
         and(
-          eq(schema.transactions.userId, userId),
-          gte(schema.transactions.date, startDate),
-          lte(schema.transactions.date, endDate),
+          eq(schema.transactionCategoryFlows.userId, userId),
+          gte(schema.transactionCategoryFlows.date, startDate),
+          lte(schema.transactionCategoryFlows.date, endDate),
           sql`${schema.categories.type} IN ('I', 'E')`,
-          ...(accountIds ? [inArray(schema.transactions.accountId, accountIds)] : []),
+          ...(accountIds ? [inArray(schema.transactionCategoryFlows.accountId, accountIds)] : []),
         )
       )
-      .groupBy(schema.categories.id, schema.categories.group, schema.categories.nameCt, schema.transactions.currency, schema.transactions.reportingCurrency)
+      .groupBy(schema.categories.id, schema.categories.group, schema.categories.nameCt, schema.transactionCategoryFlows.currency, schema.transactionCategoryFlows.reportingCurrency)
       .all();
 
     // Aggregate across currencies per category â€” keyed on categoryId.

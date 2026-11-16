@@ -68,11 +68,11 @@ export const POST = apiHandler(
         .select({
           categoryNameCt: schema.categories.nameCt,
           budgetAmount: schema.budgets.amount,
-          spent: sql<number>`COALESCE(ABS(SUM(CASE WHEN ${schema.transactions.date} >= ${startDate} AND ${schema.transactions.date} <= ${endDate} THEN ${schema.transactions.amount} ELSE 0 END)), 0)`,
+          spent: sql<number>`COALESCE(ABS(SUM(CASE WHEN ${schema.transactionCategoryFlows.date} >= ${startDate} AND ${schema.transactionCategoryFlows.date} <= ${endDate} THEN ${schema.transactionCategoryFlows.amount} ELSE 0 END)), 0)`,
         })
         .from(schema.budgets)
         .leftJoin(schema.categories, eq(schema.budgets.categoryId, schema.categories.id))
-        .leftJoin(schema.transactions, eq(schema.transactions.categoryId, schema.categories.id))
+        .leftJoin(schema.transactionCategoryFlows, eq(schema.transactionCategoryFlows.categoryId, schema.categories.id))
         // Spending budgets only: an income budget (Budget v2) is never "over".
         .where(and(eq(schema.budgets.month, month), eq(schema.budgets.userId, userId), eq(schema.categories.type, "E")))
         .groupBy(schema.budgets.id, schema.categories.nameCt)
