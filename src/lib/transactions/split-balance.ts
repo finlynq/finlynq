@@ -62,12 +62,13 @@ export function enteredSplitsToAccount(
 /** The refusal every write path returns, worded the same everywhere. */
 export function splitMismatchMessage(m: SplitMismatch): string {
   const sameSign = m.amount === 0 || m.splitTotal === 0 || Math.sign(m.amount) === Math.sign(m.splitTotal);
-  const hint = sameSign
-    ? ""
-    : " Split rows carry the transaction's sign (a negative transaction splits into negative rows).";
-  return (
-    `The split rows add up to ${m.splitTotal.toFixed(2)} but the transaction is ${m.amount.toFixed(2)} ` +
-    `(${Math.abs(m.left).toFixed(2)} ${m.left > 0 ? "left to split" : "too much"}). ` +
-    `Split rows must add up to the transaction.${hint}`
-  );
+  const head = `The split rows add up to ${m.splitTotal.toFixed(2)} but the transaction is ${m.amount.toFixed(2)}`;
+  if (!sameSign) {
+    return `${head}. Split rows must add up to the transaction, and they carry its sign (a negative transaction splits into negative rows).`;
+  }
+  // "Left" is measured in the transaction's direction: -20.51 of a -63.85
+  // purchase leaves 43.34 to split.
+  const direction = m.amount < 0 ? -1 : 1;
+  const short = m.left * direction > 0;
+  return `${head} (${Math.abs(m.left).toFixed(2)} ${short ? "left to split" : "too much"}). Split rows must add up to the transaction.`;
 }

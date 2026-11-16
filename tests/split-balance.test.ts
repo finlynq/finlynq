@@ -40,14 +40,17 @@ describe("splitMismatch", () => {
     const m = splitMismatch(-63.85, [20.51, 43.34]);
     expect(m).not.toBeNull();
     const msg = splitMismatchMessage(m!);
-    expect(msg).toContain("127.70 too much");
-    expect(msg).toContain("carry the transaction's sign");
+    expect(msg).toContain("they carry its sign");
+    expect(msg).not.toMatch(/left to split|too much/);
   });
 
-  it("does not add the sign hint when only the size is wrong", () => {
-    const msg = splitMismatchMessage(splitMismatch(3300.46, [3900.46])!);
-    expect(msg).toContain("600.00 too much");
-    expect(msg).not.toContain("carry the transaction's sign");
+  it("measures what is left in the transaction's direction", () => {
+    const over = splitMismatchMessage(splitMismatch(3300.46, [3900.46])!);
+    expect(over).toContain("600.00 too much");
+    expect(over).not.toContain("carry its sign");
+    expect(splitMismatchMessage(splitMismatch(-63.85, [-20.51])!)).toContain("43.34 left to split");
+    expect(splitMismatchMessage(splitMismatch(-63.85, [-80])!)).toContain("16.15 too much");
+    expect(splitMismatchMessage(splitMismatch(100, [40])!)).toContain("60.00 left to split");
   });
 });
 
