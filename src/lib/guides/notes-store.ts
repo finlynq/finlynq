@@ -38,6 +38,8 @@ export interface NoteSummary {
   version: number;
   updatedBy: NoteAuthor;
   updatedAt: string;
+  /** True when this key can't decrypt the note (written under a different key). */
+  unreadable: boolean;
 }
 
 export interface NoteFull extends NoteSummary {
@@ -65,15 +67,19 @@ function dec(dek: Buffer, ct: string | null): string | null {
 }
 
 function toFull(dek: Buffer, r: NoteRow): NoteFull {
+  const path = dec(dek, r.pathCt);
+  const title = dec(dek, r.titleCt);
+  const body = dec(dek, r.bodyCt);
   return {
     id: r.id,
-    path: dec(dek, r.pathCt) ?? "",
-    title: dec(dek, r.titleCt) ?? "",
+    path: path ?? "",
+    title: title ?? "",
     summary: dec(dek, r.summaryCt),
-    body: dec(dek, r.bodyCt) ?? "",
+    body: body ?? "",
     version: r.version,
     updatedBy: r.updatedBy,
     updatedAt: r.updatedAt.toISOString(),
+    unreadable: path == null || title == null || body == null,
   };
 }
 

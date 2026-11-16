@@ -34,6 +34,7 @@ interface NoteSummary {
   version: number;
   updatedBy: "user" | "assistant";
   updatedAt: string;
+  unreadable?: boolean;
 }
 interface NoteFull extends NoteSummary {
   body: string;
@@ -60,6 +61,8 @@ function when(iso: string) {
     return iso;
   }
 }
+
+const UNREADABLE = "Can't be read in this session";
 
 const TEXTAREA =
   "min-h-[240px] w-full rounded-md border border-input bg-transparent px-3 py-2 font-mono text-sm shadow-xs outline-none focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/50";
@@ -236,7 +239,9 @@ export default function AiGuidanceSettingsPage() {
                       className={`w-full rounded-md px-2 py-2 text-left hover:bg-muted ${selected?.id === n.id ? "bg-muted" : ""}`}
                     >
                       <div className="flex items-center gap-2">
-                        <span className="truncate text-sm font-medium">{n.title}</span>
+                        <span className={`truncate text-sm font-medium ${n.unreadable ? "italic text-muted-foreground" : ""}`}>
+                          {n.unreadable ? UNREADABLE : n.title}
+                        </span>
                         {n.updatedBy === "assistant" && (
                           <Badge variant="secondary" className="shrink-0">
                             <Bot className="mr-1 h-3 w-3" /> assistant
@@ -306,7 +311,7 @@ export default function AiGuidanceSettingsPage() {
                 ) : selected ? (
                   <>
                     <CardHeader>
-                      <CardTitle className="text-base">{selected.title}</CardTitle>
+                      <CardTitle className="text-base">{selected.unreadable ? UNREADABLE : selected.title}</CardTitle>
                       <CardDescription className="flex flex-wrap items-center gap-x-2 gap-y-1">
                         <span className="font-mono">{selected.path}</span>
                         <span>· version {selected.version}</span>
@@ -317,10 +322,17 @@ export default function AiGuidanceSettingsPage() {
                       </CardDescription>
                     </CardHeader>
                     <CardContent className="space-y-4">
-                      <MarkdownView markdown={selected.body} />
+                      {selected.unreadable ? (
+                        <p className="text-sm text-muted-foreground">
+                          {UNREADABLE}. It was saved with an encryption key this session doesn&apos;t have, so it can&apos;t be
+                          shown or edited here. You can retire it.
+                        </p>
+                      ) : (
+                        <MarkdownView markdown={selected.body} />
+                      )}
                       {formError && <p className="text-sm text-destructive">{formError}</p>}
                       <div className="flex flex-wrap gap-2">
-                        <Button size="sm" onClick={() => startEdit(selected)}>
+                        <Button size="sm" onClick={() => startEdit(selected)} disabled={selected.unreadable}>
                           Edit
                         </Button>
                         <Button size="sm" variant="outline" onClick={() => setShowHistory((v) => !v)}>

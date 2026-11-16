@@ -104,6 +104,14 @@ describeDb("guidance notes", () => {
     expect(await saveNote(userId, TEST_DEK, { ...note, path: "n/extra.md", expectedVersion: 0, by: "user" })).toMatchObject({ ok: false, code: "too_many" });
   });
 
+  it("flags a note written under a different key instead of showing it blank", async () => {
+    await saveNote(userId, TEST_DEK, { ...note, expectedVersion: 0, by: "assistant" });
+    const otherKey = Buffer.alloc(32, 0xbb);
+    const [listed] = await listNotes(userId, otherKey);
+    expect(listed).toMatchObject({ unreadable: true, title: "", path: "" });
+    expect((await listNotes(userId, TEST_DEK))[0].unreadable).toBe(false);
+  });
+
   it("keeps users apart", async () => {
     const other = await createTestUser();
     const c = await saveNote(userId, TEST_DEK, { ...note, expectedVersion: 0, by: "user" });
