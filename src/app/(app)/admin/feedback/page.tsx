@@ -22,6 +22,7 @@ import { cn } from "@/lib/utils";
 import { MessageCircle, Paperclip, X } from "lucide-react";
 import { FeedbackAttachmentView } from "@/components/feedback/attachment-view";
 import { validateFeedbackAttachment } from "@/lib/feedback/attachment";
+import { FEEDBACK_STATUSES, statusAfterAdminReply } from "@/lib/feedback/status";
 import type { FeedbackMessage, FeedbackThread } from "@shared/types";
 
 function fmtBytes(n: number): string {
@@ -46,9 +47,15 @@ interface FeedbackRow {
   adminUnread: boolean;
 }
 
-const FILTERS = ["all", "new", "triaged", "resolved"] as const;
+const FILTERS = ["all", ...FEEDBACK_STATUSES] as const;
 type Filter = (typeof FILTERS)[number];
-const STATUSES = ["new", "triaged", "resolved"];
+
+// Tickets that need the maintainer's attention stand out in the list. Reopened
+// gets its own hue: amber reads as the same orange as the primary New badge.
+const statusColor: Record<string, string> = {
+  new: "border-primary/40 text-primary",
+  reopened: "border-violet-500/50 bg-violet-500/10 text-violet-600 dark:text-violet-400",
+};
 
 const typeColor: Record<string, string> = {
   bug: "bg-destructive/15 text-destructive",
@@ -206,7 +213,7 @@ function AdminThreadDialog({
               ...t,
               messages: [...t.messages, msg],
               messageCount: t.messageCount + 1,
-              status: t.status === "new" ? "triaged" : t.status,
+              status: statusAfterAdminReply(t.status),
             }
           : t,
       );
@@ -415,7 +422,7 @@ export default function AdminFeedbackPage() {
           <Card key={r.id} className="p-4">
             <div className="flex flex-wrap items-center gap-2">
               <Badge className={typeColor[r.type] ?? typeColor.other}>{r.type}</Badge>
-              <Badge variant="outline" className="capitalize">
+              <Badge variant="outline" className={cn("capitalize", statusColor[r.status])}>
                 {r.status}
               </Badge>
               <span className="text-xs text-muted-foreground">
@@ -452,7 +459,7 @@ export default function AdminFeedbackPage() {
                   onChange={(e) => patch(r.id, { status: e.target.value })}
                   className="rounded-md border border-border bg-background px-2 py-1 text-sm capitalize outline-none focus-visible:ring-2 focus-visible:ring-ring/50"
                 >
-                  {STATUSES.map((s) => (
+                  {FEEDBACK_STATUSES.map((s) => (
                     <option key={s} value={s}>
                       {s}
                     </option>

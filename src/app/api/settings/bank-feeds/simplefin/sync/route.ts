@@ -13,7 +13,7 @@ import { simplefin } from "@finlynq/import-connectors";
  *
  * Body: { choices?: Record<simplefinAccountId, {mode:"existing",accountId} |
  * {mode:"create"}> }. Resolves each new account's create/link decision, then
- * STAGES the last ~90 days into per-account `staged_imports` rows
+ * STAGES the last 44 days (89 on a first sync or after a long gap) into per-account `staged_imports` rows
  * (source='connector') for review at /import/pending. Already-mapped accounts
  * sync without a choice. requireEncryption — needs the DEK to stage under the
  * user key. No `transactions` rows are created here (approve at /import/pending

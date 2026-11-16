@@ -43,9 +43,13 @@ import { normalizeDbRows } from "@/lib/db-utils";
 import {
   AUTO_SYNC_MIN_INTERVAL_MS,
   accountProblemMessage,
+  isSimplefinRangeNotice,
+  lastFetchAt,
   parseSyncStatus,
   retryStampIso,
+  simplefinWindowDays,
   summarizeSimplefinSyncOutcome,
+  takeAppOpenCheck,
   type SimplefinSyncOutcome,
   type SimplefinSyncStatus,
   type SimplefinSyncTrigger,
@@ -54,8 +58,6 @@ import {
 const CONNECTOR_ID = "simplefin";
 /** Second credential slot: SimpleFIN account id → Finlynq account id (string). */
 const ACCOUNT_MAP_ID = "simplefin:accounts";
-/** How far back to pull on each sync. SimpleFIN keeps ~90 days. */
-const SYNC_LOOKBACK_DAYS = 90;
 /** Plaintext settings key holding the login auto-sync throttle timestamp (ISO). */
 const AUTOSYNC_AT_KEY = "connector:simplefin:autosync_at";
 /** Plaintext settings key holding the last sync's outcome (JSON — see simplefin-sync-status.ts). */
@@ -80,7 +82,7 @@ export interface SimplefinAccountPlan {
   name: string;
   /** ISO currency. */
   currency: string;
-  /** Transactions available for this account (last ~90d, pending excluded). */
+  /** Transactions available for this account in the requested window (44 or 89 days, pending excluded). */
   txCount: number;
   /**
    * `mapped` — already linked (from a prior sync); syncs silently.
@@ -184,9 +186,22 @@ async function fetchAndTransform(userId: string, dek: Buffer) {
   );
   if (!creds?.accessUrl) throw new SimplefinNotConnectedError();
   const client = new simplefin.SimpleFINClient(creds.accessUrl);
-  const startDate = Math.floor(Date.now() / 1000) - SYNC_LOOKBACK_DAYS * 24 * 60 * 60;
+  // 44 days normally (SimpleFIN's recommended range, no warning); 89 on a first
+  // sync or after a long gap (see simplefinWindowDays).
+  const windowDays = simplefinWindowDays(lastFetchAt(await getSyncStatus(userId)));
+  const startDate = Math.floor(Date.now() / 1000) - windowDays * 24 * 60 * 60;
   const resp = await client.fetchAccounts({ startDate });
-  return simplefin.simplefinToRawTransactions(resp);
+  const result = simplefin.simplefinToRawTransactions(resp);
+  // SimpleFIN's note about the window we asked for is expected on a long
+  // window and says nothing about the user's bank: drop it from the problems.
+  const notices = result.providerErrors.filter(isSimplefinRangeNotice);
+  if (notices.length === 0) return result;
+  console.log(`[simplefin] user=${userId} range notice dropped (window=${windowDays}d)`);
+  return {
+    ...result,
+    providerErrors: result.providerErrors.filter((e) => !isSimplefinRangeNotice(e)),
+    errors: result.errors.filter((e) => !isSimplefinRangeNotice(e)),
+  };
 }
 
 // ─── Preview (detect accounts + mapping status) ─────────────────────────────
@@ -280,7 +295,8 @@ async function loadAccountsFull(
 // ─── Sync (resolve create/link choices → stage per account) ─────────────────
 
 /**
- * Pull the last ~90 days and STAGE each SimpleFIN account's rows into its own
+ * Pull the last 44 days (89 on a first sync or after a long gap, see
+ * simplefinWindowDays) and STAGE each SimpleFIN account's rows into its own
  * account-bound `staged_imports` row (source='connector') for review at
  * /import/pending. `choices` maps a SimpleFIN account id to Create-new or
  * Link-to-existing; already-mapped accounts sync without a choice. A `new`
@@ -392,7 +408,7 @@ export async function syncSimpleFin(
     // SimpleFIN reports the account's current balance + balance-date. Carry it
     // as the statement balance so approve seeds a `bank_daily_balances` anchor
     // (source 'upload_form') — this drives the reconcile balance check + the
-    // "Calculated / Loaded" columns. Balance-vs-90-day-window divergence is
+    // "Calculated / Loaded" columns. Balance-vs-window divergence is
     // warn-but-allow, never blocking.
     const parseResult: ParseSuccess = {
       rows,
@@ -632,4 +648,25 @@ export function enqueueAutoSyncSimpleFin(userId: string, dek: Buffer): void {
       console.warn(`[simplefin-autosync] user=${userId} failed:`, err);
     }
   })();
+}
+
+const appOpenGlobal = globalThis as { __pfSimplefinAppOpenChecks?: Map<string, number> };
+
+/**
+ * Offer the 12h auto-sync when a signed-in user opens the app (in-app feedback
+ * #29: the apps keep people signed in, so a login-only sync rarely ran and
+ * users pressed Sync now every day). Called from GET /api/auth/session, which
+ * the web app hits on every page load and tab focus and the phone app on every
+ * start and resume. Deliberately NOT from GET /api/dashboard: that route runs
+ * inside withOp, so the sync's queries would be billed to it. Needs the session's
+ * DEK: the access URL is encrypted with it, so a locked session can't sync.
+ * The in-process gate keeps these frequent calls off the database; the slot
+ * claim inside `maybeAutoSyncSimpleFin` still decides whether a sync runs.
+ * Never throws, never waits for the sync.
+ */
+export function enqueueAutoSyncOnAppOpen(userId: string, dek: Buffer | null): void {
+  if (!dek) return;
+  const checks = (appOpenGlobal.__pfSimplefinAppOpenChecks ??= new Map());
+  if (!takeAppOpenCheck(checks, userId)) return;
+  enqueueAutoSyncSimpleFin(userId, dek);
 }

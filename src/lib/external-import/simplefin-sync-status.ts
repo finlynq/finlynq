@@ -164,3 +164,89 @@ export function accountProblemMessage(accountName: string, err: unknown): string
     ? `Account "${accountName}": ${raw}`
     : `Account "${accountName}": could not be imported because of a server error.`;
 }
+
+// ─── How far back each sync asks SimpleFIN for (2026-11-15) ─────────────────
+//
+// Measured against SimpleFIN's developer demo: a 44-day request comes back
+// clean; 45 to 89 days return the data plus "Requested date range exceeds
+// recommended range of 45 days. In the future, this may be capped."; 90 days is
+// cut to 90 with "...exceeds limit of 90 days and was capped." We used to ask
+// for 90 days every time, so EVERY sync reported one SimpleFIN problem and a
+// real one (a bank connection needing a new sign-in) looked the same.
+
+/** The longest window SimpleFIN answers without a warning. */
+export const SIMPLEFIN_RECOMMENDED_WINDOW_DAYS = 44;
+/** The longest window under SimpleFIN's hard 90-day limit. */
+export const SIMPLEFIN_MAX_WINDOW_DAYS = 89;
+/** Days re-read before the last fetch, for transactions that post late. */
+export const SIMPLEFIN_OVERLAP_DAYS = 7;
+
+const DAY_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * When the last sync actually fetched from SimpleFIN: the stored status's time
+ * when it ran (cleanly or with per-account problems), null when it failed
+ * before fetching or there is none.
+ */
+export function lastFetchAt(status: SimplefinSyncStatus | null): string | null {
+  if (!status) return null;
+  return status.ok || status.partial ? status.at : null;
+}
+
+/**
+ * Days to ask SimpleFIN for: the recommended 44 while the last fetch (plus a
+ * week of overlap) fits inside it, else as much as SimpleFIN keeps, so a first
+ * sync or a long gap misses nothing. Re-reading days already fetched is
+ * harmless: staging skips rows the ledger already has.
+ */
+export function simplefinWindowDays(lastFetchIso: string | null, now: Date = new Date()): number {
+  if (!lastFetchIso) return SIMPLEFIN_MAX_WINDOW_DAYS;
+  const last = new Date(lastFetchIso).getTime();
+  if (!Number.isFinite(last)) return SIMPLEFIN_MAX_WINDOW_DAYS;
+  const daysSince = Math.max(0, (now.getTime() - last) / DAY_MS);
+  return daysSince + SIMPLEFIN_OVERLAP_DAYS <= SIMPLEFIN_RECOMMENDED_WINDOW_DAYS
+    ? SIMPLEFIN_RECOMMENDED_WINDOW_DAYS
+    : SIMPLEFIN_MAX_WINDOW_DAYS;
+}
+
+/**
+ * SimpleFIN's note about the requested date range. Expected whenever a long
+ * window is needed, and not a problem with the user's bank, so it is never
+ * counted or shown as one.
+ */
+export function isSimplefinRangeNotice(message: string): boolean {
+  return /^requested date range exceeds\b/i.test(message.trim());
+}
+
+// ─── Auto-sync when the app is opened (2026-11-15) ──────────────────────────
+//
+// The 12h auto-sync used to run only from the login route. The web and phone
+// apps keep people signed in for days, so it rarely ran and users pressed
+// Sync now instead (in-app feedback #29). Opening the app (GET /api/auth/session,
+// called on every web page load and tab focus and on every phone start and
+// resume) now offers the same throttled sync. This in-process gate stops those
+// frequent calls from
+// reaching the database more than once per interval per user; the 12h slot
+// itself is still claimed atomically in the database.
+
+/** Min gap between app-open checks of the 12h slot, per user, per process. */
+export const APP_OPEN_CHECK_INTERVAL_MS = 10 * 60 * 1000;
+/** Forget the oldest checks past this many users, so the map can't grow forever. */
+const APP_OPEN_MAX_TRACKED = 5000;
+
+/** True when this user's app-open check should run now; records the check. */
+export function takeAppOpenCheck(
+  checks: Map<string, number>,
+  userId: string,
+  nowMs: number = Date.now(),
+): boolean {
+  const last = checks.get(userId);
+  if (last !== undefined && nowMs - last < APP_OPEN_CHECK_INTERVAL_MS) return false;
+  if (checks.size >= APP_OPEN_MAX_TRACKED && !checks.has(userId)) {
+    const oldest = checks.keys().next().value;
+    if (oldest !== undefined) checks.delete(oldest);
+  }
+  checks.delete(userId); // re-insert so Map order stays oldest-first
+  checks.set(userId, nowMs);
+  return true;
+}

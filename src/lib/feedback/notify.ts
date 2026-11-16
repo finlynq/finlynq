@@ -115,6 +115,8 @@ export async function notifyAdminsFeedbackReply(opts: {
   feedbackId: number;
   feedbackType?: string | null;
   body: string;
+  /** The reply moved the ticket from resolved to reopened. */
+  reopened?: boolean;
 }): Promise<void> {
   const recipients = await getFeedbackNotificationRecipients();
   if (recipients.length === 0) return;
@@ -127,6 +129,7 @@ export async function notifyAdminsFeedbackReply(opts: {
       body: opts.body,
       userId: opts.userId,
       userLabel,
+      reopened: opts.reopened,
     }),
   );
 }

@@ -11,12 +11,13 @@ import { requireAdmin } from "@/lib/auth/require-admin";
 import { validateBody, safeErrorMessage } from "@/lib/validate";
 import { logAdminAction, clientIp } from "@/lib/admin-audit";
 import { buildThreadSummary, toFeedbackMessage } from "@/lib/feedback/thread";
+import { FEEDBACK_STATUSES } from "@/lib/feedback/status";
 import type { FeedbackThread } from "@shared/types";
 
 export const dynamic = "force-dynamic";
 
 const patchSchema = z.object({
-  status: z.enum(["new", "triaged", "resolved"]).optional(),
+  status: z.enum(FEEDBACK_STATUSES).optional(),
   adminNote: z.string().max(4000).nullable().optional(),
 });
 
