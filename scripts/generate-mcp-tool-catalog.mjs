@@ -133,6 +133,7 @@ const HTTP_GROUP_FILES = [
   "subscriptions",
   "imports",
   "reconcile",
+  "guidance",
 ].map((g) => join(REPO_ROOT, "mcp-server", "tools", `${g}.ts`));
 const STDIO_FILES = [
   join(REPO_ROOT, "mcp-server", "register-core-tools.ts"),

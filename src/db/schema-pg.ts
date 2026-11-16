@@ -536,6 +536,50 @@ export const budgetCarryoverSets = pgTable("budget_carryover_sets", {
   check("budget_carryover_sets_target_check", sql`(${t.categoryId} IS NULL) <> (${t.groupName} IS NULL)`),
 ]);
 
+// FINLYNQ-219: a user's guidance notes, the personal half of the AI guidance
+// library (the general half is code: src/lib/guides/modules). Every text
+// column is encrypted with the user's DEK; `path_lookup` is the HMAC that
+// keeps one active note per path. Retiring keeps the row (retired_at) and its
+// revisions. Migration 20261116b_user_guidance_notes.sql.
+export const userGuidanceNotes = pgTable("user_guidance_notes", {
+  id: serial("id").primaryKey(),
+  userId: text("user_id").notNull(),
+  pathCt: text("path_ct").notNull(),
+  pathLookup: text("path_lookup").notNull(),
+  titleCt: text("title_ct").notNull(),
+  summaryCt: text("summary_ct"),
+  bodyCt: text("body_ct").notNull(),
+  version: integer("version").notNull().default(1),
+  updatedBy: text("updated_by").notNull().default("user").$type<"user" | "assistant">(),
+  retiredAt: timestamp("retired_at", { withTimezone: true }),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+}, (t) => [
+  index("idx_user_guidance_notes_user_id").on(t.userId),
+  uniqueIndex("user_guidance_notes_active_path_unique").on(t.userId, t.pathLookup).where(sql`(retired_at IS NULL)`),
+  check("user_guidance_notes_updated_by_check", sql`${t.updatedBy} IN ('user','assistant')`),
+]);
+
+// Every save and retire of a note, append-only.
+export const userGuidanceNoteRevisions = pgTable("user_guidance_note_revisions", {
+  id: serial("id").primaryKey(),
+  noteId: integer("note_id").notNull().references(() => userGuidanceNotes.id, { onDelete: "cascade" }),
+  userId: text("user_id").notNull(),
+  version: integer("version").notNull(),
+  action: text("action").notNull().$type<"save" | "retire">(),
+  pathCt: text("path_ct").notNull(),
+  titleCt: text("title_ct").notNull(),
+  summaryCt: text("summary_ct"),
+  bodyCt: text("body_ct").notNull(),
+  updatedBy: text("updated_by").notNull().$type<"user" | "assistant">(),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+}, (t) => [
+  index("idx_user_guidance_note_revisions_note").on(t.noteId, t.version),
+  index("idx_user_guidance_note_revisions_user_id").on(t.userId),
+  check("user_guidance_note_revisions_action_check", sql`${t.action} IN ('save','retire')`),
+  check("user_guidance_note_revisions_updated_by_check", sql`${t.updatedBy} IN ('user','assistant')`),
+]);
+
 export const loans = pgTable("loans", {
   id: serial("id").primaryKey(),
   userId: text("user_id").notNull(),
