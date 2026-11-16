@@ -406,7 +406,7 @@ review never prompts.
   data, 360px, light and dark. **Check on a device before promoting:** the keyboard over the adjustment and amount
   fields (the adjustment uses `numbers-and-punctuation` so a minus can be typed), the `Switch` rows, and that the
   Budgets list refreshes on coming back from the rules screen.
-- **Next build, not in 1.0.32: Budgets redesign** (2026-11-14, FINLYNQ-318, on `mobile-dev`; owner-approved mockup
+- **1.0.33 / vc42 (Android, Play internal 2026-11-16; no iOS build): Budgets redesign** (2026-11-14, FINLYNQ-318; also in 1.0.33: the Reopened feedback status label, `e8a572a`; owner-approved mockup
   https://claude.ai/artifact/L8LkS5paF1QFfZxtZMz65J). More → Budgets shows whole amounts only (`formatWholeMoney` in
   `lib/format.ts`: rounds half away from zero, `<$1` for an amount that rounds to 0 but isn't), names the currency
   once under the month ("All amounts in CAD") and writes a bare `$` on every amount (the server returns the whole
