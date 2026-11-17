@@ -3,9 +3,13 @@
 import { useRef, useState, useEffect, useCallback, useMemo } from "react";
 import { CHART_COLORS } from "@/lib/chart-colors";
 import { formatCurrency } from "@/lib/currency";
+import { Button } from "@/components/ui/button";
 import {
   buildCashFlowColumns,
+  groupKey,
+  hasGroups,
   type CashFlowItem,
+  type CashFlowLevel,
   type CashFlowNode,
 } from "@/lib/reports/cash-flow-sankey";
 
@@ -13,6 +17,8 @@ type SankeyChartProps = {
   incomeData: CashFlowItem[];
   expenseData: CashFlowItem[];
   currency?: string;
+  /** Which level the chart opens on; the user can switch. */
+  initialLevel?: CashFlowLevel;
 };
 
 type HoverInfo = {
@@ -23,9 +29,12 @@ type HoverInfo = {
   title: string;
   amount: number;
   percentage: number;
+  hint?: string;
 } | null;
 
-type PlacedNode = CashFlowNode & { y: number; h: number; color: string };
+type Side = "income" | "expense";
+
+type PlacedNode = CashFlowNode & { y: number; h: number; color: string; caption?: { y: number } };
 
 type Link = {
   key: string;
@@ -43,30 +52,24 @@ function truncateLabel(text: string, maxLen: number): string {
   return text.length > maxLen ? text.slice(0, maxLen - 1) + "…" : text;
 }
 
-function nodeColor(node: CashFlowNode, expenseIndex: number): string {
-  switch (node.kind) {
-    case "income":
-      return CHART_COLORS.positive;
-    case "surplus":
-      return CHART_COLORS.positive;
-    case "deficit":
-      return CHART_COLORS.negative;
-    case "other":
-      return CHART_COLORS.categories[11]; // slate
-    default:
-      return CHART_COLORS.categories[expenseIndex % (CHART_COLORS.categories.length - 1)];
-  }
-}
-
 /** Minimum vertical room a node takes, so a tiny item's label never overlaps the next one. */
 const MIN_SLOT = 16;
 const GAP = 8;
+/** Between categories of one expanded group: tighter, so they read as one block. */
+const CHILD_GAP = 3;
+/** Room above an expanded group for its clickable caption. */
+const CAPTION = 16;
 
-export function SankeyChart({ incomeData, expenseData, currency = "CAD" }: SankeyChartProps) {
+const SLATE = CHART_COLORS.categories[11];
+const PALETTE = CHART_COLORS.categories.slice(0, 11);
+
+export function SankeyChart({ incomeData, expenseData, currency = "CAD", initialLevel = "category" }: SankeyChartProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const tooltipRef = useRef<HTMLDivElement>(null);
   const [width, setWidth] = useState(800);
   const [hover, setHover] = useState<HoverInfo>(null);
+  const [level, setLevel] = useState<CashFlowLevel>(initialLevel);
+  const [expanded, setExpanded] = useState<ReadonlySet<string>>(() => new Set());
 
   useEffect(() => {
     if (!containerRef.current) return;
@@ -88,13 +91,19 @@ export function SankeyChart({ incomeData, expenseData, currency = "CAD" }: Sanke
     el.style.top = `${hover.y}px`;
   }, [hover]);
 
-  const columns = useMemo(() => buildCashFlowColumns(incomeData, expenseData), [incomeData, expenseData]);
+  const groupable = useMemo(() => hasGroups(incomeData) || hasGroups(expenseData), [incomeData, expenseData]);
+  const effectiveLevel: CashFlowLevel = groupable ? level : "category";
+
+  const columns = useMemo(
+    () => buildCashFlowColumns(incomeData, expenseData, { level: effectiveLevel, expanded }),
+    [incomeData, expenseData, effectiveLevel, expanded],
+  );
   const { sources, uses, totalIncome, totalExpenses, pool, surplus, deficit } = columns;
   // Percentages read against income when there is any, so "Groceries 12%" means 12% of what came in.
   const base = totalIncome > 0 ? totalIncome : pool;
 
   const showHover = useCallback(
-    (e: React.MouseEvent, key: string, title: string, amount: number) => {
+    (e: React.MouseEvent, key: string, title: string, amount: number, hint?: string) => {
       const rect = containerRef.current?.getBoundingClientRect();
       if (!rect) return;
       setHover({
@@ -104,10 +113,22 @@ export function SankeyChart({ incomeData, expenseData, currency = "CAD" }: Sanke
         title,
         amount,
         percentage: base > 0 ? (amount / base) * 100 : 0,
+        hint,
       });
     },
     [base],
   );
+
+  const toggleGroup = useCallback((side: Side, group: string) => {
+    setExpanded((prev) => {
+      const next = new Set(prev);
+      const k = groupKey(side, group);
+      if (next.has(k)) next.delete(k);
+      else next.add(k);
+      return next;
+    });
+    setHover(null);
+  }, []);
 
   if (pool === 0) {
     return (
@@ -134,26 +155,52 @@ export function SankeyChart({ incomeData, expenseData, currency = "CAD" }: Sanke
   const gapsFor = (n: number) => Math.max(0, n - 1) * GAP;
   const scale = (baseFlowHeight - Math.max(gapsFor(sources.length), gapsFor(uses.length))) / pool;
 
-  const place = (nodes: CashFlowNode[]): { placed: PlacedNode[]; extent: number } => {
-    const placed: PlacedNode[] = [];
-    let y = padding.top;
-    let expenseIndex = 0;
-    for (const n of nodes) {
-      const h = n.value * scale;
-      placed.push({ ...n, y, h, color: nodeColor(n, n.kind === "expense" ? expenseIndex++ : 0) });
-      y += Math.max(h, MIN_SLOT) + GAP;
-    }
-    return { placed, extent: y - GAP - padding.top };
+  // Colour per colourKey, in column order: an expanded group's categories share one colour.
+  const colourFor = (side: Side) => {
+    const seen = new Map<string, string>();
+    return (n: CashFlowNode): string => {
+      if (n.kind === "surplus") return CHART_COLORS.positive;
+      if (n.kind === "deficit") return CHART_COLORS.negative;
+      if (n.kind === "other") return SLATE;
+      if (side === "income" && effectiveLevel === "category") return CHART_COLORS.positive;
+      const existing = seen.get(n.colourKey);
+      if (existing) return existing;
+      const c = side === "income" ? CHART_COLORS.positive : PALETTE[seen.size % PALETTE.length];
+      seen.set(n.colourKey, c);
+      return c;
+    };
   };
 
-  const leftCol = place(sources);
-  const rightCol = place(uses);
+  const place = (nodes: CashFlowNode[], side: Side): { placed: PlacedNode[]; extent: number } => {
+    const colour = colourFor(side);
+    const placed: PlacedNode[] = [];
+    let y = padding.top;
+    let prev: CashFlowNode | undefined;
+    for (const n of nodes) {
+      const sameGroup = prev?.role === "child" && n.role === "child" && prev.group === n.group;
+      if (prev) y += sameGroup ? CHILD_GAP : GAP;
+      let caption: { y: number } | undefined;
+      if (n.role === "child" && !sameGroup) {
+        caption = { y: y + CAPTION - 5 };
+        y += CAPTION;
+      }
+      const h = n.value * scale;
+      placed.push({ ...n, y, h, color: colour(n), caption });
+      y += Math.max(h, MIN_SLOT);
+      prev = n;
+    }
+    return { placed, extent: y - padding.top };
+  };
+
+  const leftCol = place(sources, "income");
+  const rightCol = place(uses, "expense");
   const poolH = pool * scale;
   const contentH = Math.max(leftCol.extent, rightCol.extent, poolH);
   // Centre each column vertically against the tallest one.
   const shift = (extent: number) => (contentH - extent) / 2;
-  const left = { placed: leftCol.placed.map((n) => ({ ...n, y: n.y + shift(leftCol.extent) })) };
-  const right = { placed: rightCol.placed.map((n) => ({ ...n, y: n.y + shift(rightCol.extent) })) };
+  const moveBy = (n: PlacedNode, d: number): PlacedNode => ({ ...n, y: n.y + d, caption: n.caption ? { y: n.caption.y + d } : undefined });
+  const left = leftCol.placed.map((n) => moveBy(n, shift(leftCol.extent)));
+  const right = rightCol.placed.map((n) => moveBy(n, shift(rightCol.extent)));
   const poolY = padding.top + shift(poolH);
   const height = padding.top + contentH + padding.bottom;
 
@@ -162,9 +209,9 @@ export function SankeyChart({ incomeData, expenseData, currency = "CAD" }: Sanke
   const links: Link[] = [];
   {
     let into = poolY;
-    for (const n of left.placed) {
+    for (const n of left) {
       links.push({
-        key: `in:${n.name}`,
+        key: `in:${n.key}`,
         title: `${n.name} → Income`,
         value: n.value,
         color: n.color,
@@ -177,9 +224,9 @@ export function SankeyChart({ incomeData, expenseData, currency = "CAD" }: Sanke
       into += n.h;
     }
     let out = poolY;
-    for (const n of right.placed) {
+    for (const n of right) {
       links.push({
-        key: `out:${n.name}`,
+        key: `out:${n.key}`,
         title: `Income → ${n.name}`,
         value: n.value,
         color: n.color,
@@ -194,15 +241,99 @@ export function SankeyChart({ incomeData, expenseData, currency = "CAD" }: Sanke
   }
 
   const dimmed = (key: string) => hover !== null && hover.key !== key && hover.key !== "pool";
+  const expandable = (n: CashFlowNode) => n.role === "group" && (n.childCount ?? 0) > 1;
+
+  const nodeTitle = (n: CashFlowNode) => (expandable(n) ? `${n.name} (${n.childCount} categories)` : n.name);
+  const nodeHint = (n: CashFlowNode) =>
+    expandable(n) ? "Click to see its categories" : n.role === "child" ? `In ${n.group}. Click to fold it back` : undefined;
+  const onNodeClick = (side: Side, n: CashFlowNode) => {
+    if (expandable(n) || n.role === "child") toggleGroup(side, n.group ?? n.name);
+  };
+  const clickable = (n: CashFlowNode) => expandable(n) || n.role === "child";
+  const labelFor = (n: CashFlowNode) => truncateLabel(n.name, maxLabelChars - (expandable(n) ? 2 : 0)) + (expandable(n) ? " ›" : "");
+
+  const renderNode = (n: PlacedNode, side: Side) => {
+    const isLeft = side === "income";
+    const x = isLeft ? xLeft : xRight;
+    const prefix = isLeft ? "in" : "out";
+    const h = Math.max(n.h, 2);
+    return (
+      <g
+        key={`${prefix}-node-${n.key}`}
+        className="cursor-pointer"
+        onMouseMove={(e) => showHover(e, `${prefix}:${n.key}`, nodeTitle(n), n.value, nodeHint(n))}
+        onMouseLeave={() => setHover(null)}
+        onClick={() => onNodeClick(side, n)}
+        role={clickable(n) ? "button" : undefined}
+        aria-label={clickable(n) ? (expandable(n) ? `Show the categories in ${n.name}` : `Fold ${n.group} back into one group`) : undefined}
+      >
+        {n.caption && (
+          <text
+            x={isLeft ? x - labelGap : x + nodeWidth + labelGap}
+            y={n.caption.y}
+            textAnchor={isLeft ? "end" : "start"}
+            className="fill-muted-foreground text-[10px] font-semibold uppercase tracking-wide"
+          >
+            {isLeft ? `${truncateLabel(n.group ?? "", maxLabelChars)} ‹` : `‹ ${truncateLabel(n.group ?? "", maxLabelChars)}`}
+          </text>
+        )}
+        <rect x={x} y={n.y} width={nodeWidth} height={h} rx={3} fill={n.color} />
+        <text
+          x={isLeft ? x - labelGap : x + nodeWidth + labelGap}
+          y={n.y + h / 2}
+          textAnchor={isLeft ? "end" : "start"}
+          dominantBaseline="central"
+          className={[
+            "fill-foreground text-[11px]",
+            n.kind === "surplus" || n.kind === "deficit" ? "font-semibold" : "",
+            expandable(n) ? "underline decoration-dotted underline-offset-2" : "",
+          ].join(" ")}
+        >
+          {labelFor(n)}
+        </text>
+      </g>
+    );
+  };
 
   return (
     <div ref={containerRef} className="relative w-full select-none">
-      {narrow && (
-        <p className="mb-1 text-xs text-muted-foreground">
-          Income <span className="font-medium text-foreground">{formatCurrency(totalIncome, currency)}</span> · Spending{" "}
-          <span className="font-medium text-foreground">{formatCurrency(totalExpenses, currency)}</span>
-        </p>
-      )}
+      <div className="mb-2 flex flex-wrap items-center gap-2">
+        {groupable && (
+          <div className="inline-flex rounded-lg border p-0.5" role="group" aria-label="Detail">
+            <Button
+              size="sm"
+              variant={effectiveLevel === "group" ? "secondary" : "ghost"}
+              aria-pressed={effectiveLevel === "group"}
+              onClick={() => setLevel("group")}
+            >
+              Groups
+            </Button>
+            <Button
+              size="sm"
+              variant={effectiveLevel === "category" ? "secondary" : "ghost"}
+              aria-pressed={effectiveLevel === "category"}
+              onClick={() => setLevel("category")}
+            >
+              Categories
+            </Button>
+          </div>
+        )}
+        {groupable && effectiveLevel === "group" && (
+          <span className="text-xs text-muted-foreground">Click a group to see its categories.</span>
+        )}
+        {effectiveLevel === "group" && expanded.size > 0 && (
+          <Button size="sm" variant="ghost" onClick={() => setExpanded(new Set())}>
+            Fold all
+          </Button>
+        )}
+        {narrow && (
+          <p className="w-full text-xs text-muted-foreground">
+            Income <span className="font-medium text-foreground">{formatCurrency(totalIncome, currency)}</span> · Spending{" "}
+            <span className="font-medium text-foreground">{formatCurrency(totalExpenses, currency)}</span>
+          </p>
+        )}
+      </div>
+
       <svg width={width} height={height} className="overflow-visible" role="img" aria-label="Cash flow diagram">
         {/* Bands */}
         {links.map((l) => {
@@ -222,19 +353,7 @@ export function SankeyChart({ incomeData, expenseData, currency = "CAD" }: Sanke
         })}
 
         {/* Left: income sources (+ deficit) */}
-        {left.placed.map((n) => (
-          <g
-            key={`l-${n.name}`}
-            className="cursor-pointer"
-            onMouseMove={(e) => showHover(e, `in:${n.name}`, n.name, n.value)}
-            onMouseLeave={() => setHover(null)}
-          >
-            <rect x={xLeft} y={n.y} width={nodeWidth} height={Math.max(n.h, 2)} rx={3} fill={n.color} />
-            <text x={xLeft - labelGap} y={n.y + Math.max(n.h, 2) / 2} textAnchor="end" dominantBaseline="central" className="fill-foreground text-[11px]">
-              {truncateLabel(n.name, maxLabelChars)}
-            </text>
-          </g>
-        ))}
+        {left.map((n) => renderNode(n, "income"))}
 
         {/* Middle: the income pool */}
         <g
@@ -251,25 +370,7 @@ export function SankeyChart({ incomeData, expenseData, currency = "CAD" }: Sanke
         </g>
 
         {/* Right: expense categories (+ surplus) */}
-        {right.placed.map((n) => (
-          <g
-            key={`r-${n.name}`}
-            className="cursor-pointer"
-            onMouseMove={(e) => showHover(e, `out:${n.name}`, n.name, n.value)}
-            onMouseLeave={() => setHover(null)}
-          >
-            <rect x={xRight} y={n.y} width={nodeWidth} height={Math.max(n.h, 2)} rx={3} fill={n.color} />
-            <text
-              x={xRight + nodeWidth + labelGap}
-              y={n.y + Math.max(n.h, 2) / 2}
-              textAnchor="start"
-              dominantBaseline="central"
-              className={n.kind === "surplus" ? "fill-foreground text-[11px] font-semibold" : "fill-foreground text-[11px]"}
-            >
-              {truncateLabel(n.name, maxLabelChars)}
-            </text>
-          </g>
-        ))}
+        {right.map((n) => renderNode(n, "expense"))}
 
         {/* Column headers (on a phone they don't fit side by side; the line above the chart carries them) */}
         {!narrow && (
@@ -314,6 +415,7 @@ export function SankeyChart({ incomeData, expenseData, currency = "CAD" }: Sanke
             {formatCurrency(hover.amount, currency)}
             {totalIncome > 0 ? ` (${hover.percentage.toFixed(1)}% of income)` : ""}
           </p>
+          {hover.hint && <p className="text-muted-foreground">{hover.hint}</p>}
         </div>
       )}
     </div>

@@ -5,6 +5,9 @@ import { join } from "path";
 import {
   buildCashFlowColumns,
   foldSmallItems,
+  groupKey,
+  hasGroups,
+  UNGROUPED_LABEL,
   DEFICIT_LABEL,
   OTHER_INCOME_LABEL,
   OTHER_SPENDING_LABEL,
@@ -22,7 +25,7 @@ describe("buildCashFlowColumns", () => {
     expect(c.pool).toBe(5200);
     expect(c.surplus).toBe(2400);
     expect(c.deficit).toBe(0);
-    expect(c.uses.at(-1)).toEqual({ name: SURPLUS_LABEL, value: 2400, kind: "surplus" });
+    expect(c.uses.at(-1)).toMatchObject({ name: SURPLUS_LABEL, value: 2400, kind: "surplus" });
     expect(c.sources.some((n) => n.kind === "deficit")).toBe(false);
     expect(sum(c.sources)).toBeCloseTo(c.pool);
     expect(sum(c.uses)).toBeCloseTo(c.pool);
@@ -32,7 +35,7 @@ describe("buildCashFlowColumns", () => {
     const c = buildCashFlowColumns([{ name: "Wages", value: 1000 }], [{ name: "Rent", value: 1500 }]);
     expect(c.pool).toBe(1500);
     expect(c.deficit).toBe(500);
-    expect(c.sources.at(-1)).toEqual({ name: DEFICIT_LABEL, value: 500, kind: "deficit" });
+    expect(c.sources.at(-1)).toMatchObject({ name: DEFICIT_LABEL, value: 500, kind: "deficit" });
     expect(c.uses.some((n) => n.kind === "surplus")).toBe(false);
     expect(sum(c.sources)).toBeCloseTo(c.pool);
     expect(sum(c.uses)).toBeCloseTo(c.pool);
@@ -45,7 +48,7 @@ describe("buildCashFlowColumns", () => {
     expect(c.surplus).toBe(1500); // with the old top-10 cut it read 2000
     const spending = c.uses.filter((n) => n.kind !== "surplus");
     expect(spending).toHaveLength(10);
-    expect(spending.at(-1)).toEqual({ name: OTHER_SPENDING_LABEL, value: 600, kind: "other" });
+    expect(spending.at(-1)).toMatchObject({ name: OTHER_SPENDING_LABEL, value: 600, kind: "other" });
   });
 
   it("drops zero and negative rows and handles an empty period", () => {
@@ -86,6 +89,64 @@ describe("foldSmallItems", () => {
     expect(nodes).toHaveLength(7);
     expect(nodes[0].name).toBe("I11");
     expect(sum(nodes)).toBe(sum(items));
+  });
+});
+
+describe("group level", () => {
+  const expenses = [
+    { name: "Groceries", value: 600, group: "Food" },
+    { name: "Dining", value: 400, group: "Food" },
+    { name: "Rent", value: 1500, group: "Housing" },
+    { name: "Gift", value: 100, group: null },
+  ];
+  const income = [{ name: "Salary", value: 5000, group: "Work" }];
+
+  it("shows one node per group, with how many categories it holds", () => {
+    const c = buildCashFlowColumns(income, expenses, { level: "group" });
+    const spend = c.uses.filter((n) => n.kind !== "surplus");
+    expect(spend.map((n) => [n.name, n.value, n.role, n.childCount])).toEqual([
+      ["Housing", 1500, "group", 1],
+      ["Food", 1000, "group", 2],
+      [UNGROUPED_LABEL, 100, "group", 1],
+    ]);
+    expect(c.totalExpenses).toBe(2600);
+  });
+
+  it("an expanded group is replaced by its categories, in its place, sharing one colour", () => {
+    const c = buildCashFlowColumns(income, expenses, { level: "group", expanded: new Set([groupKey("expense", "Food")]) });
+    const spend = c.uses.filter((n) => n.kind !== "surplus");
+    expect(spend.map((n) => n.name)).toEqual(["Housing", "Groceries", "Dining", UNGROUPED_LABEL]);
+    const food = spend.filter((n) => n.group === "Food");
+    expect(food.every((n) => n.role === "child" && n.colourKey === "g:Food")).toBe(true);
+    // Totals don't move when a group opens.
+    expect(c.surplus).toBe(5000 - 2600);
+  });
+
+  it("expanding is per side: the income key doesn't open an expense group of the same name", () => {
+    const c = buildCashFlowColumns(income, expenses, { level: "group", expanded: new Set([groupKey("income", "Food")]) });
+    expect(c.uses.some((n) => n.role === "child")).toBe(false);
+  });
+
+  it("an expanded group is never folded into Other, even when it is small", () => {
+    const many = [
+      ...Array.from({ length: 12 }, (_, i) => ({ name: `Big${i}`, value: 1000, group: `G${i}` })),
+      { name: "Tiny A", value: 5, group: "Small" },
+      { name: "Tiny B", value: 5, group: "Small" },
+    ];
+    const c = buildCashFlowColumns([{ name: "Salary", value: 20000 }], many, {
+      level: "group",
+      expanded: new Set([groupKey("expense", "Small")]),
+    });
+    const names = c.uses.map((n) => n.name);
+    expect(names).toContain("Tiny A");
+    expect(names).toContain("Tiny B");
+    expect(names).toContain(OTHER_SPENDING_LABEL);
+    expect(c.uses.filter((n) => n.kind !== "surplus").reduce((s, n) => s + n.value, 0)).toBe(12010);
+  });
+
+  it("hasGroups is false when no category has a group, so the switch can hide", () => {
+    expect(hasGroups([{ name: "A", value: 1 }, { name: "B", value: 2, group: " " }])).toBe(false);
+    expect(hasGroups(expenses)).toBe(true);
   });
 });
 
