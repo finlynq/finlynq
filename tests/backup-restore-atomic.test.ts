@@ -175,6 +175,28 @@ describeDb("POST /api/data/import — a restore is all-or-nothing", () => {
     expect(u.at).toBeNull();
   });
 
+  it("restores AI guidance notes when the backup has them, keeps them when it doesn't", async () => {
+    const { saveNote, listNotes } = await import("@/lib/guides/notes-store");
+    await saveNote(userId, TEST_DEK, { path: "kept.md", title: "Kept", body: "Survives an old backup.", expectedVersion: 0, by: "user" });
+
+    expect((await POST(restoreRequest(backupWith()))).status).toBe(200);
+    expect((await listNotes(userId, TEST_DEK)).map((n) => n.path)).toEqual(["kept.md"]);
+
+    const withNotes = backupWith();
+    (withNotes.data as Record<string, unknown>).guidanceNotes = [
+      { path: "banks/rbc.md", title: "RBC", summary: null, body: "Signs reversed.", updatedBy: "assistant" },
+    ];
+    expect((await POST(restoreRequest(withNotes))).status).toBe(200);
+    expect(await listNotes(userId, TEST_DEK)).toEqual([expect.objectContaining({ path: "banks/rbc.md", updatedBy: "assistant", version: 1 })]);
+
+    const bad = backupWith();
+    (bad.data as Record<string, unknown>).guidanceNotes = [{ path: "../x.md", title: "x", body: "x" }];
+    const res = await POST(restoreRequest(bad));
+    expect(res.status).toBe(400);
+    expect((await res.json()).error).toMatch(/AI guidance note 1.*Nothing was changed/);
+    expect((await listNotes(userId, TEST_DEK)).map((n) => n.path)).toEqual(["banks/rbc.md"]);
+  });
+
   it("changes nothing when the backup has a row the restore refuses", async () => {
     const res = await POST(restoreRequest(backupWith({ txCategoryId: 999 })));
     expect(res.status).toBe(400);

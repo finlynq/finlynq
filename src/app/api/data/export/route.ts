@@ -5,6 +5,7 @@ import { pbkdf2Sync, randomBytes, createCipheriv } from "crypto";
 import { requireAuth } from "@/lib/auth/require-auth";
 import { tryDecryptField } from "@/lib/crypto/envelope";
 import { decryptStaged } from "@/lib/crypto/staging-envelope";
+import { exportNotes } from "@/lib/guides/notes-store";
 import { decryptStagingMeta } from "@/lib/crypto/staging-metadata";
 import { safeErrorMessage } from "@/lib/validate";
 import { validatePasswordStrength } from "@/lib/auth/password-policy";
@@ -263,6 +264,11 @@ async function handleExport(request: NextRequest) {
       };
     });
 
+    // FINLYNQ-219: AI guidance notes, decrypted like transactions so the file
+    // restores into any account. Without a key they can't be read, so the
+    // key is left out and a restore keeps whatever notes the account has.
+    const guidanceNotes = dek ? await exportNotes(userId, dek) : undefined;
+
     const dateStr = new Date().toISOString().slice(0, 10);
     const backup = {
       version: "1.0",
@@ -294,6 +300,7 @@ async function handleExport(request: NextRequest) {
         fxOverrides,
         settings: settingsRows,
         contributionRoom,
+        ...(guidanceNotes ? { guidanceNotes } : {}),
       },
     };
 

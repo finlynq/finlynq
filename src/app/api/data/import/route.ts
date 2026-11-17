@@ -3,6 +3,7 @@ import { db, schema, withDbTransaction } from "@/db";
 import { eq, getTableColumns, inArray, is } from "drizzle-orm";
 import { PgTimestamp, type PgTable } from "drizzle-orm/pg-core";
 import { requireEncryption } from "@/lib/auth/require-encryption";
+import { replaceNotesFromBackup } from "@/lib/guides/notes-store";
 import { encryptField, isEncrypted } from "@/lib/crypto/envelope";
 import { invalidateUser as invalidateUserTxCache } from "@/lib/mcp/user-tx-cache";
 import { AppError, logApiError } from "@/lib/validate";
@@ -109,6 +110,9 @@ interface BackupData {
     fxOverrides?: Row[]; // current backups
     settings?: Row[];
     contributionRoom?: Row[];
+    /** FINLYNQ-219: AI guidance notes, plain text. Absent in older backups
+     *  (and in exports made without a key): then the account's notes are kept. */
+    guidanceNotes?: Row[];
   };
 }
 
@@ -305,6 +309,7 @@ export async function POST(request: NextRequest) {
     fxOverrides: d.fxOverrides?.length ?? d.fxRates?.length ?? 0,
     settings: d.settings?.length ?? 0,
     contributionRoom: d.contributionRoom?.length ?? 0,
+    guidanceNotes: d.guidanceNotes?.length ?? 0,
   };
 
   if (!confirm) {
@@ -969,6 +974,13 @@ export async function POST(request: NextRequest) {
       }
       if (d.contributionRoom?.length) {
         await db.insert(schema.contributionRoom).values(withDates(schema.contributionRoom, strip(d.contributionRoom, userId)) as (typeof schema.contributionRoom.$inferInsert)[]);
+      }
+
+      // FINLYNQ-219: AI guidance notes replace the account's own, but only when
+      // the backup carries them (an older backup leaves the notes alone).
+      if (Array.isArray(d.guidanceNotes)) {
+        const notesResult = await replaceNotesFromBackup(userId, dek, d.guidanceNotes);
+        if (!notesResult.ok) throw new RestoreDataError(notesResult.error);
       }
 
       // Settings: upsert by key

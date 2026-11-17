@@ -11,7 +11,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { registerPgTools } from "../mcp-server/register-tools-pg";
 import { TEST_DEK, bootstrapTestDb, resetTestDb, shutdownTestDb, createTestUser } from "./helpers/portfolio-fixtures";
 import { db } from "@/db";
-import { listNotes, noteHistory, readNote, retireNote, saveNote } from "@/lib/guides/notes-store";
+import { exportNotes, listNotes, noteHistory, readNote, replaceNotesFromBackup, retireNote, saveNote } from "@/lib/guides/notes-store";
 import { NOTE_MAX_ACTIVE } from "@/lib/guides/notes-rules";
 import { clearAllUserData } from "@/lib/auth/queries";
 import { GUIDE_MODULE_IDS } from "@/lib/guides/registry";
@@ -130,6 +130,32 @@ describeDb("guidance notes", () => {
     const n = (await db.execute(sql`SELECT count(*)::int AS c FROM user_guidance_notes WHERE user_id = ${userId}`)) as unknown as { rows: { c: number }[] };
     const r = (await db.execute(sql`SELECT count(*)::int AS c FROM user_guidance_note_revisions WHERE user_id = ${userId}`)) as unknown as { rows: { c: number }[] };
     expect([n.rows[0].c, r.rows[0].c]).toEqual([0, 0]);
+  });
+
+  it("backup: exports plain text, and a restore into another account and key brings it back", async () => {
+    await saveNote(userId, TEST_DEK, { ...note, expectedVersion: 0, by: "assistant" });
+    const retired = await saveNote(userId, TEST_DEK, { ...note, path: "old.md", expectedVersion: 0, by: "user" });
+    if (!retired.ok) throw new Error("save failed");
+    await retireNote(userId, TEST_DEK, { id: retired.note.id, expectedVersion: 1, by: "user" });
+
+    const exported = await exportNotes(userId, TEST_DEK);
+    expect(exported).toEqual([{ path: note.path, title: note.title, summary: note.summary, body: note.body, updatedBy: "assistant" }]);
+
+    const other = await createTestUser();
+    const otherKey = Buffer.alloc(32, 0xcc);
+    await saveNote(other, otherKey, { ...note, path: "will-be-replaced.md", expectedVersion: 0, by: "user" });
+    expect(await replaceNotesFromBackup(other, otherKey, JSON.parse(JSON.stringify(exported)))).toEqual({ ok: true, restored: 1 });
+    const back = await listNotes(other, otherKey);
+    expect(back).toEqual([expect.objectContaining({ path: note.path, version: 1, updatedBy: "assistant", unreadable: false })]);
+    expect((await readNote(other, otherKey, { path: note.path }))!.body).toBe(note.body);
+    expect(await noteHistory(other, otherKey, back[0].id)).toHaveLength(1);
+  });
+
+  it("backup: a bad or duplicate note stops the restore", async () => {
+    await saveNote(userId, TEST_DEK, { ...note, expectedVersion: 0, by: "user" });
+    expect(await replaceNotesFromBackup(userId, TEST_DEK, [{ path: "../x.md", title: "t", body: "b" }])).toMatchObject({ ok: false, error: expect.stringMatching(/note 1/) });
+    expect(await replaceNotesFromBackup(userId, TEST_DEK, [{ path: "a.md", title: "t", body: "b" }, { path: "A.md", title: "t", body: "b" }])).toMatchObject({ ok: false, error: expect.stringMatching(/two .* a\.md/) });
+    expect(await listNotes(userId, TEST_DEK)).toHaveLength(1);
   });
 
   describe("MCP", () => {

@@ -116,4 +116,11 @@ describe("finlynq_help and get_guidance read the registry", () => {
     expect(read("mcp-server/auto-annotations.ts")).toContain("manage_guidance_notes: { destructiveHint: true }");
     expect(read("src/lib/mcp/tool-counts.ts")).toContain("get_guidance");
   });
+
+  it("the phone reads the same guides from GET /api/guidance/guides", () => {
+    const route = read("src/app/api/guidance/guides/route.ts");
+    expect(route).toContain('from "@/lib/guides/registry"');
+    expect(route).toMatch(/GUIDE_MODULES\.map\(/);
+    expect(route).toMatch(/apiHandler\(\{ auth: "auth" \}/);
+  });
 });
