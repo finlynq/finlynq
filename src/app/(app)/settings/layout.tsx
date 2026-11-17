@@ -28,6 +28,7 @@ import {
   Link2,
   Upload,
   Landmark,
+  NotebookPen,
 } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 
@@ -51,6 +52,8 @@ const NAV_ITEMS: NavItem[] = [
   { href: "/settings/investments", label: "Investments", icon: Briefcase },
   { href: "/settings/display", label: "Display & Ordering", icon: Sliders },
   { href: "/settings/integrations", label: "Integrations", icon: Server },
+  // FINLYNQ-219: guides + personal notes an AI assistant reads.
+  { href: "/settings/ai-guidance", label: "AI guidance", icon: NotebookPen },
   { href: "/settings/developer", label: "Developer", icon: Wrench },
 ];
 

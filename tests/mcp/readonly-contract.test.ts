@@ -57,7 +57,8 @@ const HAS_TEST_DB = /\/[^/]*_test([?#]|$)/.test(DB_URL);
 // This test enumerates the REGISTERED surface (== advertised now that no aliases
 // remain). Bump this when a read tool is added AND add its contract-table entry
 // below; the count assert is the tripwire.
-const EXPECTED_READONLY_COUNT = 33;
+// 34 with get_guidance (FINLYNQ-219, 2026-11-16).
+const EXPECTED_READONLY_COUNT = 34;
 
 /**
  * A single MCP `content` response. Every handler returns `{ content: [{ type,
@@ -204,6 +205,14 @@ const CONTRACT: Record<string, Entry> = {
 
   // ── Help ──
   finlynq_help: { assert: (d) => expect(isObj(d) || Array.isArray(d)).toBe(true) },
+
+  // ── Guidance (FINLYNQ-219) — the index of guides + the user's notes ──
+  get_guidance: {
+    assert: (d) => {
+      expect(isObj(d)).toBe(true);
+      expect(Array.isArray((d as { guides?: unknown }).guides)).toBe(true);
+    },
+  },
 };
 
 // ─── Register tools against a mock server + enumerate read-only set ───────────

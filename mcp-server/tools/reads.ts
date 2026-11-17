@@ -8,6 +8,7 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { loadBudgetMonth } from "../../src/lib/budgets/load-month";
 import type { BudgetLine, LinePlan } from "../../src/lib/budgets/month";
+import { GUIDE_MODULES, GUIDE_MODULE_IDS, findGuideModule, guideModuleSummary } from "../../src/lib/guides/registry";
 import {
   q,
   err,
@@ -1519,7 +1520,7 @@ export function registerReadsTools(server: McpServer, ctx: PgToolContext) {
     "finlynq_help",
     "Discover available Finlynq tools, schema, and usage examples. Finlynq is a personal-finance TRACKING app: every write tool records a bookkeeping entry in the user's own database and never connects to a bank or brokerage or moves real money. Full docs: https://finlynq.com/mcp-guide",
     {
-      topic: z.enum(["tools", "schema", "examples", "write", "portfolio", "loans", "reconcile", "modes", "safety", "valuation"]).optional().describe("Help topic (default: tools). `loans` documents how to record a loan payment, its interest, and a loan's own schedule. `modes` documents every multi-mode tool's modes with an example each; `safety` documents the destructive-tool two-step (confirmation tokens) + echo guards; `valuation` documents the uniform `basis` field on every money-bearing response + each tool's default basis."),
+      topic: z.enum(["tools", "schema", "examples", "write", "modes", "safety", "valuation", ...GUIDE_MODULE_IDS] as [string, ...string[]]).optional().describe("Help topic (default: tools). Workflow guides (" + GUIDE_MODULE_IDS.join(", ") + ") return Markdown, the same text get_guidance(module) returns. `modes` documents every multi-mode tool's modes with an example each; `safety` documents the destructive-tool two-step (confirmation tokens) + echo guards; `valuation` documents the uniform `basis` field on every money-bearing response + each tool's default basis."),
       tool_name: z.string().optional().describe("Get help for a specific tool"),
     },
     async ({ topic, tool_name }) => {
@@ -1569,6 +1570,8 @@ export function registerReadsTools(server: McpServer, ctx: PgToolContext) {
 
       if (t === "tools") {
         return dataResponse({
+          guides: GUIDE_MODULES.map(guideModuleSummary),
+          guides_note: "Workflow guides: finlynq_help(topic=<id>) or get_guidance(module=<id>). get_guidance() with no arguments also lists the user's own notes.",
           read_tools: ["get_account_balances", "search_transactions", "get_budget_summary", "get_spending_trends", "get_income_statement", "get_net_worth", "get_categories", "get_recurring_transactions", "get_financial_health_score", "get_spending_anomalies", "get_spotlight_items", "get_weekly_recap", "get_cash_flow_forecast"],
           write_tools: ["manage_transactions (op: record | update | delete; record takes one row OR transactions[])", "manage_transfers (op: record | update | delete)", "manage_splits (op: list | add | update | delete | replace)", "manage_budgets (op: set | delete | fill | settings | carryover | rules | add_rule | update_rule | delete_rule | adjust)", "manage_accounts (op: add | update | delete | set_mode)", "manage_goals (op: add | update | delete | list)", "manage_categories (op: create | rename | merge | delete)", "manage_rules (op: create | update | delete | list | reorder)", "manage_subscriptions (op: add | update | delete | list)", "manage_loans (op: add | update | delete | list | post_interest | set_schedule | set_interest | set_payment | reset_schedule)", "manage_fx_overrides (op: set | delete | list)", "apply_rules_to_uncategorized"],
           portfolio_tools: ["get_portfolio_analysis", "get_portfolio_performance", "analyze_holding", "trace_holding_quantity", "get_investment_insights"],
@@ -1630,45 +1633,16 @@ export function registerReadsTools(server: McpServer, ctx: PgToolContext) {
         });
       }
 
-      if (t === "portfolio") {
+      // FINLYNQ-219: workflow topics are guide modules (src/lib/guides), shared
+      // with get_guidance and Settings → AI guidance. Add a module there and it
+      // appears here with no change to this tool.
+      const guide = findGuideModule(t);
+      if (guide) {
         return dataResponse({
-          read_tools: ["get_portfolio_analysis", "get_portfolio_performance", "analyze_holding", "trace_holding_quantity", "get_investment_insights"],
-          write_tools: ["portfolio_record_entry (entry_type: buy | sell | swap | transfer | income_expense | fx_conversion | deposit | withdrawal)", "manage_holdings (op: add | update | delete)"],
-          modes: "get_investment_insights supports mode: 'patterns' (default) | 'rebalancing' (needs targets) | 'benchmark' (needs benchmark)",
-          note_on_writes: "Investment activity MUST go through portfolio_record_entry (manage_transactions/manage_transfers reject investment accounts). Buys/sells need an existing cash sleeve in the trade currency — manage_holdings(op='add') a 'Cash' holding for that currency first if missing. (v4.1 CLEAN BREAK: the old portfolio_buy/sell/… hidden aliases were REMOVED — use portfolio_record_entry entry_types.)", // lint-allow-retired: names the retired aliases as history, not a remedy
-          disclaimer: PORTFOLIO_DISCLAIMER,
-          note: "All portfolio read tools return a disclaimer field. Not financial advice.",
-        });
-      }
-
-      if (t === "loans") {
-        return dataResponse({
-          read_tools: ["manage_loans (op: list)", "get_loan_amortization", "get_debt_payoff_plan"],
-          write_tools: ["manage_loans (op: add | update | delete | post_interest | set_schedule | set_interest | set_payment | reset_schedule)"],
-          recording_a_payment: "A loan payment is ONE plain transfer into the loan's linked account (manage_transfers). Never split it into principal and interest.",
-          recording_interest: "Interest is a SEPARATE expense on the loan's linked account. manage_loans(op:'post_interest', loan_id) books the oldest due period at the schedule's figure (pass `amount` when the lender charged something else), or record it yourself with manage_transactions on that account in the loan's interest category. It adds to what is owed, the payment takes the full amount off, and the balance falls by the principal only.",
-          what_counts_as_booked: "Any transaction on the linked account in the loan's interest category counts, however it was entered, and is matched to the nearest payment date. post_interest refuses a period that already has interest.",
-          schedule: "A schedule is calculated from principal/rate/term or payment unless the loan has its own. set_interest overrides the interest of single calculated rows. set_payment changes the payment of single calculated rows while the interest stays calculated from the balance, so later rows and the payoff date follow. set_schedule supplies complete rows {date, payment, interest} that replace the calculation (merge:true to change a few). reset_schedule goes back to calculated. get_loan_amortization returns the rows in effect and `scheduleMode`.",
-          interest_check: "get_loan_amortization returns `interestCheck` once interest is booked: whether the lender charged more or less than the schedule, plus a suggested rate when the difference is steady. It is judged on the most recent booked payments ONLY, because an extra payment or a change of terms shifts every later period. Always tell the user the `window` it covers.",
-        });
-      }
-
-      if (t === "reconcile") {
-        // The AI-native reconciliation runbook: file-in-chat → staged →
-        // bucketed match → batched commit → balance anchor, over the 3 folded
-        // union tools (reconcile / manage_statement_import / manage_bank_ledger)
-        // + the standalone get_reconciliation_summary. All default-ON.
-        return dataResponse({
-          read_tools: ["get_reconciliation_summary", "reconcile(op='suggest')", "manage_bank_ledger(op='find_duplicates')", "manage_bank_ledger(op='list_anchors')"],
-          write_tools: ["manage_statement_import(op='upload')", "manage_statement_import(op='send_to_bank_ledger')", "manage_bank_ledger(op='delete_row')", "manage_bank_ledger(op='upsert_anchor')", "reconcile(op='materialize')", "reconcile(op='unlink')", "manage_accounts(op='set_mode')", "manage_statement_import(op='apply_rules')"],
-          bulk_tools: ["reconcile(op='accept', pairs[])", "reconcile(op='apply_rules')"],
-          discover: "get_reconciliation_summary is in the DEFAULT profile — call it first (portfolio-wide { totals, accounts }). The whole reconcile/import cohort is default-ON in every session now — no scope or setting to grant.",
-          phase_1_ingest: "Parse the CSV/OFX/QFX/PDF the user dropped INTO chat yourself — normalize to {date, payee, amount, balance?}, detect the sign convention + date format, extract the closing balance + statement period. Then make ONE manage_statement_import(op='upload', fileContent[base64], fileName, accountId) call (NOT per-row staging). It returns a real staged_imports.id. IDEMPOTENT by content hash: re-sending the SAME bytes while a pending import exists returns { stagedImportId, duplicateOf } and stages nothing — so a retry never double-stages.",
-          phase_2_stage_dedup: "BEFORE matching, run manage_bank_ledger(op='find_duplicates', accountId) to catch month-boundary overlap with prior statements (distinct ids for one event). Duplicates are FLAGGED (report 'n already in ledger, skipped'), never silently dropped; manage_bank_ledger(op='delete_row', bankTransactionId, dryRun:true→false) removes an extra, keeping canonicalId (oldest).",
-          phase_3_match_buckets: "reconcile(op='suggest', accountId) leads with buckets: EXACT (amount delta 0 + date ±3d) → batch-approve material; FUZZY (looser amount/date) → a compact confirm/reject list for the USER — NEVER auto-commit; NO-MATCH (= bankOnly ids) → candidate NEW transactions: reconcile(op='apply_rules') for known payees, suggest_transaction_details for novel ones, and for a RECURRING novel payee propose a persistent rule via test_rule (dry-run) before creating it.",
-          phase_4_commit_batched: "Commit in BATCHES, one confirmation token per batch — never per row. manage_statement_import(op='send_to_bank_ledger', stagedImportId) promotes the pending import into bank_transactions ONLY (no `transactions`; use op='approve' only for a first import of a brand-new account). reconcile(op='accept', pairs[]) links the exact bucket's tx↔bank pairs in ONE call (positional results; partial commit). reconcile(op='apply_rules', bankRowIds) is a two-step: preview → confirmationToken → resend token + autoMaterialize:true (ONE token for the whole batch). A 200-row statement = ~3 token round-trips, not 200.",
-          phase_5_anchor_verify: "manage_bank_ledger(op='upsert_anchor', accountId, date, amount, currency) with the statement's closing balance/date, then re-run get_reconciliation_summary — the account's balanceDelta MUST read 0. A nonzero delta means you're not done: drill in with reconcile(op='suggest') and NAME the explaining rows (pending txns, fees). Final report to the user: 'n matched / n created / n dup-skipped / m flagged / delta=<x>'.",
-          note: "All reconcile ops are HTTP-only and need an unlocked DEK. manage_statement_import(op='upload') stages a real staged_imports.id; an unrecognised/unparseable file returns detectedFormat:'unrecognised' and creates nothing. op='send_to_bank_ledger' writes ONLY bank_transactions; op='approve' is the one that CREATES ledger transactions (first-import only). The FUZZY bucket is never auto-committed — always route it through the user.",
+          topic: guide.id,
+          title: guide.title,
+          markdown: guide.markdown,
+          ...(guide.id === "portfolio" ? { disclaimer: PORTFOLIO_DISCLAIMER } : {}),
         });
       }
 

@@ -93,6 +93,8 @@ export const TOOL_ANNOTATION_OVERRIDES: Record<string, ToolAnnotations> = {
   manage_loans: { destructiveHint: true },
   // op:'rebuild' resets a position's hand-made lot matching.
   manage_lots: { destructiveHint: true },
+  // FINLYNQ-219: op:'retire' hides a user's guidance note.
+  manage_guidance_notes: { destructiveHint: true },
   // Phase 3 (splits / transactions / transfers):
   manage_splits: { destructiveHint: true },
   manage_transactions: { destructiveHint: true },

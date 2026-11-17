@@ -53,6 +53,7 @@ import {
 } from "../src/lib/csv-parser.js";
 import { parseOfx } from "../src/lib/ofx-parser.js";
 import { type RawTransaction } from "../src/lib/import-pipeline.js";
+import { GUIDE_MODULE_IDS, findGuideModule } from "../src/lib/guides/registry.js";
 
 // FINLYNQ-84: rules are JSONB conditions+actions. Stdio matcher mirrors
 // the structure from src/lib/auto-categorize.ts but trims to what stdio
@@ -343,6 +344,10 @@ async function autoCategory(sqlite: PgCompatDb, userId: string, payee: string): 
   ).get(userId, payee) as { category_id: number } | undefined;
   return hist?.category_id ?? null;
 }
+
+// FINLYNQ-219: the guide modules are written for the web (HTTP) connection.
+const STDIO_GUIDE_NOTE =
+  "This guide is written for the web (HTTP) connection. Over this local connection some tool names differ (see topic='tools') and the user's personal notes (get_guidance / manage_guidance_notes) are not available, since they need the user's encryption key.";
 
 const PORTFOLIO_DISCLAIMER =
   "⚠️ DISCLAIMER: This analysis is for informational purposes only and does not constitute financial advice. Past performance is not indicative of future results. Consult a qualified financial advisor before making investment decisions.";
@@ -1838,7 +1843,7 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
     "finlynq_help",
     "Discover available tools, schema, and usage examples",
     {
-      topic: z.enum(["tools", "schema", "examples", "write", "portfolio"]).optional(),
+      topic: z.enum([...new Set(["tools", "schema", "examples", "write", "portfolio", ...GUIDE_MODULE_IDS])] as [string, ...string[]]).optional().describe("Help topic (default: tools). Workflow guides: " + GUIDE_MODULE_IDS.join(", ") + "."),
       tool_name: z.string().optional().describe("Get help for a specific tool"),
     },
     async ({ topic, tool_name }) => {
@@ -1907,7 +1912,13 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
         tools: ["get_portfolio_analysis", "get_portfolio_performance", "analyze_holding", "trace_holding_quantity", "get_investment_insights"],
         modes: "get_investment_insights supports mode: 'patterns' (default) | 'rebalancing' (needs targets) | 'benchmark' (needs benchmark)",
         disclaimer: PORTFOLIO_DISCLAIMER,
+        guide_markdown: findGuideModule("portfolio")?.markdown,
+        guide_note: STDIO_GUIDE_NOTE,
       });
+
+      // FINLYNQ-219: the workflow guides shared with the web connection.
+      const guide = findGuideModule(t);
+      if (guide) return dataResponse({ topic: guide.id, title: guide.title, markdown: guide.markdown, guide_note: STDIO_GUIDE_NOTE });
 
       if (t === "write") return dataResponse({
         primary_add: "record_transaction — smart defaults, fuzzy matching",

@@ -847,6 +847,9 @@ async function deleteAllUserDataTx(tx: TxClient, userId: string) {
   await tx.delete(s.budgetGroupAmounts).where(eq(s.budgetGroupAmounts.userId, userId));
   await tx.delete(s.budgetCarryoverSets).where(eq(s.budgetCarryoverSets.userId, userId));
   await tx.delete(s.budgetRules).where(eq(s.budgetRules.userId, userId));
+  // FINLYNQ-219 guidance notes: revisions first (they reference the notes).
+  await tx.delete(s.userGuidanceNoteRevisions).where(eq(s.userGuidanceNoteRevisions.userId, userId));
+  await tx.delete(s.userGuidanceNotes).where(eq(s.userGuidanceNotes.userId, userId));
   await tx.delete(s.transactionRules).where(eq(s.transactionRules.userId, userId));
   await tx.delete(s.importTemplates).where(eq(s.importTemplates.userId, userId));
   await tx.delete(s.transactions).where(eq(s.transactions.userId, userId));
