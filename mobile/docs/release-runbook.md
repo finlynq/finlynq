@@ -426,3 +426,13 @@ review never prompts.
   before promoting:** the 44px month buttons and chip row at 375-390px, the hero amount not wrapping at 7 digits
   (`adjustsFontSizeToFit` only works natively), and the dashed "+ Set budget" border (Android draws dashed borders
   only with a border radius, which it has).
+- **1.0.34 / vc43 (Android, Play internal 2026-11-17; no iOS build): AI guidance** (FINLYNQ-219, `284bfd3`). More →
+  **AI guidance** lists the notes an AI assistant reads before it starts (`GuidanceScreen`, tabs Your notes / Finlynq
+  guides) and opens a note to read, edit, see its history or retire (`GuidanceNoteScreen`), or a guide read-only
+  (`GuideScreen`), over the web's `/api/guidance/notes` routes and `GET /api/guidance/guides` (prod since PR #417).
+  Rules and the Markdown reader mirror the web's (`lib/guidance.ts`, `lib/guidance-markdown.ts`, pinned in
+  `guidance.test.tsx` with the web's own cases). A save whose version is stale shows the server's message and keeps
+  the typed text; a note saved under another key shows as "Can't be read in this session" and can only be retired.
+  **Not seen through react-native-web or on a device. Check before promoting:** the keyboard over the note body
+  (`KeyboardAvoidingView behavior="padding"`, as the feedback reply box), long notes scrolling, and the list
+  refreshing after a save or retire.
