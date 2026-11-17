@@ -156,4 +156,10 @@ describe("Reports page feeds every category to the chart", () => {
     const block = src.slice(src.indexOf("const sankeyExpenses"), src.indexOf("const groupItems"));
     expect(block).not.toMatch(/\.slice\(/);
   });
+  it("Cash Flow and Year over Year are shown to everyone, not only in Developer mode", () => {
+    const src = readFileSync(join(__dirname, "..", "src", "app", "(app)", "reports", "page.tsx"), "utf8");
+    expect(src).not.toMatch(/useDevMode|devMode/);
+    expect(src).toMatch(/<TabsTrigger value="cashflow">/);
+    expect(src).toMatch(/<TabsTrigger value="yoy">/);
+  });
 });
