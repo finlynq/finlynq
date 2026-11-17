@@ -335,12 +335,13 @@ export const api = {
     });
   },
 
-  delete<T>(path: string): Promise<ApiResponse<T>> {
-    return request<T>(path, { method: "DELETE" });
+  delete<T>(path: string, body?: unknown): Promise<ApiResponse<T>> {
+    return request<T>(path, { method: "DELETE", body: body ? JSON.stringify(body) : undefined });
   },
 };
 
 // Typed endpoint helpers
+import type { GuideModule, NoteFull, NoteRevision, NoteSummary } from "../lib/guidance";
 import type {
   BudgetFillRequest,
   BudgetFillResult,
@@ -929,6 +930,19 @@ export const endpoints = {
     api.post<FeedbackMessage>(`/api/feedback/${id}/reply`, { body }),
   markFeedbackRead: (id: number) =>
     api.post<{ ok: boolean }>(`/api/feedback/${id}/read`),
+
+  // AI guidance (FINLYNQ-219): Finlynq's guides + the user's notes, the same
+  // routes the web's Settings → AI guidance uses. All enveloped ({success,data}).
+  getGuides: () => api.get<{ guides: GuideModule[] }>("/api/guidance/guides"),
+  getGuidanceNotes: () => api.get<{ notes: NoteSummary[] | null; locked: boolean }>("/api/guidance/notes"),
+  getGuidanceNote: (id: number) =>
+    api.get<{ note: NoteFull; history: NoteRevision[] }>(`/api/guidance/notes/${id}`),
+  // expectedVersion 0 creates; otherwise the current version (409 when someone
+  // saved in between, with the error text saying so).
+  saveGuidanceNote: (note: { path: string; title: string; summary: string | null; body: string; expectedVersion: number }) =>
+    api.post<{ note: NoteFull }>("/api/guidance/notes", note),
+  retireGuidanceNote: (id: number, expectedVersion: number) =>
+    api.delete<{ retired: boolean; id: number }>(`/api/guidance/notes/${id}`, { expectedVersion }),
 
   // ─── Reconcile inbox (account-anchored Approve-each / Auto-pilot cards) ───
   // Account list WITH the per-account reconciliation `mode` + investment flag +

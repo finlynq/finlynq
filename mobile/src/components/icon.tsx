@@ -56,6 +56,7 @@ import {
   CalendarDays,
   Mail,
   Paperclip,
+  BookOpen,
   type LucideIcon,
 } from "lucide-react-native";
 
@@ -115,6 +116,7 @@ export const Icons = {
   calendar: CalendarDays,
   mail: Mail,
   paperclip: Paperclip,
+  guidance: BookOpen,
 } satisfies Record<string, LucideIcon>;
 
 export type IconName = keyof typeof Icons;

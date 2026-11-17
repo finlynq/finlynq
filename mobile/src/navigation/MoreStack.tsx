@@ -18,6 +18,9 @@ import WhatsNewScreen from "../screens/WhatsNewScreen";
 import FeedbackScreen from "../screens/FeedbackScreen";
 import FeedbackThreadsScreen from "../screens/FeedbackThreadsScreen";
 import FeedbackThreadScreen from "../screens/FeedbackThreadScreen";
+import GuidanceScreen from "../screens/GuidanceScreen";
+import GuidanceNoteScreen from "../screens/GuidanceNoteScreen";
+import GuideScreen from "../screens/GuideScreen";
 import ReportsScreen from "../screens/ReportsScreen";
 import IncomeStatementScreen from "../screens/IncomeStatementScreen";
 import BalanceSheetScreen from "../screens/BalanceSheetScreen";
@@ -98,6 +101,10 @@ export type MoreStackParamList = {
   // Your feedback: the user's threads + one thread with its replies.
   FeedbackThreads: undefined;
   FeedbackThread: { id: number };
+  // AI guidance (FINLYNQ-219): notes list + guides, one note (no id = new), one guide.
+  Guidance: undefined;
+  GuidanceNote: { id?: number } | undefined;
+  Guide: { title: string; markdown: string };
   Reports: undefined;
   IncomeStatement: ReportRangeRouteParams;
   BalanceSheet: { endDate: string; displayCurrency: string };
@@ -172,6 +179,9 @@ export default function MoreStack() {
       />
       <Stack.Screen name="FeedbackThreads" component={FeedbackThreadsScreen} />
       <Stack.Screen name="FeedbackThread" component={FeedbackThreadScreen} />
+      <Stack.Screen name="Guidance" component={GuidanceScreen} />
+      <Stack.Screen name="GuidanceNote" component={GuidanceNoteScreen} />
+      <Stack.Screen name="Guide" component={GuideScreen} />
       <Stack.Screen name="Reports" component={ReportsScreen} />
       <Stack.Screen name="IncomeStatement" component={IncomeStatementScreen} />
       <Stack.Screen name="BalanceSheet" component={BalanceSheetScreen} />
