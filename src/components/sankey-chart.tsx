@@ -1,39 +1,66 @@
 "use client";
 
-import { useRef, useState, useEffect, useCallback } from "react";
+import { useRef, useState, useEffect, useCallback, useMemo } from "react";
 import { CHART_COLORS } from "@/lib/chart-colors";
 import { formatCurrency } from "@/lib/currency";
-
-type DataItem = { name: string; value: number };
+import {
+  buildCashFlowColumns,
+  type CashFlowItem,
+  type CashFlowNode,
+} from "@/lib/reports/cash-flow-sankey";
 
 type SankeyChartProps = {
-  incomeData: DataItem[];
-  expenseData: DataItem[];
+  incomeData: CashFlowItem[];
+  expenseData: CashFlowItem[];
   currency?: string;
 };
 
 type HoverInfo = {
   x: number;
   y: number;
-  from: string;
-  to: string;
+  /** Highlight key: the node or link under the pointer. */
+  key: string;
+  title: string;
   amount: number;
   percentage: number;
 } | null;
 
-type Flow = {
-  fromIdx: number;
-  toIdx: number;
+type PlacedNode = CashFlowNode & { y: number; h: number; color: string };
+
+type Link = {
+  key: string;
+  title: string;
   value: number;
-  fromY: number;
-  fromH: number;
-  toY: number;
-  toH: number;
+  color: string;
+  x0: number;
+  x1: number;
+  y0: number; // top of the band at x0
+  y1: number; // top of the band at x1
+  h: number;
 };
 
 function truncateLabel(text: string, maxLen: number): string {
-  return text.length > maxLen ? text.slice(0, maxLen - 1) + "\u2026" : text;
+  return text.length > maxLen ? text.slice(0, maxLen - 1) + "…" : text;
 }
+
+function nodeColor(node: CashFlowNode, expenseIndex: number): string {
+  switch (node.kind) {
+    case "income":
+      return CHART_COLORS.positive;
+    case "surplus":
+      return CHART_COLORS.positive;
+    case "deficit":
+      return CHART_COLORS.negative;
+    case "other":
+      return CHART_COLORS.categories[11]; // slate
+    default:
+      return CHART_COLORS.categories[expenseIndex % (CHART_COLORS.categories.length - 1)];
+  }
+}
+
+/** Minimum vertical room a node takes, so a tiny item's label never overlaps the next one. */
+const MIN_SLOT = 16;
+const GAP = 8;
 
 export function SankeyChart({ incomeData, expenseData, currency = "CAD" }: SankeyChartProps) {
   const containerRef = useRef<HTMLDivElement>(null);
@@ -61,47 +88,28 @@ export function SankeyChart({ incomeData, expenseData, currency = "CAD" }: Sanke
     el.style.top = `${hover.y}px`;
   }, [hover]);
 
-  const totalIncome = incomeData.reduce((s, d) => s + d.value, 0);
-  const totalExpenses = expenseData.reduce((s, d) => s + d.value, 0);
+  const columns = useMemo(() => buildCashFlowColumns(incomeData, expenseData), [incomeData, expenseData]);
+  const { sources, uses, totalIncome, totalExpenses, pool, surplus, deficit } = columns;
+  // Percentages read against income when there is any, so "Groceries 12%" means 12% of what came in.
+  const base = totalIncome > 0 ? totalIncome : pool;
 
-  // Hover handlers must be declared unconditionally (before the early return
-  // below) so hook order stays stable across empty/non-empty renders
-  // (react-hooks/rules-of-hooks, FINLYNQ-119). They read names off the source
-  // `incomeData`/`expenseData` rather than the post-layout nodes — the layout
-  // nodes preserve `name` verbatim (`{ ...d, x, y, h }`), so this is identical.
-  const handleFlowHover = useCallback(
-    (e: React.MouseEvent, flow: Flow) => {
+  const showHover = useCallback(
+    (e: React.MouseEvent, key: string, title: string, amount: number) => {
       const rect = containerRef.current?.getBoundingClientRect();
       if (!rect) return;
       setHover({
         x: e.clientX - rect.left,
         y: e.clientY - rect.top - 10,
-        from: incomeData[flow.fromIdx].name,
-        to: expenseData[flow.toIdx].name,
-        amount: flow.value,
-        percentage: (flow.value / totalIncome) * 100,
+        key,
+        title,
+        amount,
+        percentage: base > 0 ? (amount / base) * 100 : 0,
       });
     },
-    [incomeData, expenseData, totalIncome]
+    [base],
   );
 
-  const handleNodeHover = useCallback(
-    (e: React.MouseEvent, name: string, value: number) => {
-      const rect = containerRef.current?.getBoundingClientRect();
-      if (!rect) return;
-      setHover({
-        x: e.clientX - rect.left,
-        y: e.clientY - rect.top - 10,
-        from: name,
-        to: "",
-        amount: value,
-        percentage: (value / totalIncome) * 100,
-      });
-    },
-    [totalIncome]
-  );
-
-  if (totalIncome === 0 && totalExpenses === 0) {
+  if (pool === 0) {
     return (
       <div className="flex items-center justify-center h-64 text-muted-foreground">
         No cash flow data for the selected period.
@@ -109,204 +117,193 @@ export function SankeyChart({ incomeData, expenseData, currency = "CAD" }: Sanke
     );
   }
 
-  // Layout constants
-  const padding = { top: 30, bottom: 30, left: 16, right: 16 };
-  const nodeWidth = 18;
+  // ---- Layout -------------------------------------------------------------
+  const padding = { top: 40, bottom: 16, left: 8, right: 8 };
+  const nodeWidth = 16;
   const labelGap = 8;
-  const maxLabelWidth = Math.min(140, (width - padding.left - padding.right - 160) / 2);
-  const leftLabelArea = maxLabelWidth + labelGap;
-  const rightLabelArea = maxLabelWidth + labelGap;
-  const flowAreaLeft = padding.left + leftLabelArea + nodeWidth;
-  const flowAreaRight = width - padding.right - rightLabelArea - nodeWidth;
-  const height = Math.max(350, Math.max(incomeData.length, expenseData.length) * 50 + padding.top + padding.bottom);
-  const flowHeight = height - padding.top - padding.bottom;
+  const narrow = width < 640;
+  const maxLabelWidth = Math.max(70, Math.min(170, (width - 3 * nodeWidth) * (narrow ? 0.22 : 0.18)));
+  const maxLabelChars = Math.max(8, Math.floor(maxLabelWidth / 6.5));
 
-  // Compute node positions
-  const maxTotal = Math.max(totalIncome, totalExpenses);
-  const incomeGap = incomeData.length > 1 ? 6 : 0;
-  const expenseGap = expenseData.length > 1 ? 6 : 0;
+  const xLeft = padding.left + maxLabelWidth + labelGap;
+  const xRight = width - padding.right - maxLabelWidth - labelGap - nodeWidth;
+  const xMid = (xLeft + xRight) / 2;
 
-  const incomeTotalGap = (incomeData.length - 1) * incomeGap;
-  const incomeScale = (flowHeight - incomeTotalGap) / maxTotal;
-  const expenseTotalGap = (expenseData.length - 1) * expenseGap;
-  const expenseScale = (flowHeight - expenseTotalGap) / maxTotal;
+  // One scale for every column, so a band keeps its thickness end to end.
+  const baseFlowHeight = Math.max(320, Math.max(sources.length, uses.length) * 34);
+  const gapsFor = (n: number) => Math.max(0, n - 1) * GAP;
+  const scale = (baseFlowHeight - Math.max(gapsFor(sources.length), gapsFor(uses.length))) / pool;
 
-  // Income nodes (left side). Build with an explicit loop so the running Y
-  // offset stays a loop-local `let` rather than a render-scoped variable
-  // mutated inside a `.map` closure (react-hooks/immutability, FINLYNQ-119).
-  const incomeNodes: { name: string; value: number; x: number; y: number; h: number }[] = [];
-  {
-    let incomeY = padding.top + (flowHeight - totalIncome * incomeScale - incomeTotalGap) / 2;
-    for (const d of incomeData) {
-      const h = d.value * incomeScale;
-      incomeNodes.push({ ...d, x: padding.left + leftLabelArea, y: incomeY, h });
-      incomeY += h + incomeGap;
+  const place = (nodes: CashFlowNode[]): { placed: PlacedNode[]; extent: number } => {
+    const placed: PlacedNode[] = [];
+    let y = padding.top;
+    let expenseIndex = 0;
+    for (const n of nodes) {
+      const h = n.value * scale;
+      placed.push({ ...n, y, h, color: nodeColor(n, n.kind === "expense" ? expenseIndex++ : 0) });
+      y += Math.max(h, MIN_SLOT) + GAP;
     }
-  }
+    return { placed, extent: y - GAP - padding.top };
+  };
 
-  // Expense nodes (right side). Same explicit-loop pattern as income.
-  const expenseNodes: { name: string; value: number; x: number; y: number; h: number; colorIndex: number }[] = [];
+  const leftCol = place(sources);
+  const rightCol = place(uses);
+  const poolH = pool * scale;
+  const contentH = Math.max(leftCol.extent, rightCol.extent, poolH);
+  // Centre each column vertically against the tallest one.
+  const shift = (extent: number) => (contentH - extent) / 2;
+  const left = { placed: leftCol.placed.map((n) => ({ ...n, y: n.y + shift(leftCol.extent) })) };
+  const right = { placed: rightCol.placed.map((n) => ({ ...n, y: n.y + shift(rightCol.extent) })) };
+  const poolY = padding.top + shift(poolH);
+  const height = padding.top + contentH + padding.bottom;
+
+  // Bands: each source into the pool, the pool out to each use. Both stack on
+  // the pool in column order, so the bands never cross at the middle node.
+  const links: Link[] = [];
   {
-    let expenseY = padding.top + (flowHeight - totalExpenses * expenseScale - expenseTotalGap) / 2;
-    for (let i = 0; i < expenseData.length; i++) {
-      const d = expenseData[i];
-      const h = d.value * expenseScale;
-      expenseNodes.push({ ...d, x: flowAreaRight, y: expenseY, h, colorIndex: i % CHART_COLORS.categories.length });
-      expenseY += h + expenseGap;
-    }
-  }
-
-  // Generate flows: each income source distributes proportionally to expenses
-  const flows: Flow[] = [];
-  const incomeOffsets = incomeNodes.map(() => 0);
-  const expenseOffsets = expenseNodes.map(() => 0);
-
-  for (let i = 0; i < incomeNodes.length; i++) {
-    for (let j = 0; j < expenseNodes.length; j++) {
-      const value = (incomeNodes[i].value / totalIncome) * expenseNodes[j].value;
-      if (value < 0.01) continue;
-      const fromH = value * incomeScale;
-      const toH = value * expenseScale;
-      flows.push({
-        fromIdx: i,
-        toIdx: j,
-        value,
-        fromY: incomeNodes[i].y + incomeOffsets[i],
-        fromH,
-        toY: expenseNodes[j].y + expenseOffsets[j],
-        toH,
+    let into = poolY;
+    for (const n of left.placed) {
+      links.push({
+        key: `in:${n.name}`,
+        title: `${n.name} → Income`,
+        value: n.value,
+        color: n.color,
+        x0: xLeft + nodeWidth,
+        x1: xMid,
+        y0: n.y,
+        y1: into,
+        h: n.h,
       });
-      incomeOffsets[i] += fromH;
-      expenseOffsets[j] += toH;
+      into += n.h;
+    }
+    let out = poolY;
+    for (const n of right.placed) {
+      links.push({
+        key: `out:${n.name}`,
+        title: `Income → ${n.name}`,
+        value: n.value,
+        color: n.color,
+        x0: xMid + nodeWidth,
+        x1: xRight,
+        y0: out,
+        y1: n.y,
+        h: n.h,
+      });
+      out += n.h;
     }
   }
 
-  // Savings flow (if income > expenses)
-  const savings = totalIncome - totalExpenses;
-
-  const maxLabelChars = Math.floor(maxLabelWidth / 7.5);
+  const dimmed = (key: string) => hover !== null && hover.key !== key && hover.key !== "pool";
 
   return (
     <div ref={containerRef} className="relative w-full select-none">
-      <svg width={width} height={height + (savings > 0 ? 44 : 0)} className="overflow-visible">
-        {/* Flows */}
-        {flows.map((flow, i) => {
-          const x0 = flowAreaLeft + nodeWidth;
-          const x1 = flowAreaRight;
-          const cx = (x0 + x1) / 2;
-          const y0Top = flow.fromY;
-          const y0Bot = flow.fromY + flow.fromH;
-          const y1Top = flow.toY;
-          const y1Bot = flow.toY + flow.toH;
-          const d = `M${x0},${y0Top} C${cx},${y0Top} ${cx},${y1Top} ${x1},${y1Top} L${x1},${y1Bot} C${cx},${y1Bot} ${cx},${y0Bot} ${x0},${y0Bot} Z`;
+      <svg width={width} height={height} className="overflow-visible" role="img" aria-label="Cash flow diagram">
+        {/* Bands */}
+        {links.map((l) => {
+          const cx = (l.x0 + l.x1) / 2;
+          const d = `M${l.x0},${l.y0} C${cx},${l.y0} ${cx},${l.y1} ${l.x1},${l.y1} L${l.x1},${l.y1 + l.h} C${cx},${l.y1 + l.h} ${cx},${l.y0 + l.h} ${l.x0},${l.y0 + l.h} Z`;
           return (
             <path
-              key={i}
+              key={l.key}
               d={d}
-              fill={CHART_COLORS.categories[flow.toIdx % CHART_COLORS.categories.length]}
-              opacity={hover && (hover.from !== incomeNodes[flow.fromIdx].name || hover.to !== expenseNodes[flow.toIdx].name) ? 0.08 : 0.25}
+              fill={l.color}
+              opacity={dimmed(l.key) ? 0.08 : 0.3}
               className="transition-opacity duration-150 cursor-pointer"
-              onMouseMove={(e) => handleFlowHover(e, flow)}
+              onMouseMove={(e) => showHover(e, l.key, l.title, l.value)}
               onMouseLeave={() => setHover(null)}
             />
           );
         })}
 
-        {/* Income nodes (left) */}
-        {incomeNodes.map((node, i) => (
+        {/* Left: income sources (+ deficit) */}
+        {left.placed.map((n) => (
           <g
-            key={`in-${i}`}
-            onMouseMove={(e) => handleNodeHover(e, node.name, node.value)}
-            onMouseLeave={() => setHover(null)}
+            key={`l-${n.name}`}
             className="cursor-pointer"
+            onMouseMove={(e) => showHover(e, `in:${n.name}`, n.name, n.value)}
+            onMouseLeave={() => setHover(null)}
           >
-            <rect
-              x={node.x}
-              y={node.y}
-              width={nodeWidth}
-              height={Math.max(node.h, 2)}
-              rx={3}
-              fill={CHART_COLORS.positive}
-            />
-            <text
-              x={node.x - labelGap}
-              y={node.y + node.h / 2}
-              textAnchor="end"
-              dominantBaseline="central"
-              className="fill-foreground text-[11px]"
-            >
-              {truncateLabel(node.name, maxLabelChars)}
+            <rect x={xLeft} y={n.y} width={nodeWidth} height={Math.max(n.h, 2)} rx={3} fill={n.color} />
+            <text x={xLeft - labelGap} y={n.y + Math.max(n.h, 2) / 2} textAnchor="end" dominantBaseline="central" className="fill-foreground text-[11px]">
+              {truncateLabel(n.name, maxLabelChars)}
             </text>
           </g>
         ))}
 
-        {/* Expense nodes (right) */}
-        {expenseNodes.map((node, i) => (
+        {/* Middle: the income pool */}
+        <g
+          className="cursor-pointer"
+          onMouseMove={(e) => showHover(e, "pool", deficit > 0 ? "Income + deficit" : "Income", pool)}
+          onMouseLeave={() => setHover(null)}
+        >
+          {totalIncome > 0 && (
+            <rect x={xMid} y={poolY} width={nodeWidth} height={totalIncome * scale} rx={3} fill={CHART_COLORS.positive} />
+          )}
+          {deficit > 0 && (
+            <rect x={xMid} y={poolY + totalIncome * scale} width={nodeWidth} height={deficit * scale} rx={3} fill={CHART_COLORS.negative} />
+          )}
+          <text x={xMid + nodeWidth / 2} y={poolY - 8} textAnchor="middle" className="fill-foreground text-xs font-semibold">
+            Income {formatCurrency(totalIncome, currency)}
+          </text>
+        </g>
+
+        {/* Right: expense categories (+ surplus) */}
+        {right.placed.map((n) => (
           <g
-            key={`ex-${i}`}
-            onMouseMove={(e) => handleNodeHover(e, node.name, node.value)}
-            onMouseLeave={() => setHover(null)}
+            key={`r-${n.name}`}
             className="cursor-pointer"
+            onMouseMove={(e) => showHover(e, `out:${n.name}`, n.name, n.value)}
+            onMouseLeave={() => setHover(null)}
           >
-            <rect
-              x={node.x}
-              y={node.y}
-              width={nodeWidth}
-              height={Math.max(node.h, 2)}
-              rx={3}
-              fill={CHART_COLORS.categories[node.colorIndex]}
-            />
+            <rect x={xRight} y={n.y} width={nodeWidth} height={Math.max(n.h, 2)} rx={3} fill={n.color} />
             <text
-              x={node.x + nodeWidth + labelGap}
-              y={node.y + node.h / 2}
+              x={xRight + nodeWidth + labelGap}
+              y={n.y + Math.max(n.h, 2) / 2}
               textAnchor="start"
               dominantBaseline="central"
-              className="fill-foreground text-[11px]"
+              className={n.kind === "surplus" ? "fill-foreground text-[11px] font-semibold" : "fill-foreground text-[11px]"}
             >
-              {truncateLabel(node.name, maxLabelChars)}
+              {truncateLabel(n.name, maxLabelChars)}
             </text>
           </g>
         ))}
 
         {/* Column headers */}
-        <text x={padding.left + leftLabelArea + nodeWidth / 2} y={14} textAnchor="middle" className="fill-muted-foreground text-xs font-medium">
-          Income ({formatCurrency(totalIncome, currency)})
+        <text x={xLeft + nodeWidth / 2} y={14} textAnchor="middle" className="fill-muted-foreground text-xs font-medium">
+          Sources
         </text>
-        <text x={flowAreaRight + nodeWidth / 2} y={14} textAnchor="middle" className="fill-muted-foreground text-xs font-medium">
-          Expenses ({formatCurrency(totalExpenses, currency)})
+        <text x={xRight + nodeWidth / 2} y={14} textAnchor="middle" className="fill-muted-foreground text-xs font-medium">
+          Spending {formatCurrency(totalExpenses, currency)}
         </text>
-
-        {/* Savings bar */}
-        {savings > 0 && (
-          <g>
-            <rect
-              x={flowAreaLeft}
-              y={height + 8}
-              width={(savings / totalIncome) * (flowAreaRight - flowAreaLeft + nodeWidth)}
-              height={20}
-              rx={4}
-              fill={CHART_COLORS.positive}
-              opacity={0.7}
-            />
-            <text
-              x={flowAreaLeft + 8}
-              y={height + 21}
-              className="fill-white text-[11px] font-medium"
-            >
-              Savings: {formatCurrency(savings, currency)} ({((savings / totalIncome) * 100).toFixed(1)}%)
-            </text>
-          </g>
-        )}
       </svg>
 
-      {/* Tooltip \u2014 position set via ref + useEffect to keep inline `style=` off the HTML (CSP) */}
+      {/* Summary line under the chart */}
+      <p className="mt-2 text-xs text-muted-foreground">
+        {surplus > 0 ? (
+          <>
+            Surplus <span className="font-medium text-foreground">{formatCurrency(surplus, currency)}</span>
+            {totalIncome > 0 ? ` (${((surplus / totalIncome) * 100).toFixed(1)}% of income)` : ""}
+          </>
+        ) : deficit > 0 ? (
+          <>
+            Deficit <span className="font-medium text-foreground">{formatCurrency(deficit, currency)}</span>: spending was more than income in this period
+          </>
+        ) : (
+          "Income and spending were equal in this period."
+        )}
+      </p>
+
+      {/* Tooltip — position set via ref + useEffect to keep inline `style=` off the HTML (CSP) */}
       {hover && (
         <div
           ref={tooltipRef}
           className="absolute z-50 pointer-events-none px-3 py-2 bg-popover text-popover-foreground border rounded-lg shadow-lg text-xs whitespace-nowrap -translate-x-1/2 -translate-y-full"
         >
-          <p className="font-semibold">{hover.from}{hover.to ? ` \u2192 ${hover.to}` : ""}</p>
-          <p>{formatCurrency(hover.amount, currency)} ({hover.percentage.toFixed(1)}%)</p>
+          <p className="font-semibold">{hover.title}</p>
+          <p>
+            {formatCurrency(hover.amount, currency)}
+            {totalIncome > 0 ? ` (${hover.percentage.toFixed(1)}% of income)` : ""}
+          </p>
         </div>
       )}
     </div>

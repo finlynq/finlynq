@@ -331,22 +331,17 @@ export default function ReportsPage() {
     };
   }, [yoyYear1, yoyYear2, devMode, displayCurrency, acctParam]);
 
-  // Sankey data
+  // Sankey data: every category goes in; the chart folds small ones into
+  // "Other" itself (buildCashFlowColumns), so the totals and the surplus stay
+  // true. It used to keep only the 10 largest expenses and drop the rest.
   const sankeyIncome = useMemo(() => {
     if (!trendsData) return [];
-    return trendsData.income
-      .filter((r) => r.total > 0)
-      .sort((a, b) => b.total - a.total)
-      .map((r) => ({ name: r.name, value: r.total }));
+    return trendsData.income.map((r) => ({ name: r.name, value: r.total }));
   }, [trendsData]);
 
   const sankeyExpenses = useMemo(() => {
     if (!trendsData) return [];
-    return trendsData.expenses
-      .filter((r) => r.total > 0)
-      .sort((a, b) => b.total - a.total)
-      .slice(0, 10)
-      .map((r) => ({ name: r.name, value: r.total }));
+    return trendsData.expenses.map((r) => ({ name: r.name, value: r.total }));
   }, [trendsData]);
 
   // Group items by category group for collapsible view
@@ -1107,7 +1102,7 @@ export default function ReportsPage() {
                   <div>
                     <CardTitle className="text-base">Cash Flow Diagram</CardTitle>
                     <CardDescription>
-                      How income flows into expense categories ({startDate} to {endDate})
+                      Where your income went: each source into one pool, then out to spending and what was left ({startDate} to {endDate})
                     </CardDescription>
                   </div>
                 </div>
