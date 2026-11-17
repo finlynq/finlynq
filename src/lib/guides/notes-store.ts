@@ -265,3 +265,77 @@ export async function retireNote(
     return { ok: true as const, note: toFull(dek, row) };
   });
 }
+
+// ── Backup (FINLYNQ-219 follow-up, 2026-11-17) ─────────────────────────────
+
+/** One note as it travels in a backup file: plain text, so the file restores into any account. */
+export interface BackupNote {
+  path: string;
+  title: string;
+  summary: string | null;
+  body: string;
+  updatedBy: NoteAuthor;
+}
+
+/** Active notes for the backup file, decrypted. Notes this key can't read are left out. */
+export async function exportNotes(userId: string, dek: Buffer): Promise<BackupNote[]> {
+  const rows = await db
+    .select()
+    .from(notes)
+    .where(and(eq(notes.userId, userId), isNull(notes.retiredAt)))
+    .orderBy(asc(notes.id));
+  return rows
+    .map((r) => toFull(dek, r))
+    .filter((n) => !n.unreadable)
+    .map((n) => ({ path: n.path, title: n.title, summary: n.summary, body: n.body, updatedBy: n.updatedBy }));
+}
+
+/**
+ * Replace the user's notes with a backup's (restore). Runs inside the caller's
+ * transaction (withDbTransaction joins it). Every note is checked with the same
+ * rules as a save; the first bad one stops the restore so nothing changes.
+ * History restarts: each note comes back as version 1.
+ */
+export async function replaceNotesFromBackup(
+  userId: string,
+  dek: Buffer,
+  rows: unknown[],
+): Promise<{ ok: true; restored: number } | { ok: false; error: string }> {
+  if (rows.length > NOTE_MAX_ACTIVE) {
+    return { ok: false, error: `The backup has ${rows.length} AI guidance notes; at most ${NOTE_MAX_ACTIVE} are allowed` };
+  }
+  const cleaned: Array<{ note: ReturnType<typeof checkNote> & { ok: true }; by: NoteAuthor }> = [];
+  const seen = new Set<string>();
+  for (const [i, raw] of rows.entries()) {
+    const r = (raw ?? {}) as Record<string, unknown>;
+    const checked = checkNote({
+      path: typeof r.path === "string" ? r.path : "",
+      title: typeof r.title === "string" ? r.title : "",
+      summary: typeof r.summary === "string" ? r.summary : null,
+      body: typeof r.body === "string" ? r.body : "",
+    });
+    if (!checked.ok) return { ok: false, error: `AI guidance note ${i + 1} in the backup can't be restored: ${checked.error}` };
+    if (seen.has(checked.note.path)) return { ok: false, error: `The backup has two AI guidance notes called ${checked.note.path}` };
+    seen.add(checked.note.path);
+    cleaned.push({ note: checked, by: r.updatedBy === "assistant" ? "assistant" : "user" });
+  }
+
+  return withDbTransaction(async () => {
+    await db.delete(revisions).where(eq(revisions.userId, userId));
+    await db.delete(notes).where(eq(notes.userId, userId));
+    for (const { note: { note: n }, by } of cleaned) {
+      const enc = {
+        pathCt: encryptField(dek, n.path)!,
+        titleCt: encryptField(dek, n.title)!,
+        summaryCt: n.summary == null ? null : encryptField(dek, n.summary),
+        bodyCt: encryptField(dek, n.body)!,
+      };
+      const [row] = await db
+        .insert(notes)
+        .values({ userId, pathLookup: pathLookup(dek, n.path), ...enc, version: 1, updatedBy: by })
+        .returning({ id: notes.id });
+      await db.insert(revisions).values({ noteId: row.id, userId, version: 1, action: "save", ...enc, updatedBy: by });
+    }
+    return { ok: true as const, restored: cleaned.length };
+  });
+}
