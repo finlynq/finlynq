@@ -331,23 +331,43 @@ export default function ReportsPage() {
     };
   }, [yoyYear1, yoyYear2, devMode, displayCurrency, acctParam]);
 
-  // Sankey data
+  // Sankey data: every CATEGORY goes in, each with its group, so the chart can
+  // show groups and open one into its categories. When the page is grouped by
+  // category group, trendsData only holds group totals, so the cash flow tab
+  // fetches the category-level breakdown itself. The chart folds small items
+  // into "Other" (buildCashFlowColumns), so totals and the surplus stay true;
+  // it used to keep only the 10 largest expenses and drop the rest.
+  const [cashflowCategories, setCashflowCategories] = useState<TrendsData | null>(null);
+  useEffect(() => {
+    if (!devMode || groupBy === "category") {
+      setCashflowCategories(null);
+      return;
+    }
+    let cancelled = false;
+    const biz = isBusiness ? "&business=true" : "";
+    fetch(`/api/reports/trends?startDate=${startDate}&endDate=${endDate}&period=${period}&groupBy=category${biz}${acctParam}&currency=${encodeURIComponent(displayCurrency)}`)
+      .then((r) => (r.ok ? r.json() : null))
+      .then((d) => {
+        if (!cancelled) setCashflowCategories(d && typeof d === "object" ? (d as TrendsData) : null);
+      })
+      .catch(() => {
+        if (!cancelled) setCashflowCategories(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [devMode, groupBy, startDate, endDate, period, isBusiness, displayCurrency, acctParam]);
+
+  const sankeySource = groupBy === "category" ? trendsData : cashflowCategories;
   const sankeyIncome = useMemo(() => {
-    if (!trendsData) return [];
-    return trendsData.income
-      .filter((r) => r.total > 0)
-      .sort((a, b) => b.total - a.total)
-      .map((r) => ({ name: r.name, value: r.total }));
-  }, [trendsData]);
+    if (!sankeySource) return [];
+    return sankeySource.income.map((r) => ({ name: r.name, value: r.total, group: r.group }));
+  }, [sankeySource]);
 
   const sankeyExpenses = useMemo(() => {
-    if (!trendsData) return [];
-    return trendsData.expenses
-      .filter((r) => r.total > 0)
-      .sort((a, b) => b.total - a.total)
-      .slice(0, 10)
-      .map((r) => ({ name: r.name, value: r.total }));
-  }, [trendsData]);
+    if (!sankeySource) return [];
+    return sankeySource.expenses.map((r) => ({ name: r.name, value: r.total, group: r.group }));
+  }, [sankeySource]);
 
   // Group items by category group for collapsible view
   const groupItems = useCallback((items: BreakdownItem[]) => {
@@ -1107,13 +1127,19 @@ export default function ReportsPage() {
                   <div>
                     <CardTitle className="text-base">Cash Flow Diagram</CardTitle>
                     <CardDescription>
-                      How income flows into expense categories ({startDate} to {endDate})
+                      Where your income went: each source into one pool, then out to spending and what was left ({startDate} to {endDate})
                     </CardDescription>
                   </div>
                 </div>
               </CardHeader>
               <CardContent>
-                <SankeyChart incomeData={sankeyIncome} expenseData={sankeyExpenses} currency={displayCurrency} />
+                <SankeyChart
+                  key={groupBy}
+                  incomeData={sankeyIncome}
+                  expenseData={sankeyExpenses}
+                  currency={displayCurrency}
+                  initialLevel={groupBy === "group" ? "group" : "category"}
+                />
               </CardContent>
             </Card>
           </TabsContent>
