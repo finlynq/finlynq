@@ -426,7 +426,7 @@ review never prompts.
   before promoting:** the 44px month buttons and chip row at 375-390px, the hero amount not wrapping at 7 digits
   (`adjustsFontSizeToFit` only works natively), and the dashed "+ Set budget" border (Android draws dashed borders
   only with a border radius, which it has).
-- **1.0.34 / vc43 (Android, Play internal 2026-11-17; no iOS build): AI guidance** (FINLYNQ-219, `284bfd3`). More →
+- **1.0.34 / vc43 + iOS build 18 (2026-11-17; the owner checked it on a device, then Android was promoted internal → production and sent for review, Changes in review, full rollout; iOS build 18 built on EAS from a clean clone with auto-submit, waiting in the free-tier submit queue): AI guidance** (FINLYNQ-219, `284bfd3`). More →
   **AI guidance** lists the notes an AI assistant reads before it starts (`GuidanceScreen`, tabs Your notes / Finlynq
   guides) and opens a note to read, edit, see its history or retire (`GuidanceNoteScreen`), or a guide read-only
   (`GuideScreen`), over the web's `/api/guidance/notes` routes and `GET /api/guidance/guides` (prod since PR #417).
