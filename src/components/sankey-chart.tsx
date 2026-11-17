@@ -118,10 +118,10 @@ export function SankeyChart({ incomeData, expenseData, currency = "CAD" }: Sanke
   }
 
   // ---- Layout -------------------------------------------------------------
-  const padding = { top: 40, bottom: 16, left: 8, right: 8 };
+  const narrow = width < 640;
+  const padding = { top: narrow ? 8 : 32, bottom: 16, left: 8, right: 8 };
   const nodeWidth = 16;
   const labelGap = 8;
-  const narrow = width < 640;
   const maxLabelWidth = Math.max(70, Math.min(170, (width - 3 * nodeWidth) * (narrow ? 0.22 : 0.18)));
   const maxLabelChars = Math.max(8, Math.floor(maxLabelWidth / 6.5));
 
@@ -197,6 +197,12 @@ export function SankeyChart({ incomeData, expenseData, currency = "CAD" }: Sanke
 
   return (
     <div ref={containerRef} className="relative w-full select-none">
+      {narrow && (
+        <p className="mb-1 text-xs text-muted-foreground">
+          Income <span className="font-medium text-foreground">{formatCurrency(totalIncome, currency)}</span> · Spending{" "}
+          <span className="font-medium text-foreground">{formatCurrency(totalExpenses, currency)}</span>
+        </p>
+      )}
       <svg width={width} height={height} className="overflow-visible" role="img" aria-label="Cash flow diagram">
         {/* Bands */}
         {links.map((l) => {
@@ -242,9 +248,6 @@ export function SankeyChart({ incomeData, expenseData, currency = "CAD" }: Sanke
           {deficit > 0 && (
             <rect x={xMid} y={poolY + totalIncome * scale} width={nodeWidth} height={deficit * scale} rx={3} fill={CHART_COLORS.negative} />
           )}
-          <text x={xMid + nodeWidth / 2} y={poolY - 8} textAnchor="middle" className="fill-foreground text-xs font-semibold">
-            Income {formatCurrency(totalIncome, currency)}
-          </text>
         </g>
 
         {/* Right: expense categories (+ surplus) */}
@@ -268,13 +271,20 @@ export function SankeyChart({ incomeData, expenseData, currency = "CAD" }: Sanke
           </g>
         ))}
 
-        {/* Column headers */}
-        <text x={xLeft + nodeWidth / 2} y={14} textAnchor="middle" className="fill-muted-foreground text-xs font-medium">
-          Sources
-        </text>
-        <text x={xRight + nodeWidth / 2} y={14} textAnchor="middle" className="fill-muted-foreground text-xs font-medium">
-          Spending {formatCurrency(totalExpenses, currency)}
-        </text>
+        {/* Column headers (on a phone they don't fit side by side; the line above the chart carries them) */}
+        {!narrow && (
+          <>
+            <text x={xLeft + nodeWidth / 2} y={14} textAnchor="middle" className="fill-muted-foreground text-xs font-medium">
+              Sources
+            </text>
+            <text x={xMid + nodeWidth / 2} y={14} textAnchor="middle" className="fill-foreground text-xs font-semibold">
+              Income {formatCurrency(totalIncome, currency)}
+            </text>
+            <text x={xRight + nodeWidth / 2} y={14} textAnchor="middle" className="fill-muted-foreground text-xs font-medium">
+              Spending {formatCurrency(totalExpenses, currency)}
+            </text>
+          </>
+        )}
       </svg>
 
       {/* Summary line under the chart */}
