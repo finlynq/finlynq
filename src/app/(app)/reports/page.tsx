@@ -2,7 +2,6 @@
 
 import { useEffect, useState, useMemo, useCallback } from "react";
 import Link from "next/link";
-import { useDevMode } from "@/hooks/use-dev-mode";
 import { useDisplayCurrency } from "@/components/currency-provider";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -252,7 +251,6 @@ export default function ReportsPage() {
     return v ? `&accountIds=${encodeURIComponent(v)}` : "";
   }, [accountIds]);
 
-  const devMode = useDevMode();
 
   // Active tab
   const [activeTab, setActiveTab] = useState("income");
@@ -314,9 +312,8 @@ export default function ReportsPage() {
       .catch(() => setUnrealizedData(null));
   }, [startDate, endDate, isBusiness, displayCurrency, acctParam]);
 
-  // Fetch YoY (dev mode only)
+  // Fetch YoY
   useEffect(() => {
-    if (!devMode) return;
     let cancelled = false;
     fetch(`/api/reports/yoy?year1=${yoyYear1}&year2=${yoyYear2}${acctParam}&currency=${encodeURIComponent(displayCurrency)}`)
       .then((r) => (r.ok ? r.json() : null))
@@ -329,7 +326,7 @@ export default function ReportsPage() {
     return () => {
       cancelled = true;
     };
-  }, [yoyYear1, yoyYear2, devMode, displayCurrency, acctParam]);
+  }, [yoyYear1, yoyYear2, displayCurrency, acctParam]);
 
   // Sankey data: every CATEGORY goes in, each with its group, so the chart can
   // show groups and open one into its categories. When the page is grouped by
@@ -339,7 +336,7 @@ export default function ReportsPage() {
   // it used to keep only the 10 largest expenses and drop the rest.
   const [cashflowCategories, setCashflowCategories] = useState<TrendsData | null>(null);
   useEffect(() => {
-    if (!devMode || groupBy === "category") {
+    if (groupBy === "category") {
       setCashflowCategories(null);
       return;
     }
@@ -356,7 +353,7 @@ export default function ReportsPage() {
     return () => {
       cancelled = true;
     };
-  }, [devMode, groupBy, startDate, endDate, period, isBusiness, displayCurrency, acctParam]);
+  }, [groupBy, startDate, endDate, period, isBusiness, displayCurrency, acctParam]);
 
   const sankeySource = groupBy === "category" ? trendsData : cashflowCategories;
   const sankeyIncome = useMemo(() => {
@@ -698,16 +695,12 @@ export default function ReportsPage() {
           <TabsTrigger value="balance">
             <FileText className="h-3.5 w-3.5 mr-1.5" /> Balance Sheet
           </TabsTrigger>
-          {devMode && (
-            <TabsTrigger value="cashflow">
-              <Workflow className="h-3.5 w-3.5 mr-1.5" /> Cash Flow
-            </TabsTrigger>
-          )}
-          {devMode && (
-            <TabsTrigger value="yoy">
-              <GitCompareArrows className="h-3.5 w-3.5 mr-1.5" /> Year over Year
-            </TabsTrigger>
-          )}
+          <TabsTrigger value="cashflow">
+            <Workflow className="h-3.5 w-3.5 mr-1.5" /> Cash Flow
+          </TabsTrigger>
+          <TabsTrigger value="yoy">
+            <GitCompareArrows className="h-3.5 w-3.5 mr-1.5" /> Year over Year
+          </TabsTrigger>
         </TabsList>
 
         {/* ============ Income Statement ============ */}
@@ -1115,38 +1108,36 @@ export default function ReportsPage() {
           )}
         </TabsContent>
 
-        {/* ============ Cash Flow (Sankey) — dev only ============ */}
-        {devMode && (
-          <TabsContent value="cashflow">
-            <Card>
-              <CardHeader>
-                <div className="flex items-center gap-3">
-                  <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-cyan-100 text-cyan-600 dark:bg-cyan-950 dark:text-cyan-400">
-                    <Workflow className="h-5 w-5" />
-                  </div>
-                  <div>
-                    <CardTitle className="text-base">Cash Flow Diagram</CardTitle>
-                    <CardDescription>
-                      Where your income went: each source into one pool, then out to spending and what was left ({startDate} to {endDate})
-                    </CardDescription>
-                  </div>
+        {/* ============ Cash Flow (Sankey) ============ */}
+        <TabsContent value="cashflow">
+          <Card>
+            <CardHeader>
+              <div className="flex items-center gap-3">
+                <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-cyan-100 text-cyan-600 dark:bg-cyan-950 dark:text-cyan-400">
+                  <Workflow className="h-5 w-5" />
                 </div>
-              </CardHeader>
-              <CardContent>
-                <SankeyChart
-                  key={groupBy}
-                  incomeData={sankeyIncome}
-                  expenseData={sankeyExpenses}
-                  currency={displayCurrency}
-                  initialLevel={groupBy === "group" ? "group" : "category"}
-                />
-              </CardContent>
-            </Card>
-          </TabsContent>
-        )}
+                <div>
+                  <CardTitle className="text-base">Cash Flow Diagram</CardTitle>
+                  <CardDescription>
+                    Where your income went: each source into one pool, then out to spending and what was left ({startDate} to {endDate})
+                  </CardDescription>
+                </div>
+              </div>
+            </CardHeader>
+            <CardContent>
+              <SankeyChart
+                key={groupBy}
+                incomeData={sankeyIncome}
+                expenseData={sankeyExpenses}
+                currency={displayCurrency}
+                initialLevel={groupBy === "group" ? "group" : "category"}
+              />
+            </CardContent>
+          </Card>
+        </TabsContent>
 
-        {/* ============ Year over Year — dev only ============ */}
-        {devMode && <TabsContent value="yoy">
+        {/* ============ Year over Year ============ */}
+        <TabsContent value="yoy">
           <div className="space-y-6">
             <Card className="bg-muted/30 border-dashed">
               <CardContent className="pt-4">
@@ -1317,7 +1308,7 @@ export default function ReportsPage() {
               </>
             )}
           </div>
-        </TabsContent>}
+        </TabsContent>
       </Tabs>
     </div>
   );
