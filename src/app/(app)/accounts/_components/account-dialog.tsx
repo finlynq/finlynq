@@ -4,6 +4,7 @@ import { useEffect, useRef, useState, type ReactNode } from "react";
 import Link from "next/link";
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { AccountLogoEditor } from "@/components/accounts/account-logo";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -105,6 +106,9 @@ export interface AccountDialogProps {
   onCreated?: (account: AccountDialogAccount) => void;
   onSaved?: (account: AccountDialogAccount) => void;
   onRemoved?: (result: { archived: boolean }) => void;
+  /** edit only (GH #420): the account's logo version, and a callback after it changes. */
+  logoVersion?: number;
+  onLogoChange?: () => void;
 }
 
 /**
@@ -128,6 +132,8 @@ export function AccountDialog({
   onCreated,
   onSaved,
   onRemoved,
+  logoVersion,
+  onLogoChange,
 }: AccountDialogProps) {
   const [form, setForm] = useState<FormState>(() => blankForm(defaultCurrency));
   const [errors, setErrors] = useState<Record<string, string>>({});
@@ -340,6 +346,15 @@ export function AccountDialog({
   // ── Details form (identical in create + edit) ───────────────────────────
   const detailsForm = (
     <form onSubmit={handleSave} className="space-y-4">
+      {/* GH #420 — the logo saves on its own (Get logo / Upload / Remove), not with Save. */}
+      {isEdit && account && (
+        <AccountLogoEditor
+          accountId={account.id}
+          name={account.name}
+          logoVersion={logoVersion}
+          onChange={() => onLogoChange?.()}
+        />
+      )}
       <div className="space-y-1.5">
         <Label>Account Name</Label>
         <Input

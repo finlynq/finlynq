@@ -684,6 +684,24 @@ export const goals = pgTable("goals", {
   check("goals_progress_mode_check", sql`${t.progressMode} IN ('balance','growth')`),
 ]);
 
+// GH #420 (2026-11-20): optional per-account logo, shown instead of the letter
+// avatar. image_ct = base64 PNG (<=128px, normalized in the browser) encrypted
+// with the user's DEK, like account names (a logo identifies the bank);
+// domain_ct = where it was fetched from, also encrypted. Cascades off accounts,
+// so account delete / Clear All Data / account deletion remove it.
+// -> lib/accounts/logo-store.ts
+export const accountLogos = pgTable("account_logos", {
+  accountId: integer("account_id").primaryKey().references(() => accounts.id, { onDelete: "cascade" }),
+  userId: text("user_id").notNull(),
+  imageCt: text("image_ct").notNull(),
+  domainCt: text("domain_ct"),
+  source: text("source").notNull(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+}, (t) => [
+  index("account_logos_user_idx").on(t.userId),
+  check("account_logos_source_check", sql`${t.source} IN ('upload','domain')`),
+]);
+
 // Multi-account goal linking (issue #130, 2026-05-03). JOIN grain is
 // `(goal_id, account_id, user_id)` — mirror the holding_accounts pattern
 // in CLAUDE.md. ON DELETE CASCADE on both FKs so deleting a goal or an

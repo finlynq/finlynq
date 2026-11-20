@@ -881,6 +881,9 @@ async function deleteAllUserDataTx(tx: TxClient, userId: string) {
   // NOT NULL ON DELETE CASCADE off staged_imports, so the child goes first.
   await tx.delete(s.stagedTransactions).where(eq(s.stagedTransactions.userId, userId));
   await tx.delete(s.stagedImports).where(eq(s.stagedImports.userId, userId));
+  // GH #420: cascades off accounts anyway; deleted explicitly so the coverage
+  // gate sees it and the encrypted image never outlives its account.
+  await tx.delete(s.accountLogos).where(eq(s.accountLogos.userId, userId));
   await tx.delete(s.accounts).where(eq(s.accounts.userId, userId));
 
   // ── Portfolio snapshot / lot bookkeeping ──────────────────────────────────
