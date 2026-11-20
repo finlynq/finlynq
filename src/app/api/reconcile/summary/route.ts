@@ -49,6 +49,7 @@ export async function GET(request: NextRequest) {
       alias?: string | null;
       currency: string;
       isInvestment?: boolean;
+      mode?: string | null;
     }>;
 
     // Raw ledger balance per account — COALESCE(SUM(transactions.amount), 0).
@@ -101,6 +102,10 @@ export async function GET(request: NextRequest) {
           lastImportAt: s?.lastImportAt ?? null,
           lastReconciledAt: s?.lastReconciledAt ?? null,
           pendingCount: s?.pendingCount ?? 0,
+          // GH #422: the overview groups by the account's import policy and
+          // counts statement files still waiting in staging.
+          mode: a.mode === "auto" || a.mode === "approve" ? a.mode : "manual",
+          pendingFiles: s?.pendingFiles ?? 0,
         };
       });
 

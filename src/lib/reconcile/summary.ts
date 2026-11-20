@@ -43,6 +43,8 @@ export interface ReconcileSummaryRow {
   lastReconciledAt: string | null;
   /** Count of bank-ledger rows not yet materialized into a ledger transaction. */
   pendingCount: number;
+  /** GH #422: statement files bound to the account still waiting in staging (manual review). */
+  pendingFiles: number;
 }
 
 function toIso(v: unknown): string | null {
@@ -109,6 +111,23 @@ export async function getReconcileSummary(
     )
     .groupBy(schema.bankTransactions.accountId);
 
+  // GH #422 — statement files still waiting in staging, per bound account.
+  // A manual-review account's work starts here, before any bank row exists.
+  const pendingFileRows = await db
+    .select({
+      accountId: schema.stagedImports.boundAccountId,
+      pendingFiles: sql<number>`COUNT(*)`.as("pending_files"),
+    })
+    .from(schema.stagedImports)
+    .where(
+      and(
+        eq(schema.stagedImports.userId, userId),
+        eq(schema.stagedImports.status, "pending"),
+        isNotNull(schema.stagedImports.boundAccountId),
+      ),
+    )
+    .groupBy(schema.stagedImports.boundAccountId);
+
   const byAccount = new Map<number, ReconcileSummaryRow>();
   const ensure = (accountId: number | null): ReconcileSummaryRow | null => {
     if (accountId == null) return null;
@@ -119,6 +138,7 @@ export async function getReconcileSummary(
         lastImportAt: null,
         lastReconciledAt: null,
         pendingCount: 0,
+        pendingFiles: 0,
       };
       byAccount.set(accountId, row);
     }
@@ -136,6 +156,10 @@ export async function getReconcileSummary(
   for (const r of pendingRows) {
     const row = ensure(r.accountId);
     if (row) row.pendingCount = Number(r.pendingCount) || 0;
+  }
+  for (const r of pendingFileRows) {
+    const row = ensure(r.accountId);
+    if (row) row.pendingFiles = Number(r.pendingFiles) || 0;
   }
 
   return [...byAccount.values()];
