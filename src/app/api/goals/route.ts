@@ -7,6 +7,8 @@ import { z } from "zod";
 import { validateBody, safeErrorMessage, AppError } from "@/lib/validate";
 import { buildNameFields, decryptNamedRows, encryptOptional, decryptOptional } from "@/lib/crypto/encrypted-columns";
 import { computeGoalProgress } from "@/lib/goals-progress";
+import { GOAL_PROGRESS_MODES, growthGoalRefusal, normalizeProgressMode } from "@/lib/goals/progress-mode";
+import { todayISO } from "@/lib/utils/date";
 import { getDisplayCurrency, getRateMap, convertWithRateMap } from "@/lib/fx-service";
 import { pickRecordCurrency } from "@/lib/fx/record-currency";
 
@@ -23,6 +25,9 @@ const postSchema = z.object({
   priority: z.number().optional(),
   status: z.string().optional(),
   note: z.string().optional(),
+  // GH #423: 'balance' (default) or 'growth' since startDate.
+  progressMode: z.enum(GOAL_PROGRESS_MODES).optional(),
+  startDate: z.string().nullable().optional(),
 });
 
 const putSchema = z.object({
@@ -37,6 +42,9 @@ const putSchema = z.object({
   priority: z.number().optional(),
   status: z.string().optional(),
   note: z.string().optional(),
+  // GH #423: 'balance' (default) or 'growth' since startDate.
+  progressMode: z.enum(GOAL_PROGRESS_MODES).optional(),
+  startDate: z.string().nullable().optional(),
 });
 
 /**
@@ -91,6 +99,8 @@ export async function GET(request: NextRequest) {
       priority: schema.goals.priority,
       status: schema.goals.status,
       note: schema.goals.note,
+      progressMode: schema.goals.progressMode,
+      startDate: schema.goals.startDate,
     })
     .from(schema.goals)
     .where(eq(schema.goals.userId, userId))
@@ -174,6 +184,8 @@ export async function GET(request: NextRequest) {
       targetAmount: g.targetAmount,
       deadline: g.deadline ?? null,
       accountIds: g.accountIds,
+      progressMode: g.progressMode,
+      startDate: g.startDate ?? null,
     })),
   );
 
@@ -202,6 +214,10 @@ export async function GET(request: NextRequest) {
       percentComplete: p?.progress ?? 0,
       remaining: p?.remaining ?? g.targetAmount,
       monthlyNeeded: p?.monthlyNeeded ?? 0,
+      progressMode: normalizeProgressMode(g.progressMode),
+      // Growth goals: the linked balance at the start, and now (goal currency).
+      startAmount: p?.startAmount ?? null,
+      balanceNow: p?.balanceNow ?? currentAmount,
       displayCurrency,
       targetAmountDisplay: toDisplay(g.targetAmount, g.currency),
       currentAmountDisplay: toDisplay(currentAmount, g.currency),
@@ -228,6 +244,10 @@ export async function POST(request: NextRequest) {
     } catch (e) {
       return NextResponse.json({ error: safeErrorMessage(e, "Invalid account") }, { status: 400 });
     }
+    const progressMode = d.progressMode ?? "balance";
+    const startDate = progressMode === "growth" ? d.startDate || null : null;
+    const modeRefusal = growthGoalRefusal({ progressMode, startDate, accountIds, today: todayISO() });
+    if (modeRefusal) return NextResponse.json({ error: modeRefusal }, { status: 400 });
     // Currency resolution (feedback #7): explicit > first linked account >
     // display currency. The web form always sends one, but the REST API is
     // public (mobile, API-key callers) and omitting it let the column default
@@ -264,6 +284,8 @@ export async function POST(request: NextRequest) {
         priority: d.priority ?? 1,
         status: d.status ?? "active",
         note: encryptOptional(dek, d.note) ?? "",
+        progressMode,
+        startDate,
         ...enc,
       }).returning({ id: schema.goals.id });
       const id = inserted[0]?.id;
@@ -313,6 +335,36 @@ export async function PUT(request: NextRequest) {
       } catch (e) {
         return NextResponse.json({ error: safeErrorMessage(e, "Invalid account") }, { status: 400 });
       }
+    }
+
+    // GH #423: judge the goal as it will be AFTER this update (mode, start
+    // date and accounts can each arrive alone).
+    if (data.progressMode !== undefined || data.startDate !== undefined || replaceAccountIds !== null) {
+      const current = await db
+        .select({ progressMode: schema.goals.progressMode, startDate: schema.goals.startDate })
+        .from(schema.goals)
+        .where(and(eq(schema.goals.id, id), eq(schema.goals.userId, userId)))
+        .get();
+      if (!current) return NextResponse.json({ error: "Goal not found" }, { status: 404 });
+      const nextMode = data.progressMode ?? normalizeProgressMode(current.progressMode);
+      const nextStart = nextMode === "growth"
+        ? (data.startDate !== undefined ? data.startDate || null : current.startDate)
+        : null;
+      const nextAccounts = replaceAccountIds ?? (
+        await db
+          .select({ accountId: schema.goalAccounts.accountId })
+          .from(schema.goalAccounts)
+          .where(and(eq(schema.goalAccounts.goalId, id), eq(schema.goalAccounts.userId, userId)))
+      ).map((r) => r.accountId);
+      const modeRefusal = growthGoalRefusal({
+        progressMode: nextMode,
+        startDate: nextStart,
+        accountIds: nextAccounts,
+        today: todayISO(),
+      });
+      if (modeRefusal) return NextResponse.json({ error: modeRefusal }, { status: 400 });
+      data.progressMode = nextMode;
+      data.startDate = nextStart;
     }
 
     // Stream D Phase 4 — plaintext `name` dropped; only encrypted siblings persist.

@@ -25,9 +25,10 @@
  */
 
 import { db, schema } from "@/db";
-import { and, eq, inArray, sql } from "drizzle-orm";
+import { and, eq, inArray, lt, sql } from "drizzle-orm";
 import { getHoldingsValueByAccount } from "@/lib/holdings-value";
 import { getLatestFxRate } from "@/lib/fx-service";
+import { dayBefore, normalizeProgressMode, type GoalProgressMode } from "@/lib/goals/progress-mode";
 
 export type GoalProgressInput = {
   id: number;
@@ -37,14 +38,24 @@ export type GoalProgressInput = {
   targetAmount: number;
   deadline: string | null;
   accountIds: number[];
+  /** GH #423: 'balance' (default) or 'growth' since `startDate`. */
+  progressMode?: string | null;
+  /** Growth goals only: the first day counted (YYYY-MM-DD). */
+  startDate?: string | null;
 };
 
 export type GoalProgressOutput = {
   goalId: number;
+  /** Balance goals: the linked balance. Growth goals: growth since the start date (can be negative). */
   currentAmount: number;
   progress: number;
   remaining: number;
   monthlyNeeded: number;
+  progressMode: GoalProgressMode;
+  /** The linked accounts' balance now, in the goal currency (= currentAmount for a balance goal). */
+  balanceNow: number;
+  /** Growth goals: the balance at the end of the day before the start date. Null for balance goals. */
+  startAmount: number | null;
 };
 
 /**
@@ -124,6 +135,46 @@ export async function computeGoalProgress(
     }
   }
 
+  // GH #423 — growth goals also need each linked account's balance at the end
+  // of the day before their start date. Same basis as "now": ledger sum for a
+  // cash account, holdings valued at that date for an investment account. One
+  // pass per distinct start date (most users have one or two).
+  const startBalances = new Map<string, Map<number, number>>(); // startDate -> accountId -> value
+  const growthGoals = goals.filter(
+    (g) => normalizeProgressMode(g.progressMode) === "growth" && g.startDate,
+  );
+  for (const startDate of new Set(growthGoals.map((g) => g.startDate as string))) {
+    const ids = Array.from(
+      new Set(growthGoals.filter((g) => g.startDate === startDate).flatMap((g) => g.accountIds)),
+    );
+    const byAccount = new Map<number, number>();
+    const cashIds = ids.filter((id) => accountMeta.get(id) && !accountMeta.get(id)!.isInvestment);
+    if (cashIds.length > 0) {
+      const rows = await db
+        .select({
+          accountId: schema.transactions.accountId,
+          total: sql<number>`COALESCE(SUM(${schema.transactions.amount}), 0)::float8`,
+        })
+        .from(schema.transactions)
+        .where(
+          and(
+            eq(schema.transactions.userId, userId),
+            inArray(schema.transactions.accountId, cashIds),
+            lt(schema.transactions.date, startDate),
+          ),
+        )
+        .groupBy(schema.transactions.accountId);
+      for (const r of rows) if (r.accountId != null) byAccount.set(r.accountId, Number(r.total ?? 0));
+    }
+    if (ids.some((id) => accountMeta.get(id)?.isInvestment)) {
+      const atStart = await getHoldingsValueByAccount(userId, dek, { asOfDate: dayBefore(startDate) });
+      for (const id of ids) {
+        if (accountMeta.get(id)?.isInvestment) byAccount.set(id, atStart.get(id)?.value ?? 0);
+      }
+    }
+    startBalances.set(startDate, byAccount);
+  }
+
   // FX cache shared across goals — most users have ≤3 distinct currencies.
   const fxCache = new Map<string, number>();
   const getFx = async (from: string, to: string): Promise<number> => {
@@ -139,7 +190,11 @@ export async function computeGoalProgress(
     // `goals.currency` is NOT NULL, so this fallback only covers a caller that
     // omits it. USD, never CAD (FINLYNQ-183 — the app-wide default).
     const goalCurrency = (g.currency ?? "USD").toUpperCase();
+    const mode = normalizeProgressMode(g.progressMode);
+    const growth = mode === "growth" && !!g.startDate;
+    const atStart = growth ? startBalances.get(g.startDate as string) : undefined;
     let currentAmount = 0;
+    let startAmount = 0;
     let linksLiability = false;
     for (const accountId of g.accountIds) {
       const meta = accountMeta.get(accountId);
@@ -150,7 +205,15 @@ export async function computeGoalProgress(
         : cashByAccount.get(accountId) ?? 0;
       const fx = await getFx(meta.currency, goalCurrency);
       currentAmount += valueInAccountCcy * fx;
+      // Both ends at today's rate, so a currency move alone is not growth.
+      if (atStart) startAmount += (atStart.get(accountId) ?? 0) * fx;
     }
+    const balanceNow = currentAmount;
+
+    // Growth goals count only what changed since the start date. A liability
+    // paid down reads as positive growth on its own, so the debt_payoff flip
+    // below is for balance goals only.
+    if (growth) currentAmount = balanceNow - startAmount;
 
     // debt_payoff goals linked to a liability account measure the debt itself:
     // the summed balance is negative (what is still owed), and progress is the
@@ -159,7 +222,7 @@ export async function computeGoalProgress(
     // no accounts (manual tracking) or one saving toward the payoff in an
     // asset account keeps the ordinary saved-balance rule; inverting those
     // read "nothing owed" and reported them 100% complete on day one.
-    if (g.type === "debt_payoff" && linksLiability) {
+    if (!growth && g.type === "debt_payoff" && linksLiability) {
       const owed = Math.max(-currentAmount, 0);
       currentAmount = Math.max(g.targetAmount - owed, 0);
     }
@@ -168,6 +231,8 @@ export async function computeGoalProgress(
       g.targetAmount > 0
         ? Math.min((currentAmount / g.targetAmount) * 100, 100)
         : 0;
+    // A growth goal whose accounts shrank since the start reads 0%, not negative.
+    const shownProgress = growth ? Math.max(progress, 0) : progress;
     const remaining = Math.max(g.targetAmount - currentAmount, 0);
 
     let monthlyNeeded = 0;
@@ -186,9 +251,12 @@ export async function computeGoalProgress(
     out.set(g.id, {
       goalId: g.id,
       currentAmount: Math.round(currentAmount * 100) / 100,
-      progress: Math.round(progress * 10) / 10,
+      progress: Math.round(shownProgress * 10) / 10,
       remaining: Math.round(remaining * 100) / 100,
       monthlyNeeded,
+      progressMode: growth ? "growth" : "balance",
+      balanceNow: Math.round(balanceNow * 100) / 100,
+      startAmount: growth ? Math.round(startAmount * 100) / 100 : null,
     });
   }
 

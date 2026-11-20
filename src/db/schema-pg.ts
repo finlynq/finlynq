@@ -674,9 +674,14 @@ export const goals = pgTable("goals", {
   // Stream D (2026-04-24) — dual-write.
   nameCt: text("name_ct"),
   nameLookup: text("name_lookup"),
+  // GH #423 (2026-11-20): 'balance' = linked balance now (default, every goal
+  // before this); 'growth' = growth since start_date. lib/goals/progress-mode.ts.
+  progressMode: text("progress_mode").notNull().default("balance"),
+  startDate: text("start_date"),
 }, (t) => [
   uniqueIndex("goals_user_name_lookup_uniq").on(t.userId, t.nameLookup),
   index("idx_goals_user_id").on(t.userId),
+  check("goals_progress_mode_check", sql`${t.progressMode} IN ('balance','growth')`),
 ]);
 
 // Multi-account goal linking (issue #130, 2026-05-03). JOIN grain is
