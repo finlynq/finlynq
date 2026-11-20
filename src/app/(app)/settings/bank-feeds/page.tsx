@@ -23,7 +23,7 @@ import { ConfirmDialog } from "@/components/ui/confirm-dialog";
 import { parseSaveError } from "@/lib/save-error";
 import { cn } from "@/lib/utils";
 import { formatCurrency } from "@/lib/currency";
-import { safeName } from "@/lib/safe-name";
+import { fetchPendingCharges, PendingChargesList, type PendingCharge } from "@/components/pending-charges";
 import { Landmark, Loader2, RefreshCw, CheckCircle2, ExternalLink, Link2, Plus, Clock, AlertTriangle } from "lucide-react";
 
 /** Mirrors SimplefinSyncStatus (src/lib/external-import/simplefin-sync-status.ts). */
@@ -39,18 +39,6 @@ interface SimplefinStatus {
   connected: boolean;
   lastSyncAt: string | null;
   lastSync: SyncStatus | null;
-}
-
-interface PendingCharge {
-  accountId: number | null;
-  accountName: string;
-  fitId: string;
-  date: string;
-  amount: number;
-  currency: string;
-  payee: string | null;
-  description: string | null;
-  syncedAt: string;
 }
 
 type AccountStatus = "mapped" | "suggested" | "new";
@@ -171,19 +159,8 @@ export default function BankFeedsSettingsPage() {
 
   const loadPending = useCallback(async () => {
     setPendingLoading(true);
-    try {
-      const res = await fetch("/api/settings/bank-feeds/simplefin/pending");
-      if (!res.ok) {
-        setPending([]);
-        return;
-      }
-      const json = (await res.json()) as { data?: { pending?: PendingCharge[] } };
-      setPending(json.data?.pending ?? []);
-    } catch {
-      setPending([]);
-    } finally {
-      setPendingLoading(false);
-    }
+    setPending(await fetchPendingCharges());
+    setPendingLoading(false);
   }, []);
 
   const load = useCallback(async () => {
@@ -616,9 +593,9 @@ export default function BankFeedsSettingsPage() {
               <div className="min-w-0">
                 <CardTitle className="text-base">Pending charges</CardTitle>
                 <CardDescription>
-                  Holds and not-yet-posted charges from your bank. These are volatile (a hold
-                  clears and re-posts as a distinct charge) so they are NOT added to your ledger —
-                  shown here for visibility only.
+                  Holds and not-yet-posted charges from your bank, as of the last sync. They
+                  aren&apos;t added to your transactions until the bank posts them, so a reversed
+                  hold never needs undoing. Each account&apos;s page shows its own.
                 </CardDescription>
               </div>
             </div>
@@ -632,26 +609,7 @@ export default function BankFeedsSettingsPage() {
             ) : pending.length === 0 ? (
               <p className="text-sm text-muted-foreground">No pending charges.</p>
             ) : (
-              <div className="rounded-xl border divide-y">
-                {pending.map((p) => (
-                  <div
-                    key={`${p.accountId ?? "x"}-${p.fitId}`}
-                    className="flex items-center justify-between gap-3 px-4 py-3"
-                  >
-                    <div className="min-w-0">
-                      <p className="text-sm font-medium truncate">
-                        {safeName(p.payee, "charge", 0)}
-                      </p>
-                      <p className="text-xs text-muted-foreground truncate">
-                        {p.date} · {p.accountName}
-                      </p>
-                    </div>
-                    <span className="text-sm font-medium tabular-nums shrink-0">
-                      {formatCurrency(p.amount, p.currency)}
-                    </span>
-                  </div>
-                ))}
-              </div>
+              <PendingChargesList rows={pending} />
             )}
           </CardContent>
         </Card>

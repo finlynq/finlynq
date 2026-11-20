@@ -106,13 +106,15 @@ function decryptPendingField(
  * Read the caller's CURRENT pending-charges snapshot (owner-scoped), decrypted.
  *
  * This is a LIVE snapshot, not history — the writer refreshes each account's
- * rows on every sync. Ordered date DESC (newest first). Account names are
+ * rows on every sync. Ordered date DESC (newest first). `accountId` narrows it to
+ * one account (the account page). Account names are
  * decrypted at this boundary via the standard `decryptName` path; payee/
  * description are tier-aware. Empty array when the snapshot is empty.
  */
 export async function listPendingTransactions(
   userId: string,
   dek: Buffer,
+  opts: { accountId?: number } = {},
 ): Promise<PendingChargeRow[]> {
   const rows = await db
     .select({
@@ -133,7 +135,14 @@ export async function listPendingTransactions(
       schema.accounts,
       eq(schema.accounts.id, schema.simplefinPendingTransactions.accountId),
     )
-    .where(eq(schema.simplefinPendingTransactions.userId, userId))
+    .where(
+      opts.accountId != null
+        ? and(
+            eq(schema.simplefinPendingTransactions.userId, userId),
+            eq(schema.simplefinPendingTransactions.accountId, opts.accountId),
+          )
+        : eq(schema.simplefinPendingTransactions.userId, userId),
+    )
     .orderBy(desc(schema.simplefinPendingTransactions.date));
 
   return rows.map((r) => {

@@ -9,6 +9,7 @@ type ClientTab =
   | "claude-web"
   | "claude-desktop"
   | "chatgpt"
+  | "gemini"
   | "cursor"
   | "cline"
   | "windsurf"
@@ -277,6 +278,23 @@ export function McpGuide({ embedded = false }: { embedded?: boolean }) {
   );
 
   const cursorConfig = httpConfig;
+
+  // Gemini CLI reads Streamable HTTP servers from `httpUrl` (its `url` key means
+  // SSE), so it can't share httpConfig. OAuth is the default there: the CLI
+  // discovers it and registers itself, then `/mcp auth finlynq` signs in.
+  const geminiCliCommand = `gemini mcp add --transport http --scope user finlynq ${mcpUrl}`;
+  const geminiConfig = JSON.stringify(
+    {
+      mcpServers: {
+        finlynq: {
+          httpUrl: mcpUrl,
+          headers: { Authorization: "Bearer YOUR_API_KEY" },
+        },
+      },
+    },
+    null,
+    2
+  );
   const windsurfConfig = httpConfig;
 
   // Claude Desktop has no native remote-MCP support, so it shells out to
@@ -316,6 +334,7 @@ export function McpGuide({ embedded = false }: { embedded?: boolean }) {
     { id: "claude-web", label: "Claude Web / Mobile", icon: "🌐" },
     { id: "claude-desktop", label: "Claude Desktop", icon: "🖥️" },
     { id: "chatgpt", label: "ChatGPT", icon: "💬" },
+    { id: "gemini", label: "Gemini", icon: "✨" },
     { id: "cursor", label: "Cursor", icon: "⚡" },
     { id: "cline", label: "Cline (VS Code)", icon: "🔌" },
     { id: "windsurf", label: "Windsurf", icon: "🌊" },
@@ -334,7 +353,7 @@ export function McpGuide({ embedded = false }: { embedded?: boolean }) {
             </div>
             <div>
               <h1 className="text-2xl font-bold tracking-tight text-foreground">Connect Your AI</h1>
-              <p className="text-sm text-muted-foreground">Ask Claude, ChatGPT, Cursor, Windsurf, or any MCP client about your finances.</p>
+              <p className="text-sm text-muted-foreground">Ask Claude, ChatGPT, Gemini, Cursor, Windsurf, or any MCP client about your finances.</p>
             </div>
           </div>
 
@@ -707,6 +726,135 @@ export function McpGuide({ embedded = false }: { embedded?: boolean }) {
                     is separate from <strong>publishing</strong> Finlynq to the ChatGPT app directory (a
                     review-gated submission). The steps above are all you need to use it yourself.
                   </p>
+                </div>
+              </div>
+            )}
+
+            {activeTab === "gemini" && (
+              <div className="space-y-6 text-sm text-foreground">
+                <div className="flex items-start gap-3 rounded-xl border border-indigo-500/25 bg-indigo-500/8 p-4">
+                  <div className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg bg-indigo-500/15">
+                    <Globe className="h-4 w-4 text-indigo-400" />
+                  </div>
+                  <div>
+                    <p className="font-semibold text-foreground mb-0.5">Same server, two ways in</p>
+                    <p className="text-xs text-muted-foreground">
+                      The Gemini web app connects to Finlynq as a custom app, and Gemini CLI connects from
+                      your terminal. Both use the same Finlynq server URL and sign in with OAuth.
+                    </p>
+                  </div>
+                </div>
+
+                <div className="space-y-4">
+                  <h3 className="font-semibold">Gemini app (web, then also on your phone)</h3>
+                  <p className="text-xs text-muted-foreground">
+                    Google currently offers custom apps only with a personal Google Account (not work or
+                    school), to people 18 or older in the US, in English, with Gemini history turned on.
+                    You add the app on the web; once connected it also works in the Gemini mobile app.
+                  </p>
+                  <ol className="space-y-5">
+                    <li className="flex gap-3">
+                      <span className="flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-primary/20 text-[11px] font-bold text-primary mt-0.5">
+                        1
+                      </span>
+                      <div>
+                        <p className="font-medium mb-1">Open Connected Apps</p>
+                        <p className="text-muted-foreground">
+                          On <strong>gemini.google.com</strong>, click <strong>Settings</strong> at the bottom,
+                          then <strong>Connected Apps</strong>. If you don&apos;t see it, click{" "}
+                          <strong>Personal Intelligence</strong>, then <strong>Connected Apps</strong>.
+                        </p>
+                      </div>
+                    </li>
+                    <li className="flex gap-3">
+                      <span className="flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-primary/20 text-[11px] font-bold text-primary mt-0.5">
+                        2
+                      </span>
+                      <div className="flex-1 min-w-0">
+                        <p className="font-medium mb-2">
+                          Under <strong>Custom apps</strong>, click <strong>Add a custom app</strong> and paste
+                          the server URL
+                        </p>
+                        <div className="relative flex items-center gap-3 rounded-lg border border-border bg-muted/40 px-3 py-2 pr-10 text-xs">
+                          <code className="flex-1 min-w-0 text-foreground font-mono break-all">{mcpUrl}</code>
+                          <CopyButton text={mcpUrl} />
+                        </div>
+                        <p className="text-xs text-muted-foreground mt-2">
+                          Leave <strong>Advanced features</strong> as it is: Finlynq registers Gemini
+                          automatically, so there is no client ID or secret to enter.
+                        </p>
+                      </div>
+                    </li>
+                    <li className="flex gap-3">
+                      <span className="flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-primary/20 text-[11px] font-bold text-primary mt-0.5">
+                        3
+                      </span>
+                      <div>
+                        <p className="font-medium mb-1">Click <strong>Next</strong>, then authorize</p>
+                        <p className="text-muted-foreground">
+                          Gemini opens a Finlynq authorization page. Log in if prompted, then click{" "}
+                          <strong>Allow</strong>.
+                        </p>
+                      </div>
+                    </li>
+                  </ol>
+                </div>
+
+                <div className="space-y-4">
+                  <h3 className="font-semibold">Gemini CLI</h3>
+                  <ol className="space-y-5">
+                    <li className="flex gap-3">
+                      <span className="flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-primary/20 text-[11px] font-bold text-primary mt-0.5">
+                        1
+                      </span>
+                      <div className="flex-1 min-w-0">
+                        <p className="font-medium mb-2">Add Finlynq from your terminal</p>
+                        <div className="relative">
+                          <pre className="text-xs bg-muted rounded-lg p-4 overflow-x-auto text-muted-foreground leading-relaxed pr-10">
+                            {geminiCliCommand}
+                          </pre>
+                          <CopyButton text={geminiCliCommand} />
+                        </div>
+                      </div>
+                    </li>
+                    <li className="flex gap-3">
+                      <span className="flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-primary/20 text-[11px] font-bold text-primary mt-0.5">
+                        2
+                      </span>
+                      <div>
+                        <p className="font-medium mb-1">Sign in</p>
+                        <p className="text-muted-foreground">
+                          Start <code className="text-xs bg-muted px-1 py-0.5 rounded">gemini</code> and run{" "}
+                          <code className="text-xs bg-muted px-1 py-0.5 rounded">/mcp auth finlynq</code>. A
+                          browser window opens the Finlynq authorization page; click <strong>Allow</strong>.
+                          Run <code className="text-xs bg-muted px-1 py-0.5 rounded">/mcp</code> to see the
+                          Finlynq tools.
+                        </p>
+                      </div>
+                    </li>
+                    <li className="flex gap-3">
+                      <span className="flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-primary/20 text-[11px] font-bold text-primary mt-0.5">
+                        3
+                      </span>
+                      <div className="flex-1 min-w-0">
+                        <p className="font-medium mb-2">
+                          Or use an API key instead: add this to{" "}
+                          <code className="text-xs bg-muted px-1 py-0.5 rounded">~/.gemini/settings.json</code>
+                        </p>
+                        <div className="relative">
+                          <pre className="text-xs bg-muted rounded-lg p-4 overflow-x-auto text-muted-foreground leading-relaxed pr-10">
+                            {geminiConfig}
+                          </pre>
+                          <CopyButton text={geminiConfig} />
+                        </div>
+                        <p className="text-xs text-muted-foreground mt-2">
+                          Use <code className="bg-muted px-1 py-0.5 rounded">httpUrl</code>, not{" "}
+                          <code className="bg-muted px-1 py-0.5 rounded">url</code>: in Gemini CLI,{" "}
+                          <code className="bg-muted px-1 py-0.5 rounded">url</code> is the older SSE transport.
+                        </p>
+                      </div>
+                    </li>
+                  </ol>
                 </div>
               </div>
             )}

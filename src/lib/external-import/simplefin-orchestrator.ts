@@ -190,7 +190,12 @@ async function fetchAndTransform(userId: string, dek: Buffer) {
   // sync or after a long gap (see simplefinWindowDays).
   const windowDays = simplefinWindowDays(lastFetchAt(await getSyncStatus(userId)));
   const startDate = Math.floor(Date.now() / 1000) - windowDays * 24 * 60 * 60;
-  const resp = await client.fetchAccounts({ startDate });
+  // `pending: true` asks SimpleFIN for holds too. The transform keeps them OUT of
+  // the rows that get staged (they go to `acct.pending`, a snapshot shown on
+  // Bank feeds and the account page, never the ledger), so a reversed hold just
+  // drops out of the next snapshot. Without it SimpleFIN omits most pending rows
+  // and the Pending charges card stayed empty (GH #421).
+  const resp = await client.fetchAccounts({ startDate, pending: true });
   const result = simplefin.simplefinToRawTransactions(resp);
   // SimpleFIN's note about the window we asked for is expected on a long
   // window and says nothing about the user's bank: drop it from the problems.
