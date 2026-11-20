@@ -31,6 +31,7 @@ import { apiHandler } from "@/lib/api-handler";
 import { buildNameFields, decryptName, decryptNamedRows } from "@/lib/crypto/encrypted-columns";
 import { resolveOrCreateSecurity, gcOrphanSecurity } from "@/lib/securities/resolve";
 import { loadCustomPriceMap } from "@/lib/securities/custom-prices";
+import { markPriceSourceChanged } from "@/lib/securities/custom-price-store";
 import { findNeverPricedSecurityIds } from "@/lib/securities/price-coverage";
 import { isPgErrorCode, pgErrorConstraint } from "@/lib/db-utils";
 
@@ -340,6 +341,9 @@ export const PATCH = apiHandler(
     if (updated.length === 0) {
       return NextResponse.json({ error: "Security not found" }, { status: 404 });
     }
+    // Stored net-worth history used the old price source: rebuild from the
+    // security's first mark (shared with MCP manage_security_prices).
+    if (body.priceSource !== undefined) await markPriceSourceChanged(userId, body.id);
     // Only the name change propagates to member positions; asset_type lives on
     // the securities row alone (display-only, no per-position column).
     if (!renaming) {

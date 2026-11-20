@@ -13,15 +13,24 @@
  *
  * Auth: requireAuth (NO DEK — prices are plain numbers, like price_cache).
  * Owner-scoped (user_id) throughout. Enveloped { success, data }.
+ *
+ * Reads and writes go through custom-price-store.ts, which MCP
+ * `manage_security_prices` also uses (and which stamps net-worth history dirty
+ * when a manual security's marks change).
  */
 
 import { NextResponse } from "next/server";
 import { z } from "zod";
-import { and, desc, eq } from "drizzle-orm";
 
-import { db, schema } from "@/db";
 import { apiHandler } from "@/lib/api-handler";
 import { isReasonableAmount } from "@/lib/utils/number";
+import {
+  CustomPriceError,
+  deleteCustomPrices,
+  listCustomPrices,
+  securityIdForMark,
+  upsertCustomPrices,
+} from "@/lib/securities/custom-price-store";
 
 const ISO_DATE = /^\d{4}-\d{2}-\d{2}$/;
 
@@ -37,22 +46,7 @@ export const GET = apiHandler(
     if (!Number.isFinite(securityId) || securityId <= 0) {
       return NextResponse.json({ error: "Missing or invalid securityId" }, { status: 400 });
     }
-    const rows = await db
-      .select({
-        id: schema.customSecurityPrices.id,
-        date: schema.customSecurityPrices.date,
-        price: schema.customSecurityPrices.price,
-        currency: schema.customSecurityPrices.currency,
-      })
-      .from(schema.customSecurityPrices)
-      .where(
-        and(
-          eq(schema.customSecurityPrices.userId, userId),
-          eq(schema.customSecurityPrices.securityId, securityId),
-        ),
-      )
-      .orderBy(desc(schema.customSecurityPrices.date));
-    return rows.map((r) => ({ ...r, price: Number(r.price) }));
+    return listCustomPrices(userId, securityId);
   },
 );
 
@@ -62,6 +56,12 @@ const postSchema = z.object({
   price: z.number().refine(isReasonableAmount, "Price is out of range"),
 });
 
+/** A store refusal as the route's existing bare error shapes (404 / 400). */
+function refusal(e: unknown): NextResponse | null {
+  if (!(e instanceof CustomPriceError)) return null;
+  return NextResponse.json({ error: e.message }, { status: e.code === "not_found" ? 404 : 400 });
+}
+
 /**
  * POST /api/securities/prices — upsert one mark. The currency is taken from the
  * security row (not the request). One mark per (user, security, date): a repeat
@@ -70,36 +70,16 @@ const postSchema = z.object({
 export const POST = apiHandler(
   { auth: "auth", body: postSchema, fallbackMessage: "Failed to save price" },
   async ({ userId, body }) => {
-    if (body.price < 0) {
-      return NextResponse.json({ error: "Price cannot be negative" }, { status: 400 });
+    try {
+      const { security, ids } = await upsertCustomPrices(userId, body.securityId, [
+        { date: body.date, price: body.price },
+      ]);
+      return { id: ids[0], securityId: body.securityId, date: body.date, price: body.price, currency: security.currency };
+    } catch (e) {
+      const r = refusal(e);
+      if (r) return r;
+      throw e;
     }
-    const sec = await db
-      .select({ id: schema.securities.id, currency: schema.securities.currency })
-      .from(schema.securities)
-      .where(and(eq(schema.securities.id, body.securityId), eq(schema.securities.userId, userId)))
-      .get();
-    if (!sec) return NextResponse.json({ error: "Security not found" }, { status: 404 });
-
-    const inserted = await db
-      .insert(schema.customSecurityPrices)
-      .values({
-        userId,
-        securityId: body.securityId,
-        date: body.date,
-        price: body.price,
-        currency: sec.currency,
-      })
-      .onConflictDoUpdate({
-        target: [
-          schema.customSecurityPrices.userId,
-          schema.customSecurityPrices.securityId,
-          schema.customSecurityPrices.date,
-        ],
-        set: { price: body.price, currency: sec.currency, updatedAt: new Date() },
-      })
-      .returning({ id: schema.customSecurityPrices.id });
-    const id = Array.isArray(inserted) ? inserted[0]?.id : undefined;
-    return { id, securityId: body.securityId, date: body.date, price: body.price, currency: sec.currency };
   },
 );
 
@@ -114,14 +94,9 @@ export const DELETE = apiHandler(
     if (!Number.isFinite(id) || id <= 0) {
       return NextResponse.json({ error: "Missing or invalid id" }, { status: 400 });
     }
-    await db
-      .delete(schema.customSecurityPrices)
-      .where(
-        and(
-          eq(schema.customSecurityPrices.id, id),
-          eq(schema.customSecurityPrices.userId, userId),
-        ),
-      );
+    const securityId = await securityIdForMark(userId, id);
+    // An unknown or another user's mark: nothing to delete (unchanged behaviour).
+    if (securityId != null) await deleteCustomPrices(userId, securityId, { ids: [id] });
     return { success: true };
   },
 );

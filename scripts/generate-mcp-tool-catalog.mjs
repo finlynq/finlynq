@@ -129,6 +129,7 @@ const HTTP_GROUP_FILES = [
   "rules",
   "loans",
   "lots",
+  "security-prices",
   "fx",
   "subscriptions",
   "imports",

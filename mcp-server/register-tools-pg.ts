@@ -28,6 +28,7 @@ import { registerCategoriesTools } from "./tools/categories";
 import { registerRulesTools } from "./tools/rules";
 import { registerLoansTools } from "./tools/loans";
 import { registerLotsTools } from "./tools/lots";
+import { registerSecurityPricesTools } from "./tools/security-prices";
 import { registerFxTools } from "./tools/fx";
 import { registerSubscriptionsTools } from "./tools/subscriptions";
 import { registerImportsTools } from "./tools/imports";
@@ -69,6 +70,7 @@ export function registerPgTools(
   registerRulesTools(server, ctx);
   registerLoansTools(server, ctx);
   registerLotsTools(server, ctx);
+  registerSecurityPricesTools(server, ctx);
   registerFxTools(server, ctx);
   registerSubscriptionsTools(server, ctx);
   registerImportsTools(server, ctx);

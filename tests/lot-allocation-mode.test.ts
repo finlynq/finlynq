@@ -242,9 +242,10 @@ describe("MCP manage_lots", () => {
   it("is registered, counted and marked destructive", () => {
     expect(code("mcp-server/register-tools-pg.ts")).toContain("registerLotsTools(server, ctx)");
     // 55 when manage_lots landed; 54 since add_snapshot was removed (2026-11-08);
-    // 56 with the two guidance tools (FINLYNQ-219, 2026-11-16).
-    expect(MCP_TOOL_COUNTS.http).toBe(56);
-    expect(read("README.md")).toContain("56 HTTP / 89 stdio");
+    // 56 with the two guidance tools (FINLYNQ-219, 2026-11-16); 57 with
+    // manage_security_prices (GH #394, 2026-11-20).
+    expect(MCP_TOOL_COUNTS.http).toBe(57);
+    expect(read("README.md")).toContain("57 HTTP / 89 stdio");
     expect(code("mcp-server/auto-annotations.ts")).toContain("manage_lots: { destructiveHint: true }");
     expect(read("scripts/generate-mcp-tool-catalog.mjs")).toContain('"lots",');
   });

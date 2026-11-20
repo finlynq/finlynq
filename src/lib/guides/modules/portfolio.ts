@@ -34,6 +34,9 @@ The user picks one of two methods (\`manage_lots(op='status')\` tells you which)
 - **Advanced lot allocation**: each sale is matched to specific purchases (first in, first out unless changed). \`manage_lots(op='list')\` shows the lots, \`op='reassign'\` changes which lots one sale used (preview first), \`op='rebuild'\` replays a holding's trades.
 Tell the user which method a figure uses when cost or gains matter.
 
+## Manual prices
+For a security Yahoo Finance and CoinGecko can't price (a bond with no Yahoo ticker, a private fund), use \`manage_security_prices\`: \`op='set_source'\` with \`source='manual'\` once, then \`op='set'\` with dated prices in the security's currency (many at once is fine). Each day uses the latest price on or before it, and the holding is worth 0 before its first price. \`op='list'\` shows every security's price source and its marks. If the user has another tool that gives quotes, read the prices there and pass them in; confirm the dates and prices with the user before a large backfill.
+
 ## Things that trip people up
 - A sale bigger than the shares held opens a short position; a later buy closes it.
 - Tiny leftovers from rounding (a few ten-thousandths of a unit worth under 5 cents) count as closed.

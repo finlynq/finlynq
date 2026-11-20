@@ -12,8 +12,9 @@
  * apiHandler({ auth: "encryption" }) so payee/description decrypt with the
  * session DEK and a request without a DEK is refused with 423 (never ciphertext),
  * and so the FINLYNQ-261 api-handler-adoption guardrail passes. The new
- * Bank-feeds "Pending charges" panel is the only consumer → the default
- * envelope is safe (no bare-shape mobile/legacy consumer).
+ * Bank-feeds "Pending charges" panel and the account page's Pending card are
+ * the consumers → the default envelope is safe (no bare-shape mobile/legacy
+ * consumer). `?accountId=N` narrows to one account.
  */
 
 import { apiHandler } from "@/lib/api-handler";
@@ -21,8 +22,12 @@ import { listPendingTransactions } from "@/lib/external-import/simplefin-pending
 
 export const dynamic = "force-dynamic";
 
-export const GET = apiHandler({ auth: "encryption" }, async ({ userId, dek }) => {
+export const GET = apiHandler({ auth: "encryption" }, async ({ request, userId, dek }) => {
+  // `?accountId=N` narrows to one account (the account page's Pending card).
+  // Still owner-scoped: the user_id predicate always applies.
+  const raw = request.nextUrl.searchParams.get("accountId");
+  const accountId = raw != null && /^\d+$/.test(raw) ? Number(raw) : undefined;
   // dek is guaranteed non-null under auth: "encryption" (the 423 gate).
-  const pending = await listPendingTransactions(userId, dek as Buffer);
+  const pending = await listPendingTransactions(userId, dek as Buffer, { accountId });
   return { pending };
 });

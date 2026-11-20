@@ -283,7 +283,7 @@ export function LandingClient() {
           <div className="hero-copy reveal">
             <div className="hero-bar">
               <span className="tag">MCP</span>
-              <span>{MCP_TOOL_COUNTS.http} HTTP / {MCP_TOOL_COUNTS.stdio} stdio tools · Claude · ChatGPT · Cursor · Windsurf · Cline</span>
+              <span>{MCP_TOOL_COUNTS.http} HTTP / {MCP_TOOL_COUNTS.stdio} stdio tools · Claude · ChatGPT · Gemini · Cursor · Windsurf · Cline</span>
             </div>
 
             <Link href="/blog/finlynq-mobile-app" className="hero-bar hero-bar-mobile hero-bar-link">

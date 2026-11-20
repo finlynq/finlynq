@@ -15,7 +15,8 @@
 // 2026-11-08: `add_snapshot` removed (55 → 54) — it wrote a table prod no
 // longer has, so every call failed; net-worth history is automatic.
 // 2026-11-16: `get_guidance` + `manage_guidance_notes` added (54 → 56), FINLYNQ-219.
-export const MCP_TOOL_COUNTS = { http: 56, stdio: 89 } as const;
+// 2026-11-20: `manage_security_prices` added (56 → 57), GH #394.
+export const MCP_TOOL_COUNTS = { http: 57, stdio: 89 } as const;
 // 4.1.0 (reconcile-consolidation): the CLEAN BREAK. The statement-import +
 // bank-reconcile cohort folds into `reconcile` / `manage_statement_import` /
 // `manage_bank_ledger` (op discriminator), un-gated into the default session

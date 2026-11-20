@@ -40,6 +40,7 @@ import { Label } from "@/components/ui/label";
 import { Combobox, type ComboboxItemShape } from "@/components/ui/combobox";
 import { ConfirmDialog } from "@/components/ui/confirm-dialog";
 import { ErrorState } from "@/components/error-state";
+import { AccountPendingChargesCard } from "@/components/pending-charges";
 import { useActiveCurrencies } from "@/lib/hooks/useActiveCurrencies";
 import { ModePicker } from "@/components/inbox/mode-picker";
 import { ImportPrefsPicker } from "@/components/inbox/import-prefs-picker";
@@ -581,6 +582,11 @@ export default function AccountDetailPage() {
           disables URL sync; the other filter options stay available.
           `onDataChange` keeps the header tiles (balance + tx count) in sync
           after a bulk/inline edit. Wrapped in Suspense for its useSearchParams. */}
+      {/* SimpleFIN holds not yet posted (GH #421): shown above the transactions,
+          never counted in them or in the balance. Renders nothing for an
+          account without pending charges. */}
+      <AccountPendingChargesCard accountId={account.id} />
+
       <Suspense fallback={<div className="h-40 bg-muted animate-pulse rounded-xl" />}>
         <TransactionsWorkspace
           lockedAccountId={account.id}

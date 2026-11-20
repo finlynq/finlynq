@@ -11,7 +11,7 @@ export const metadata: Metadata = {
   openGraph: {
     title: "Finlynq MCP guide: connect any AI assistant to your finances",
     description:
-      "Set up the Finlynq MCP server in Claude, Cursor, Windsurf, and more. OAuth 2.1, Bearer key, or stdio.",
+      "Set up the Finlynq MCP server in Claude, ChatGPT, Gemini, Cursor, Windsurf, and more. OAuth 2.1, Bearer key, or stdio.",
     url: "/mcp-guide",
     type: "article",
     siteName: "Finlynq",
@@ -20,7 +20,7 @@ export const metadata: Metadata = {
     card: "summary_large_image",
     title: "Finlynq MCP guide",
     description:
-      "Connect Claude, Cursor, Windsurf and more to your Finlynq financial data.",
+      "Connect Claude, ChatGPT, Gemini, Cursor, Windsurf and more to your Finlynq financial data.",
   },
 };
 
