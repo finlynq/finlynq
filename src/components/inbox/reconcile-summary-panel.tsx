@@ -36,6 +36,10 @@ export interface ReconcileSummaryApiRow {
   lastImportAt: string | null;
   lastReconciledAt: string | null;
   pendingCount: number;
+  /** GH #422: the account's import policy. */
+  mode?: "auto" | "approve" | "manual";
+  /** GH #422: statement files still waiting in staging for this account. */
+  pendingFiles?: number;
 }
 
 function fmtDate(iso: string | null): string {

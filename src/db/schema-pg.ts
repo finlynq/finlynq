@@ -674,9 +674,32 @@ export const goals = pgTable("goals", {
   // Stream D (2026-04-24) — dual-write.
   nameCt: text("name_ct"),
   nameLookup: text("name_lookup"),
+  // GH #423 (2026-11-20): 'balance' = linked balance now (default, every goal
+  // before this); 'growth' = growth since start_date. lib/goals/progress-mode.ts.
+  progressMode: text("progress_mode").notNull().default("balance"),
+  startDate: text("start_date"),
 }, (t) => [
   uniqueIndex("goals_user_name_lookup_uniq").on(t.userId, t.nameLookup),
   index("idx_goals_user_id").on(t.userId),
+  check("goals_progress_mode_check", sql`${t.progressMode} IN ('balance','growth')`),
+]);
+
+// GH #420 (2026-11-20): optional per-account logo, shown instead of the letter
+// avatar. image_ct = base64 PNG (<=128px, normalized in the browser) encrypted
+// with the user's DEK, like account names (a logo identifies the bank);
+// domain_ct = where it was fetched from, also encrypted. Cascades off accounts,
+// so account delete / Clear All Data / account deletion remove it.
+// -> lib/accounts/logo-store.ts
+export const accountLogos = pgTable("account_logos", {
+  accountId: integer("account_id").primaryKey().references(() => accounts.id, { onDelete: "cascade" }),
+  userId: text("user_id").notNull(),
+  imageCt: text("image_ct").notNull(),
+  domainCt: text("domain_ct"),
+  source: text("source").notNull(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+}, (t) => [
+  index("account_logos_user_idx").on(t.userId),
+  check("account_logos_source_check", sql`${t.source} IN ('upload','domain')`),
 ]);
 
 // Multi-account goal linking (issue #130, 2026-05-03). JOIN grain is

@@ -19,6 +19,7 @@ import { ConfirmDialog } from "@/components/ui/confirm-dialog";
 import { ErrorState } from "@/components/error-state";
 import { PageSkeleton } from "@/components/page-skeleton";
 import { parseSaveError } from "@/lib/save-error";
+import { todayISO } from "@/lib/utils/date";
 
 type Goal = {
   id: number; name: string; type: string; targetAmount: number; currentAmount: number;
@@ -33,6 +34,10 @@ type Goal = {
   // FINLYNQ-123: current-rate conversions into the display currency. The ONLY
   // figures the summary tiles may sum — per-goal amounts stay in `currency`.
   targetAmountDisplay?: number; currentAmountDisplay?: number;
+  // GH #423: 'growth' goals count growth since startDate; startAmount and
+  // balanceNow are the linked balance then and now (goal currency).
+  progressMode?: "balance" | "growth"; startDate?: string | null;
+  startAmount?: number | null; balanceNow?: number;
 };
 type Account = { id: number; name: string };
 
@@ -45,6 +50,13 @@ type FormState = {
   accountIds: number[]; // issue #130 — multi-account
   priority: string;
   note: string;
+  progressMode: "balance" | "growth";
+  startDate: string;
+};
+
+const PROGRESS_MODE_LABELS: Record<string, string> = {
+  balance: "Reach a balance",
+  growth: "Grow by an amount",
 };
 
 const goalTypeConfig: Record<string, { label: string; badgeClass: string; borderClass: string }> = {
@@ -89,6 +101,8 @@ function emptyForm(displayCurrency: string): FormState {
     accountIds: [],
     priority: "1",
     note: "",
+    progressMode: "balance",
+    startDate: todayISO(),
   };
 }
 
@@ -102,6 +116,8 @@ function goalToForm(g: Goal, displayCurrency: string): FormState {
     accountIds: g.accountIds ?? [],
     priority: String(g.priority ?? 1),
     note: g.note ?? "",
+    progressMode: g.progressMode === "growth" ? "growth" : "balance",
+    startDate: g.startDate ?? todayISO(),
   };
 }
 
@@ -140,6 +156,11 @@ function GoalEditForm({
     const e: Record<string, string> = {};
     if (!form.name.trim()) e.name = "Name is required";
     if (!form.targetAmount || parseFloat(form.targetAmount) <= 0) e.targetAmount = "Target amount must be greater than 0";
+    if (form.progressMode === "growth") {
+      if (!form.startDate) e.startDate = "Pick the date to count growth from";
+      else if (form.startDate > todayISO()) e.startDate = "The start date can't be in the future";
+      if (form.accountIds.length === 0) e.accounts = "Link at least one account to measure its growth";
+    }
     setErrors(e);
     return Object.keys(e).length === 0;
   }
@@ -178,6 +199,8 @@ function GoalEditForm({
         accountIds: form.accountIds,
         priority: parseInt(form.priority),
         note: form.note,
+        progressMode: form.progressMode,
+        startDate: form.progressMode === "growth" ? form.startDate : null,
       };
       let res: Response;
       if (mode === "edit" && goalId != null) {
@@ -241,9 +264,37 @@ function GoalEditForm({
         </div>
       </div>
       <div>
-        <Label>Target Amount</Label>
-        <Input type="number" step="0.01" value={form.targetAmount} onChange={(e) => { setForm({ ...form, targetAmount: e.target.value }); setErrors({ ...errors, targetAmount: "" }); }} />
-        {errors.targetAmount && <p className="text-xs text-destructive mt-1">{errors.targetAmount}</p>}
+        <Label>Progress</Label>
+        <Select
+          items={PROGRESS_MODE_LABELS}
+          value={form.progressMode}
+          onValueChange={(v) => { setForm({ ...form, progressMode: v === "growth" ? "growth" : "balance" }); setErrors({ ...errors, startDate: "", accounts: "" }); }}
+        >
+          <SelectTrigger><SelectValue /></SelectTrigger>
+          <SelectContent>
+            <SelectItem value="balance">Reach a balance</SelectItem>
+            <SelectItem value="growth">Grow by an amount</SelectItem>
+          </SelectContent>
+        </Select>
+        <p className="text-xs text-muted-foreground mt-1">
+          {form.progressMode === "growth"
+            ? "Counts only how much the linked accounts grow from the start date, so money already in them, or saved there for other goals, isn't counted."
+            : "Counts the linked accounts' whole balance."}
+        </p>
+      </div>
+      <div className={form.progressMode === "growth" ? "grid grid-cols-2 gap-3" : ""}>
+        <div>
+          <Label>{form.progressMode === "growth" ? "Grow by" : "Target Amount"}</Label>
+          <Input type="number" step="0.01" value={form.targetAmount} onChange={(e) => { setForm({ ...form, targetAmount: e.target.value }); setErrors({ ...errors, targetAmount: "" }); }} />
+          {errors.targetAmount && <p className="text-xs text-destructive mt-1">{errors.targetAmount}</p>}
+        </div>
+        {form.progressMode === "growth" && (
+          <div>
+            <Label>Start date</Label>
+            <Input type="date" max={todayISO()} value={form.startDate} onChange={(e) => { setForm({ ...form, startDate: e.target.value }); setErrors({ ...errors, startDate: "" }); }} />
+            {errors.startDate && <p className="text-xs text-destructive mt-1">{errors.startDate}</p>}
+          </div>
+        )}
       </div>
       <div className="grid grid-cols-2 gap-3">
         <div>
@@ -297,8 +348,11 @@ function GoalEditForm({
           emptyMessage="No matches"
           className="w-full"
         />
+        {errors.accounts && <p className="text-xs text-destructive mt-1">{errors.accounts}</p>}
         <p className="text-xs text-muted-foreground mt-1">
-          Goal progress sums transactions across every linked account. Leave empty for manual tracking.
+          {form.progressMode === "growth"
+            ? "Growth is measured across every linked account, from their balance the day before the start date."
+            : "Goal progress sums transactions across every linked account. Leave empty for manual tracking."}
         </p>
       </div>
       <div>
@@ -515,6 +569,12 @@ export default function GoalsPage() {
                     <h3 className="font-semibold">{g.name}</h3>
                     <div className="flex flex-wrap gap-2 mt-1">
                       <Badge className={config.badgeClass}>{config.label}</Badge>
+                      {g.progressMode === "growth" && g.startDate && (
+                        <Badge variant="outline" className="gap-1">
+                          <TrendingUp className="h-3 w-3" />
+                          Growth since {g.startDate}
+                        </Badge>
+                      )}
                       {g.currency && g.currency !== displayCurrency && (
                         <Badge variant="outline" className="font-mono text-xs">{g.currency}</Badge>
                       )}
@@ -545,10 +605,18 @@ export default function GoalsPage() {
               </div>
               <div className="space-y-2">
                 <div className="flex justify-between text-sm">
-                  <span>{formatCurrency(g.currentAmount, g.currency || displayCurrency)} of {formatCurrency(g.targetAmount, g.currency || displayCurrency)}</span>
+                  <span>
+                    {g.progressMode === "growth" ? "Grew " : ""}
+                    {formatCurrency(g.currentAmount, g.currency || displayCurrency)} of {formatCurrency(g.targetAmount, g.currency || displayCurrency)}
+                  </span>
                   <span className={`font-bold ${progressTextClass(g.progress)}`}>{g.progress}%</span>
                 </div>
                 <Progress value={g.progress} className={`h-3 ${progressColorClass(g.progress)}`} />
+                {g.progressMode === "growth" && g.startAmount != null && (
+                  <p className="text-xs text-muted-foreground">
+                    Linked balance {formatCurrency(g.startAmount, g.currency || displayCurrency)} at the start, {formatCurrency(g.balanceNow ?? 0, g.currency || displayCurrency)} now
+                  </p>
+                )}
                 <div className="flex justify-between text-xs text-muted-foreground">
                   <span>Remaining: <span className="font-medium text-foreground">{formatCurrency(g.remaining, g.currency || displayCurrency)}</span></span>
                   {g.monthlyNeeded > 0 && (

@@ -38,6 +38,7 @@ import {
   ymdDate,
 } from "../lib/date-validators";
 import { computeGoalProgress } from "../../src/lib/goals-progress";
+import { growthGoalRefusal, normalizeProgressMode } from "../../src/lib/goals/progress-mode";
 import { todayISO } from "../../src/lib/utils/date";
 import { pickRecordCurrency } from "../../src/lib/fx/record-currency";
 import { resolveReportingCurrency } from "../reporting-currency";
@@ -59,6 +60,8 @@ export function registerGoalsTools(server: McpServer, ctx: PgToolContext) {
     account_id?: number;
     account_ids?: number[];
     currency?: string;
+    progress_mode?: "balance" | "growth";
+    start_date?: string;
   }): Promise<ToolResult> {
     const { name, type, target_amount, deadline, account, account_id, account_ids, currency } = args;
     // Resolve the canonical id list. account_ids wins; then the legacy single
@@ -93,6 +96,11 @@ export function registerGoalsTools(server: McpServer, ctx: PgToolContext) {
         return err(`One or more account_ids are not owned by you.`);
       }
     }
+    // GH #423: a growth goal needs a start date and a linked account.
+    const progressMode = args.progress_mode ?? "balance";
+    const startDate = progressMode === "growth" ? args.start_date ?? null : null;
+    const modeRefusal = growthGoalRefusal({ progressMode, startDate, accountIds: resolvedIds, today: todayISO() });
+    if (modeRefusal) return err(modeRefusal);
     // Currency resolution (feedback #7): explicit > first linked account >
     // display currency. This INSERT used to omit the column entirely, so every
     // goal created through an assistant took the table default — CAD — even
@@ -113,8 +121,8 @@ export function registerGoalsTools(server: McpServer, ctx: PgToolContext) {
     // Stream D Phase 4 — plaintext name column dropped. Issue #130 — dual-write
     // the legacy `goals.account_id` (first id only) AND the goal_accounts join.
     const inserted = await q(db, sql`
-      INSERT INTO goals (user_id, type, target_amount, currency, deadline, account_id, status, name_ct, name_lookup)
-      VALUES (${userId}, ${type}, ${target_amount}, ${goalCurrency}, ${deadline ?? null}, ${resolvedIds[0] ?? null}, 'active', ${n.ct}, ${n.lookup})
+      INSERT INTO goals (user_id, type, target_amount, currency, deadline, account_id, status, name_ct, name_lookup, progress_mode, start_date)
+      VALUES (${userId}, ${type}, ${target_amount}, ${goalCurrency}, ${deadline ?? null}, ${resolvedIds[0] ?? null}, 'active', ${n.ct}, ${n.lookup}, ${progressMode}, ${startDate})
       RETURNING id
     `);
     const goalId = Number(inserted[0]?.id);
@@ -133,7 +141,9 @@ export function registerGoalsTools(server: McpServer, ctx: PgToolContext) {
         goalId,
         accountIds: resolvedIds,
         currency: goalCurrency,
-        message: `Goal created: "${name}" — target ${target_amount} ${goalCurrency}${deadline ? ` by ${deadline}` : ""}${resolvedIds.length > 0 ? ` linked to ${resolvedIds.length} account(s)` : ""}`,
+        progressMode,
+        startDate,
+        message: `Goal created: "${name}" — ${progressMode === "growth" ? `grow by ${target_amount} ${goalCurrency} from ${startDate}` : `target ${target_amount} ${goalCurrency}`}${deadline ? ` by ${deadline}` : ""}${resolvedIds.length > 0 ? ` linked to ${resolvedIds.length} account(s)` : ""}`,
       },
     });
   }
@@ -149,6 +159,8 @@ export function registerGoalsTools(server: McpServer, ctx: PgToolContext) {
     name?: string;
     account_ids?: number[];
     currency?: string;
+    progress_mode?: "balance" | "growth";
+    start_date?: string;
   }): Promise<ToolResult> {
     const { goal, goal_id, target_amount, deadline, status, name, account_ids, currency } = args;
     // FINLYNQ-267: `goal_id` FK fast-path wins; a name resolves via the shared
@@ -174,6 +186,20 @@ export function registerGoalsTools(server: McpServer, ctx: PgToolContext) {
 
     // Stream D Phase 4 — plaintext name dropped.
     const updates: ReturnType<typeof sql>[] = [];
+    // GH #423: judge the goal as it will be after this update.
+    if (args.progress_mode !== undefined || args.start_date !== undefined || account_ids !== undefined) {
+      const cur = await q(db, sql`SELECT progress_mode, start_date FROM goals WHERE id = ${g.id} AND user_id = ${userId}`);
+      const curLinks = account_ids ?? (
+        await q(db, sql`SELECT account_id FROM goal_accounts WHERE goal_id = ${g.id} AND user_id = ${userId}`)
+      ).map((r) => Number(r.account_id));
+      const nextMode = args.progress_mode ?? normalizeProgressMode(cur[0]?.progress_mode);
+      const nextStart = nextMode === "growth"
+        ? (args.start_date ?? (cur[0]?.start_date as string | null | undefined) ?? null)
+        : null;
+      const modeRefusal = growthGoalRefusal({ progressMode: nextMode, startDate: nextStart, accountIds: curLinks, today: todayISO() });
+      if (modeRefusal) return err(modeRefusal);
+      updates.push(sql`progress_mode = ${nextMode}`, sql`start_date = ${nextStart}`);
+    }
     if (name !== undefined) {
       if (!dek) return err("Cannot rename goal without an unlocked DEK (Stream D Phase 4).");
       const n = encryptName(dek, name);
@@ -244,7 +270,8 @@ export function registerGoalsTools(server: McpServer, ctx: PgToolContext) {
   // Lifted verbatim from the former `get_goals` tool (was in reads.ts).
   async function opList(): Promise<ToolResult> {
     const goalsRaw = await q(db, sql`
-      SELECT g.id, g.name_ct, g.type, g.target_amount, g.currency, g.deadline, g.status, g.priority
+      SELECT g.id, g.name_ct, g.type, g.target_amount, g.currency, g.deadline, g.status, g.priority,
+             g.progress_mode, g.start_date
       FROM goals g
       WHERE g.user_id = ${userId}
       ORDER BY g.priority
@@ -301,6 +328,8 @@ export function registerGoalsTools(server: McpServer, ctx: PgToolContext) {
         targetAmount: Number(r.target_amount ?? 0),
         deadline: (r.deadline as string | null) ?? null,
         accountIds: linksByGoal.get(Number(r.id))?.ids ?? [],
+        progressMode: (r.progress_mode as string | null) ?? null,
+        startDate: (r.start_date as string | null) ?? null,
       })),
     );
     const rows = goalsRaw.map((r) => {
@@ -324,6 +353,11 @@ export function registerGoalsTools(server: McpServer, ctx: PgToolContext) {
         percentComplete: progress?.progress ?? 0,
         remaining: progress?.remaining ?? Number(r.target_amount ?? 0),
         monthlyNeeded: progress?.monthlyNeeded ?? 0,
+        // GH #423: for a growth goal currentAmount is the growth since
+        // start_date; startAmount / balanceNow are the linked balance then and now.
+        progressMode: progress?.progressMode ?? "balance",
+        startAmount: progress?.startAmount ?? null,
+        balanceNow: progress?.balanceNow ?? progress?.currentAmount ?? 0,
       };
     });
     return dataResponse(rows);
@@ -340,6 +374,8 @@ export function registerGoalsTools(server: McpServer, ctx: PgToolContext) {
     account_id: z.number().int().positive().optional().describe("Single-account linker FK fast-path — wins over the fuzzy `account` name. Prefer `account_ids` for multi-account goals."),
     account_ids: z.array(z.number().int()).optional().describe("Multi-account linker (issue #130). Goal progress sums transactions across every account id supplied. Each id must belong to the user. Empty array = unlinked (manual tracking)."),
     currency: z.string().regex(/^[A-Za-z]{3,4}$/).optional().describe("ISO code the goal is measured in, e.g. 'EUR'. Defaults to the first linked account's currency, else the user's display currency — never a hardcoded default."),
+    progress_mode: z.enum(["balance", "growth"]).optional().describe("'balance' (default): progress is the linked accounts' balance now. 'growth': progress is how much their balance grew since start_date, and target_amount is the amount to grow by. Use growth when the account already holds other money or is shared by several goals."),
+    start_date: ymdDate.optional().describe("Growth goals: the first day counted (YYYY-MM-DD, not in the future). Progress = balance now minus balance at the end of the day before."),
   });
   const updateVariant = z.object({
     op: z.literal("update"),
@@ -351,6 +387,8 @@ export function registerGoalsTools(server: McpServer, ctx: PgToolContext) {
     name: z.string().optional().describe("Rename the goal"),
     account_ids: z.array(z.number().int()).optional().describe("Replace the goal's linked accounts (issue #130). When supplied, the existing goal_accounts rows are deleted and replaced with the new set in a single transaction. Pass `[]` to unlink all. Omit to leave links unchanged."),
     currency: z.string().regex(/^[A-Za-z]{3,4}$/).optional().describe("ISO code the goal is measured in. Changes the currency target_amount is interpreted in — it does NOT convert it."),
+    progress_mode: z.enum(["balance", "growth"]).optional().describe("'balance' (default): progress is the linked accounts' balance now. 'growth': progress is how much their balance grew since start_date, and target_amount is the amount to grow by. Use growth when the account already holds other money or is shared by several goals."),
+    start_date: ymdDate.optional().describe("Growth goals: the first day counted (YYYY-MM-DD, not in the future). Progress = balance now minus balance at the end of the day before."),
   });
   const deleteVariant = z.object({
     op: z.literal("delete"),
@@ -364,7 +402,7 @@ export function registerGoalsTools(server: McpServer, ctx: PgToolContext) {
   registerManageTool(
     server,
     "manage_goals",
-    "Manage financial goals: `op` selects add / update / delete / list. add: create a goal (name/type/target_amount, optional deadline, account_ids + currency). update: change a goal's target, deadline, status, name, currency, or linked accounts (fuzzy `goal`). delete: remove a goal by name. list: all goals with progress (accountIds, currentAmount, progress, remaining, monthlyNeeded).",
+    "Manage financial goals: `op` selects add / update / delete / list. add: create a goal (name/type/target_amount, optional deadline, account_ids + currency, progress_mode balance|growth + start_date). update: change a goal's target, deadline, status, name, currency, linked accounts or progress mode (fuzzy `goal`). delete: remove a goal by name. list: all goals with progress (accountIds, currentAmount, progress, remaining, monthlyNeeded).",
     z.discriminatedUnion("op", [addVariant, updateVariant, deleteVariant, listVariant]),
     async (input) => {
       switch (input.op) {

@@ -41,6 +41,7 @@ import { Combobox, type ComboboxItemShape } from "@/components/ui/combobox";
 import { ConfirmDialog } from "@/components/ui/confirm-dialog";
 import { ErrorState } from "@/components/error-state";
 import { AccountPendingChargesCard } from "@/components/pending-charges";
+import { AccountAvatar, useAccountLogos } from "@/components/accounts/account-logo";
 import { useActiveCurrencies } from "@/lib/hooks/useActiveCurrencies";
 import { ModePicker } from "@/components/inbox/mode-picker";
 import { ImportPrefsPicker } from "@/components/inbox/import-prefs-picker";
@@ -109,6 +110,7 @@ export default function AccountDetailPage() {
   const [account, setAccount] = useState<Account | null>(null);
   // Loans that track this account, so the account can link straight to them.
   const linkedLoans = useLinkedLoans().get(Number(id)) ?? [];
+  const { versions: logoVersions, reload: reloadLogos } = useAccountLogos();
   const [accounts, setAccounts] = useState<Account[]>([]);
   /** The account lookup finished and produced nothing (missing id, not yours,
    *  or the request failed) — as opposed to "still in flight". */
@@ -431,9 +433,13 @@ export default function AccountDetailPage() {
 
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div className="flex items-center gap-3">
-          <div className={`h-10 w-10 rounded-xl flex items-center justify-center text-sm font-bold ${account.type === "A" ? "bg-emerald-100 text-emerald-700" : "bg-rose-100 text-rose-700"}`}>
-            {(account.name ?? "?").charAt(0)}
-          </div>
+          <AccountAvatar
+            accountId={account.id}
+            name={account.name}
+            logoVersion={logoVersions[account.id]}
+            className="h-10 w-10 rounded-xl text-sm"
+            letterClassName={account.type === "A" ? "bg-emerald-100 text-emerald-700" : "bg-rose-100 text-rose-700"}
+          />
           <div>
             <h1 className="text-2xl font-bold tracking-tight">{account.name}</h1>
             <div className="flex gap-2 mt-0.5">
@@ -699,6 +705,8 @@ export default function AccountDetailPage() {
           edit-only extra tabs (they act on this account's id). */}
       <AccountDialog
         mode="edit"
+        logoVersion={logoVersions[account.id]}
+        onLogoChange={() => void reloadLogos()}
         open={editOpen}
         onOpenChange={setEditOpen}
         account={account}

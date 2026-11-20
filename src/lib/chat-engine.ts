@@ -667,6 +667,8 @@ const handleGoals: IntentHandler = async (_msg, ctx) => {
       targetAmount: schema.goals.targetAmount,
       currency: schema.goals.currency,
       deadline: schema.goals.deadline,
+      progressMode: schema.goals.progressMode,
+      startDate: schema.goals.startDate,
     })
     .from(schema.goals)
     .where(and(eq(schema.goals.userId, ctx.userId), eq(schema.goals.status, "active")))
@@ -697,6 +699,8 @@ const handleGoals: IntentHandler = async (_msg, ctx) => {
       targetAmount: g.targetAmount,
       deadline: g.deadline ?? null,
       accountIds: accountsByGoal.get(g.id) ?? [],
+      progressMode: g.progressMode,
+      startDate: g.startDate ?? null,
     })),
   );
   const displayCurrency = await getDisplayCurrency(ctx.userId);

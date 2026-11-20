@@ -19,9 +19,15 @@
  * URL state: ?account=<id> and ?tab=<tab>. The tab is persisted so deep
  * links + the legacy-route redirects can target a specific tab; on lens
  * change we re-snap to a valid tab for the new lens.
+ *
+ * GH #422 (2026-11-20): with no ?account= the page opens on an OVERVIEW of
+ * the accounts with something waiting (ImportOverview), and ?account=all is
+ * one list over every Auto-pilot and Approve-each account (AllAccountsQueue).
+ * A link that names a tab (e.g. ?tab=email) or a file handed off from the
+ * dashboard's Quick Import still opens the first account, as before.
  */
 
-import { Suspense, useCallback, useEffect, useMemo, useState } from "react";
+import { Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useSearchParams } from "next/navigation";
 import { Button } from "@/components/ui/button";
 import {
@@ -54,6 +60,8 @@ import { InboxToApproveTab } from "@/components/inbox/inbox-to-approve-tab";
 import { InboxToCategorizeTab } from "@/components/inbox/inbox-to-categorize-tab";
 import { InboxEmailTab } from "@/components/inbox/inbox-email-tab";
 import { ReconcileSummaryPanel } from "@/components/inbox/reconcile-summary-panel";
+import { ImportOverview } from "@/components/inbox/import-overview";
+import { AllAccountsQueue } from "@/components/inbox/all-accounts-queue";
 import { takeHandoffFile } from "@/lib/import/file-handoff";
 
 interface Account {
@@ -88,6 +96,11 @@ function ImportPageInner() {
   const [accounts, setAccounts] = useState<Account[]>([]);
   const [accountsLoading, setAccountsLoading] = useState(true);
   const [accountId, setAccountId] = useState<number | null>(null);
+  // GH #422: which page is shown. "account" = one account's tabs (as before).
+  const [view, setView] = useState<"overview" | "all" | "account">("overview");
+  // Set synchronously on mount when the dashboard handed a file over, so the
+  // async accounts load knows to open an account (the upload needs one).
+  const handoffPendingRef = useRef(false);
   const [uploadOpen, setUploadOpen] = useState(false);
   // FINLYNQ-188 — a file carried in from the dashboard Quick Import card.
   // Consumed once from the module-level handoff store on mount; opening the
@@ -137,11 +150,21 @@ function ImportPageInner() {
         const visible = normalized.filter((a) => !a.archived);
         const urlAccount = searchParams?.get("account");
         const urlId = urlAccount ? parseInt(urlAccount, 10) : NaN;
-        const pick =
-          Number.isFinite(urlId) && visible.some((a) => a.id === urlId)
-            ? urlId
-            : (visible[0]?.id ?? null);
+        const urlTab = searchParams?.get("tab");
+        // GH #422: the overview is the first page unless the link names an
+        // account, a tab, or a file is waiting to be uploaded.
+        if (urlAccount === "all") {
+          setView("all");
+          return;
+        }
+        const named = Number.isFinite(urlId) && visible.some((a) => a.id === urlId);
+        if (!named && !urlTab && !handoffPendingRef.current) {
+          setView("overview");
+          return;
+        }
+        const pick = named ? urlId : (visible[0]?.id ?? null);
         setAccountId(pick);
+        setView("account");
         // Initial lens matches the policy of the picked account; an explicit
         // ?tab= (from a deep link or a legacy-route redirect) wins over the
         // lens default. The snap-to-valid effect corrects an out-of-set tab.
@@ -149,7 +172,6 @@ function ImportPageInner() {
           const a = visible.find((x) => x.id === pick);
           const initialPolicy: Mode = a ? a.mode : "manual";
           setLens(initialPolicy);
-          const urlTab = searchParams?.get("tab");
           setTab(urlTab || defaultTabFor(initialPolicy));
         }
       } catch (e) {
@@ -196,6 +218,7 @@ function ImportPageInner() {
   useEffect(() => {
     const f = takeHandoffFile();
     if (f) {
+      handoffPendingRef.current = true;
       setHandoffFileState(f);
       setUploadOpen(true);
     }
@@ -214,12 +237,21 @@ function ImportPageInner() {
   // Persist ?account= and ?tab= so deep links + legacy-route redirects land
   // on the right account + tab, and a refresh keeps the user in place.
   useEffect(() => {
-    if (accountId == null) return;
+    if (accountsLoading) return;
     const url = new URL(window.location.href);
-    url.searchParams.set("account", String(accountId));
-    url.searchParams.set("tab", tab);
+    if (view === "account" && accountId != null) {
+      url.searchParams.set("account", String(accountId));
+      url.searchParams.set("tab", tab);
+    } else if (view === "all") {
+      url.searchParams.set("account", "all");
+      url.searchParams.delete("tab");
+    } else {
+      url.searchParams.delete("account");
+      url.searchParams.delete("tab");
+      url.searchParams.delete("window");
+    }
     window.history.replaceState({}, "", url.toString());
-  }, [accountId, tab]);
+  }, [accountId, tab, view, accountsLoading]);
 
   const account = useMemo(
     () => accounts.find((a) => a.id === accountId) ?? null,
@@ -243,6 +275,7 @@ function ImportPageInner() {
   const isLensActive = activeLens !== policy;
 
   const switchAccount = (id: number) => {
+    setView("account");
     setAccountId(id);
     setReconcileData(null);
     const next = accounts.find((a) => a.id === id);
@@ -328,13 +361,90 @@ function ImportPageInner() {
     );
   }
 
-  if (account == null) {
+  // GH #422 — account picker shared by every view. "overview" and "all" are
+  // pages, not accounts.
+  const accountPicker = (
+    <Select
+      value={view === "account" && accountId != null ? String(accountId) : view}
+      onValueChange={(v) => {
+        if (v === "overview" || v === "all") {
+          setView(v);
+          setReconcileData(null);
+          return;
+        }
+        const n = parseInt(v ?? "", 10);
+        if (Number.isFinite(n)) switchAccount(n);
+      }}
+    >
+      <SelectTrigger className="w-[260px]">
+        {/* Base UI SelectValue otherwise renders the raw `value`
+         *  (the account id as string, e.g. "768") on first render
+         *  before items register their text. Pass an explicit
+         *  render prop that pulls the decrypted label out of the
+         *  accounts array so the trigger always shows the
+         *  account name. (Inbox v4 Phase 5, 2026-05-27.) */}
+        <SelectValue placeholder="Select an account">
+          {view === "overview"
+            ? "Overview"
+            : view === "all"
+              ? "All Auto-pilot & Approve-each"
+              : (() => {
+                  const a = accounts.find((x) => x.id === accountId);
+                  return a ? `${safeAccountName(a)} · ${a.currency}` : "Select an account";
+                })()}
+        </SelectValue>
+      </SelectTrigger>
+      <SelectContent>
+        <SelectItem value="overview">Overview</SelectItem>
+        <SelectItem value="all">All Auto-pilot &amp; Approve-each</SelectItem>
+        {dropdownAccounts.map((a) => (
+          <SelectItem key={a.id} value={String(a.id)}>
+            {safeAccountName(a)} · {a.currency}
+            {hiddenSet.has(a.id) ? " · hidden" : ""}
+          </SelectItem>
+        ))}
+      </SelectContent>
+    </Select>
+  );
+
+  if (view !== "account" || account == null) {
     return (
-      <div className="container mx-auto p-4 space-y-3">
-        <h1 className="text-2xl font-semibold">Import</h1>
-        <p className="text-sm text-muted-foreground">
-          Pick an account to start importing.
-        </p>
+      <div className="container mx-auto p-4 space-y-4">
+        <div>
+          <h1 className="text-2xl font-semibold">Import</h1>
+          <p className="text-sm text-muted-foreground">
+            See which accounts have something waiting, then open one, or review every
+            Auto-pilot and Approve-each account in one list. Pick an account to upload a statement.
+          </p>
+        </div>
+        {error && (
+          <div className="rounded-md border border-rose-200 bg-rose-50 p-3 text-sm text-rose-800">
+            {error}
+          </div>
+        )}
+        <div className="rounded-xl border bg-card p-4">
+          <div className="flex items-center gap-2">
+            <span className="text-xs uppercase tracking-wider text-muted-foreground">Account</span>
+            {accountPicker}
+          </div>
+        </div>
+        {view === "all" ? (
+          <AllAccountsQueue
+            accounts={accounts}
+            onOpenAccount={(id) => switchAccount(id)}
+            onBack={() => setView("overview")}
+            reloadKey={reloadKey}
+          />
+        ) : (
+          <>
+            <ImportOverview
+              onOpenAccount={(id) => switchAccount(id)}
+              onOpenAll={() => setView("all")}
+              reloadKey={reloadKey}
+            />
+            <ReconcileSummaryPanel onOpenAccount={(id) => switchAccount(id)} reloadKey={reloadKey} />
+          </>
+        )}
       </div>
     );
   }
@@ -377,40 +487,7 @@ function ImportPageInner() {
             <span className="text-xs uppercase tracking-wider text-muted-foreground">
               Account
             </span>
-            <Select
-              value={accountId != null ? String(accountId) : ""}
-              onValueChange={(v) => {
-                const n = parseInt(v ?? "", 10);
-                if (Number.isFinite(n)) switchAccount(n);
-              }}
-            >
-              <SelectTrigger className="w-[260px]">
-                {/* Base UI SelectValue otherwise renders the raw `value`
-                 *  (the account id as string, e.g. "768") on first render
-                 *  before items register their text. Pass an explicit
-                 *  render prop that pulls the decrypted label out of the
-                 *  accounts array so the trigger always shows the
-                 *  account name. (Inbox v4 Phase 5, 2026-05-27.) */}
-                <SelectValue placeholder="Select an account">
-                  {accountId != null
-                    ? (() => {
-                        const a = accounts.find((x) => x.id === accountId);
-                        return a
-                          ? `${safeAccountName(a)} · ${a.currency}`
-                          : "Select an account";
-                      })()
-                    : "Select an account"}
-                </SelectValue>
-              </SelectTrigger>
-              <SelectContent>
-                {dropdownAccounts.map((a) => (
-                  <SelectItem key={a.id} value={String(a.id)}>
-                    {safeAccountName(a)} · {a.currency}
-                    {hiddenSet.has(a.id) ? " · hidden" : ""}
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
+            {accountPicker}
           </div>
           <LensChip
             lens={activeLens}
