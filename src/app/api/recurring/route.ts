@@ -8,6 +8,7 @@ import { getDisplayCurrency, getRateMap, convertWithRateMap } from "@/lib/fx-ser
 import { monthlyEquivalent } from "@/lib/subscriptions/schedule";
 import { todayISO } from "@/lib/utils/date";
 import { round2 } from "@/lib/utils/number";
+import { dismissedLookups, withoutDismissed } from "@/lib/subscriptions/dismissals";
 
 // 25 months, so a semi-annual or annual series can show its 3 occurrences
 // (the detector's minimum) — 12 months could never detect anything yearly.
@@ -76,8 +77,14 @@ export async function GET(request: NextRequest) {
     .filter((r) => r.avgAmount < 0)
     .reduce((sum, r) => sum + monthlyEquivalent(toDisplay(r.avgAmount, r.currency), r.frequency), 0);
 
+  // GH #428 — payees the user marked "Not a subscription" leave the list (the
+  // Subscriptions suggestions + calendar on web and phone read it). The
+  // dashboard's monthly recurring total above still counts them: they are
+  // still regular payments, just not subscriptions.
+  const listed = withoutDismissed(detected, (r) => r.payee, await dismissedLookups(userId), dek);
+
   return NextResponse.json({
-    recurring: detected.map((r) => ({
+    recurring: listed.map((r) => ({
       payee: r.payee,
       avgAmount: r.avgAmount,
       currency: r.currency,
@@ -91,6 +98,7 @@ export async function GET(request: NextRequest) {
     })),
     displayCurrency,
     monthlyRecurringTotal: round2(Math.abs(monthlyRecurring)),
-    count: detected.length,
+    count: listed.length,
+    dismissedCount: detected.length - listed.length,
   });
 }

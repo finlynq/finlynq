@@ -26,10 +26,22 @@ jobs:
   # alone passes against a half-built database. #312's bugs 3 and 4 were exactly
   # that — the app booted and then 500'd on registration because ~half the schema
   # was missing.
+  #
+  # GH #430 (2026-11-21): runs on BOTH architectures we publish, each on a
+  # native GitHub runner (no QEMU), so an arm64 image is proven to boot and
+  # register before it ships, exactly like amd64.
   smoke:
-    name: Smoke test (boot + register + schema)
-    runs-on: ubuntu-latest
+    name: Smoke test ${{ matrix.arch }} (boot + register + schema)
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-latest
+          - arch: arm64
+            runner: ubuntu-24.04-arm
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
 
@@ -129,9 +141,73 @@ jobs:
         run: docker compose down -v
 
   # ── Publish ──────────────────────────────────────────────────────────────────
+  # GH #430: one native build per architecture, each pushed by digest only,
+  # then `merge` joins the two digests into one multi-arch manifest under the
+  # usual tags. `docker pull ghcr.io/finlynq/finlynq` then picks the right one
+  # on Intel/AMD, Apple Silicon, Raspberry Pi and Graviton alike.
   build:
-    name: Build & Push Docker Image
+    name: Build & push ${{ matrix.arch }}
     needs: smoke
+    if: github.event_name == 'push'
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-latest
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.7.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata (labels)
+        id: meta
+        uses: docker/metadata-action@c299e40c65443455700f0fdfc63efafe5b349051 # v5.10.0
+        with:
+          images: ghcr.io/finlynq/finlynq
+
+      - name: Build and push by digest
+        id: push
+        uses: docker/build-push-action@ca052bb54ab0790a636c9b5f226502c73d547a25 # v5.4.0
+        with:
+          context: .
+          platforms: linux/${{ matrix.arch }}
+          labels: ${{ steps.meta.outputs.labels }}
+          outputs: type=image,name=ghcr.io/finlynq/finlynq,push-by-digest=true,name-canonical=true,push=true
+
+      - name: Export digest
+        run: |
+          mkdir -p /tmp/digests
+          digest="${{ steps.push.outputs.digest }}"
+          [ -n "$digest" ] || { echo "::error::build produced no digest"; exit 1; }
+          touch "/tmp/digests/${digest#sha256:}"
+
+      - name: Upload digest
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: digest-${{ matrix.arch }}
+          path: /tmp/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+  merge:
+    name: Publish multi-arch manifest
+    needs: build
     if: github.event_name == 'push'
     runs-on: ubuntu-latest
     permissions:
@@ -139,7 +215,15 @@ jobs:
       packages: write
 
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - name: Download digests
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          path: /tmp/digests
+          pattern: digest-*
+          merge-multiple: true
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
 
       - name: Log in to GitHub Container Registry
         uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.7.0
@@ -159,10 +243,17 @@ jobs:
             type=semver,pattern={{major}}.{{minor}}
             type=raw,value=latest,enable={{is_default_branch}}
 
-      - name: Build and push
-        uses: docker/build-push-action@ca052bb54ab0790a636c9b5f226502c73d547a25 # v5.4.0
-        with:
-          context: .
-          push: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
+      - name: Create manifest list and push
+        working-directory: /tmp/digests
+        run: |
+          count=$(ls | wc -l)
+          [ "$count" -eq 2 ] || { echo "::error::expected 2 digests (amd64 + arm64), got $count"; exit 1; }
+          docker buildx imagetools create             $(jq -cr '.tags | map("-t " + .) | join(" ")' <<< "$DOCKER_METADATA_OUTPUT_JSON")             $(printf 'ghcr.io/finlynq/finlynq@sha256:%s ' *)
+
+      - name: Inspect the published image
+        run: |
+          tag=$(jq -r '.tags[0]' <<< "$DOCKER_METADATA_OUTPUT_JSON")
+          docker buildx imagetools inspect "$tag"
+          for arch in amd64 arm64; do
+            docker buildx imagetools inspect "$tag" --format '{{json .Manifest}}' | jq -e --arg a "$arch"               '.manifests[] | select(.platform.architecture == $a)' > /dev/null               || { echo "::error::published manifest has no linux/$arch image"; exit 1; }
+          done

@@ -29,8 +29,15 @@ import {
 import type {
   Transaction,
   LinkedSibling,
+  ColFilterShape,
 } from "../_types";
-import { useLookups, useTxColumnPrefs, useTxSortPref, useTxFilterPrefs } from "../_hooks/use-tx-prefs";
+import { useLookups, useTxColumnPrefs, useTxSortPref, useTxFilterPrefs, mergeColPrefs } from "../_hooks/use-tx-prefs";
+import { SavedViewsMenu, type SavedViewDateChoice } from "@/components/saved-views/saved-views-menu";
+import {
+  rangeForDates,
+  resolveSavedDateRange,
+  type TransactionsViewConfig,
+} from "@/lib/saved-views/config";
 import { useTransactions } from "../_hooks/use-transactions";
 import { TransactionTable } from "./transaction-table";
 import { TransactionsCalendar, describeCalendarSelection, refreshTransactionsCalendar } from "./transactions-calendar";
@@ -69,6 +76,21 @@ export interface TransactionsWorkspaceProps {
    *  page can refresh sibling data (e.g. the account balance header). */
   onDataChange?: () => void;
 }
+
+/** URL parameters that mean "the page was opened with filters": with any of
+ *  them, the default saved view does not open (GH #427). */
+const SAVED_VIEW_URL_KEYS = [
+  "id",
+  "startDate",
+  "endDate",
+  "accountId",
+  "categoryId",
+  "search",
+  "portfolioHolding",
+  "tag",
+  "view",
+  "savedView",
+] as const;
 
 export function TransactionsWorkspace({
   lockedAccountId,
@@ -110,6 +132,18 @@ export function TransactionsWorkspace({
     tag: "",
   });
   const searchTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // GH #427 saved views: read the URL the page OPENED with, once. A
+  // `?savedView=<id>` link opens that view; with no filter in the URL at all,
+  // the user's default view opens (a drill-through link always wins).
+  const [openedWith] = useState(() => {
+    const raw = urlParams.get("savedView");
+    const id = raw ? Number(raw) : NaN;
+    return {
+      savedViewId: Number.isInteger(id) && id > 0 ? id : null,
+      hadFilters: SAVED_VIEW_URL_KEYS.some((k) => urlParams.has(k)),
+    };
+  });
 
   type ColumnId = SharedColumnId;
   const COLUMN_LABELS = SHARED_COLUMN_LABELS;
@@ -194,9 +228,62 @@ export function TransactionsWorkspace({
   // hook owns the same load-on-mount + debounced-PUT-on-change effects + the
   // legacy localStorage migration. `cycleSort` / `setColFilter` reset the page
   // to 0 via the onChange callback (verbatim with the old inline setPage(0)).
-  const { columnPrefs, setColumnPrefs, resetColPrefs } = useTxColumnPrefs();
-  const { sortPref, setSortPref, cycleSort } = useTxSortPref(() => setPage(0));
-  const { colFilters, setColFilters, findColFilter, setColFilter } = useTxFilterPrefs(() => setPage(0));
+  const { columnPrefs, setColumnPrefs, resetColPrefs, loaded: colPrefsLoaded } = useTxColumnPrefs();
+  const { sortPref, setSortPref, cycleSort, loaded: sortLoaded } = useTxSortPref(() => setPage(0));
+  const { colFilters, setColFilters, findColFilter, setColFilter, loaded: colFiltersLoaded } = useTxFilterPrefs(() => setPage(0));
+
+  // GH #427 saved views: everything on screen as a config, and back. Dates
+  // follow the Save dialog's choice; "keep" (Save changes) keeps a preset
+  // while the dates shown still match it.
+  function buildTxViewConfig({
+    previous,
+    dateChoice,
+  }: {
+    previous: TransactionsViewConfig | null;
+    dateChoice: SavedViewDateChoice;
+  }): TransactionsViewConfig {
+    const date =
+      dateChoice === "none"
+        ? ({ kind: "custom" } as const)
+        : dateChoice === "shown" || dateChoice === "keep"
+          ? rangeForDates(filters.startDate, filters.endDate, dateChoice === "keep" ? previous?.date : null)
+          : ({ kind: "preset", preset: dateChoice } as const);
+    return {
+      date,
+      accountId: filters.accountId,
+      categoryId: filters.categoryId,
+      search: filters.search,
+      portfolioHolding: filters.portfolioHolding,
+      tag: filters.tag,
+      sort: sortPref,
+      colFilters,
+      columns: columnPrefs,
+      view,
+      calMode,
+    };
+  }
+
+  function applyTxViewConfig(c: TransactionsViewConfig) {
+    const { start, end } = resolveSavedDateRange(c.date);
+    setFilters({
+      id: "",
+      startDate: start,
+      endDate: end,
+      accountId: c.accountId,
+      categoryId: c.categoryId,
+      search: c.search,
+      portfolioHolding: c.portfolioHolding,
+      tag: c.tag,
+    });
+    setSearchInput(c.search);
+    setSortPref(c.sort);
+    setColFilters(c.colFilters as ColFilterShape[]);
+    if (c.columns) setColumnPrefs(mergeColPrefs(c.columns));
+    setView(c.view);
+    setCalMode(c.calMode);
+    setCalDay(null);
+    setPage(0);
+  }
 
   // Main list (txns / total / loading) + loadTxns — extracted to
   // useTransactions (FINLYNQ-111 Phase 2). Same deps, fetch URL, {data,total}
@@ -789,19 +876,37 @@ export function TransactionsWorkspace({
         onLinkedSiblingClick={(s) => openLinkedSibling(s as LinkedSibling)}
       />
 
-      {/* List / Calendar toggle (in-app feedback 2026-10-07). */}
-      <Tabs
-        value={view}
-        onValueChange={(v) => {
-          setView(v === "calendar" ? "calendar" : "list");
-          setPage(0);
-        }}
-      >
-        <TabsList>
-          <TabsTrigger value="list" className="px-3"><List className="h-4 w-4" /> List</TabsTrigger>
-          <TabsTrigger value="calendar" className="px-3"><CalendarDays className="h-4 w-4" /> Calendar</TabsTrigger>
-        </TabsList>
-      </Tabs>
+      <div className="flex flex-wrap items-center gap-3">
+        {/* List / Calendar toggle (in-app feedback 2026-10-07). */}
+        <Tabs
+          value={view}
+          onValueChange={(v) => {
+            setView(v === "calendar" ? "calendar" : "list");
+            setPage(0);
+          }}
+        >
+          <TabsList>
+            <TabsTrigger value="list" className="px-3"><List className="h-4 w-4" /> List</TabsTrigger>
+            <TabsTrigger value="calendar" className="px-3"><CalendarDays className="h-4 w-4" /> Calendar</TabsTrigger>
+          </TabsList>
+        </Tabs>
+        {/* Saved views (GH #427). Not on the account-scoped embed, whose
+            filters belong to the account page. */}
+        {!locked && (
+          <SavedViewsMenu<TransactionsViewConfig>
+            kind="transactions"
+            title="Views"
+            noun="view"
+            buildConfig={buildTxViewConfig}
+            onApply={applyTxViewConfig}
+            allowDefault
+            offerDateChoice
+            openViewId={openedWith.savedViewId}
+            openDefault={!openedWith.hadFilters}
+            ready={colPrefsLoaded && sortLoaded && colFiltersLoaded}
+          />
+        )}
+      </div>
 
       {/* Search + Filters */}
       <Card className="bg-muted/30 border-dashed">

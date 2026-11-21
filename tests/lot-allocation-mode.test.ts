@@ -243,9 +243,9 @@ describe("MCP manage_lots", () => {
     expect(code("mcp-server/register-tools-pg.ts")).toContain("registerLotsTools(server, ctx)");
     // 55 when manage_lots landed; 54 since add_snapshot was removed (2026-11-08);
     // 56 with the two guidance tools (FINLYNQ-219, 2026-11-16); 57 with
-    // manage_security_prices (GH #394, 2026-11-20).
-    expect(MCP_TOOL_COUNTS.http).toBe(57);
-    expect(read("README.md")).toContain("57 HTTP / 89 stdio");
+    // manage_security_prices (GH #394, 2026-11-20); 58 with get_saved_views (GH #427).
+    expect(MCP_TOOL_COUNTS.http).toBe(58);
+    expect(read("README.md")).toContain("58 HTTP / 89 stdio");
     expect(code("mcp-server/auto-annotations.ts")).toContain("manage_lots: { destructiveHint: true }");
     expect(read("scripts/generate-mcp-tool-catalog.mjs")).toContain('"lots",');
   });

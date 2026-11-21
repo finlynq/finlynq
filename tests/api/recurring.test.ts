@@ -32,6 +32,11 @@ vi.mock("@/lib/fx-service", () => ({
   convertWithRateMap: vi.fn((amount: number) => amount),
 }));
 
+// GH #428 — the dismissal store reads its own table; no dismissals here.
+vi.mock("@/lib/subscriptions/dismissals", () => ({
+  dismissedLookups: vi.fn(async () => new Set<string>()),
+  withoutDismissed: <T,>(rows: T[]) => rows,
+}));
 vi.mock("@/lib/recurring-detector", () => ({
   detectRecurringTransactions: vi.fn(() => [
     { payee: "Netflix", avgAmount: -15.99, currency: "USD", frequency: "monthly", count: 6, lastDate: "2024-01-01", nextDate: "2024-02-01", accountId: 1, categoryId: 2 },

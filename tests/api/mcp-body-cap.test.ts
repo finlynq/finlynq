@@ -41,25 +41,44 @@ describe("/api/mcp body cap (M-21)", () => {
     expect(body.error).toMatch(/byte limit/i);
   });
 
-  it("rejects requests with no Content-Length header (411)", async () => {
-    // Build a Request without setting content-length explicitly. Note: the
-    // platform may add one automatically when there's a body — but for the
-    // GET-shaped POST below it should be absent.
-    const req = new NextRequest("http://localhost/api/mcp", {
+  // GH #424 follow-up (2026-11-21): the Gemini web app sends its MCP POST
+  // chunked, with no Content-Length. That used to be a 411, which Gemini shows
+  // as "not a valid MCP server". A chunked body is now read with the same cap.
+  function chunkedRequest(chunks: string[]): NextRequest {
+    const enc = new TextEncoder();
+    const stream = new ReadableStream<Uint8Array>({
+      start(c) {
+        for (const ch of chunks) c.enqueue(enc.encode(ch));
+        c.close();
+      },
+    });
+    return new NextRequest("http://localhost/api/mcp", {
       method: "POST",
       headers: { "content-type": "application/json" },
-    });
-    // Some runtimes set Content-Length automatically. If our test env does,
-    // skip the assertion shape but ensure we don't get past auth.
-    const cl = req.headers.get("content-length");
-    if (cl == null) {
-      const res = await POST(req);
-      expect(res.status).toBe(411);
-    } else {
-      // Test env auto-set Content-Length; assert at least that the request
-      // is bounded by the 1 MB cap (i.e. doesn't 413).
-      expect(Number(cl)).toBeLessThanOrEqual(1024 * 1024);
-    }
+      body: stream,
+      duplex: "half",
+    } as unknown as ConstructorParameters<typeof NextRequest>[1]);
+  }
+
+  it("a chunked body (no Content-Length) reaches auth: 401 + challenge, not 411", async () => {
+    const req = chunkedRequest(['{"jsonrpc":"2.0","id":1,', '"method":"initialize","params":{}}']);
+    expect(req.headers.get("content-length")).toBeNull();
+    const res = await POST(req);
+    expect(res.status).toBe(401);
+    expect(res.headers.get("www-authenticate")).toMatch(/resource_metadata=/);
+  });
+
+  it("a chunked body over 1 MB is refused with 413", async () => {
+    const piece = "x".repeat(256 * 1024);
+    const req = chunkedRequest([piece, piece, piece, piece, "x"]);
+    const res = await POST(req);
+    expect(res.status).toBe(413);
+  });
+
+  it("a chunked body that is not JSON gets a JSON-RPC parse error", async () => {
+    const res = await POST(chunkedRequest(["not json"]));
+    expect(res.status).toBe(400);
+    expect((await res.json()).error.code).toBe(-32700);
   });
 
   it("rejects requests with non-numeric Content-Length with 400", async () => {

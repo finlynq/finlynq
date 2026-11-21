@@ -8,6 +8,7 @@ import { selfHealReportingAmounts } from "@/lib/fx/reporting-amount";
 import { todayISO } from "@/lib/utils/date";
 import { parseAccountIdsParam, ACCOUNT_IDS_PARAM } from "@/lib/reports/account-filter";
 import { isReportPeriod, type ReportPeriod as Period } from "@/lib/reports/period";
+import { flowIdIn, parseTagParam, transactionIdsWithTag } from "@/lib/reports/tag-filter";
 
 type GroupBy = "category" | "group";
 
@@ -67,6 +68,9 @@ export async function GET(request: NextRequest) {
   const isBusiness = params.get("business") === "true";
   // Reports-page account scoping. `null` = every account (see account-filter.ts).
   const accountIds = parseAccountIdsParam(params.get(ACCOUNT_IDS_PARAM));
+  // GH #427: one tag, exact match. Tags are encrypted, so the matching
+  // transactions are found on decrypted values first (reports/tag-filter.ts).
+  const tag = parseTagParam(params.get("tag"));
 
   // Currency rework Phase 3 — convert to the display currency. Prefer the
   // STORED per-row historical reporting_amount; fall back to on-the-fly
@@ -106,6 +110,10 @@ export async function GET(request: NextRequest) {
   ];
   if (isBusiness) conditions.push(eq(schema.transactionCategoryFlows.isBusiness, 1));
   if (accountIds) conditions.push(inArray(schema.transactionCategoryFlows.accountId, accountIds));
+  if (tag) {
+    const ids = await transactionIdsWithTag(userId, dek, tag, { startDate, endDate, accountIds });
+    conditions.push(flowIdIn(ids));
+  }
 
   const timeseriesRows = await db
     .select({
@@ -251,6 +259,9 @@ export async function GET(request: NextRequest) {
     startDate,
     endDate,
     displayCurrency,
+    tag,
+    // A tag can only be matched with the key; without one nothing matches.
+    tagLocked: !!tag && !dek,
     timeseries,
     income: mapToArray(incomeGroups),
     expenses: mapToArray(expenseGroups),

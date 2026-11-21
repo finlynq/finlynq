@@ -850,6 +850,8 @@ async function deleteAllUserDataTx(tx: TxClient, userId: string) {
   // FINLYNQ-219 guidance notes: revisions first (they reference the notes).
   await tx.delete(s.userGuidanceNoteRevisions).where(eq(s.userGuidanceNoteRevisions.userId, userId));
   await tx.delete(s.userGuidanceNotes).where(eq(s.userGuidanceNotes.userId, userId));
+  // GH #427 saved reports / Transactions views (no FK children or parents).
+  await tx.delete(s.savedViews).where(eq(s.savedViews.userId, userId));
   await tx.delete(s.transactionRules).where(eq(s.transactionRules.userId, userId));
   await tx.delete(s.importTemplates).where(eq(s.importTemplates.userId, userId));
   await tx.delete(s.transactions).where(eq(s.transactions.userId, userId));
@@ -884,6 +886,7 @@ async function deleteAllUserDataTx(tx: TxClient, userId: string) {
   // GH #420: cascades off accounts anyway; deleted explicitly so the coverage
   // gate sees it and the encrypted image never outlives its account.
   await tx.delete(s.accountLogos).where(eq(s.accountLogos.userId, userId));
+  await tx.delete(s.subscriptionDismissals).where(eq(s.subscriptionDismissals.userId, userId));
   await tx.delete(s.accounts).where(eq(s.accounts.userId, userId));
 
   // ── Portfolio snapshot / lot bookkeeping ──────────────────────────────────

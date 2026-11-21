@@ -6,6 +6,7 @@ import { decryptName } from "@/lib/crypto/encrypted-columns";
 import { getDisplayCurrency, getRateMap, convertWithRateMap } from "@/lib/fx-service";
 import { selfHealReportingAmounts } from "@/lib/fx/reporting-amount";
 import { parseAccountIdsParam, ACCOUNT_IDS_PARAM } from "@/lib/reports/account-filter";
+import { flowIdIn, parseTagParam, transactionIdsWithTag } from "@/lib/reports/tag-filter";
 
 export async function GET(request: NextRequest) {
   const auth = await requireAuth(request); if (!auth.authenticated) return auth.response;
@@ -19,6 +20,17 @@ export async function GET(request: NextRequest) {
   const year2 = parseInt(params.get("year2") ?? String(currentYear), 10);
   // Reports-page account scoping. `null` = every account (see account-filter.ts).
   const accountIds = parseAccountIdsParam(params.get(ACCOUNT_IDS_PARAM));
+  // GH #427: one tag, exact match, found on decrypted tags (reports/tag-filter.ts).
+  const tag = parseTagParam(params.get("tag"));
+  const tagCondition = tag
+    ? flowIdIn(
+        await transactionIdsWithTag(userId, dek, tag, {
+          startDate: `${Math.min(year1, year2)}-01-01`,
+          endDate: `${Math.max(year1, year2)}-12-31`,
+          accountIds,
+        }),
+      )
+    : null;
 
   // Currency rework Phase 3 — convert to the display currency, preferring the
   // STORED per-row historical reporting_amount with an on-the-fly fallback.
@@ -66,6 +78,7 @@ export async function GET(request: NextRequest) {
           gte(schema.transactionCategoryFlows.date, `${year}-01-01`),
           lte(schema.transactionCategoryFlows.date, `${year}-12-31`),
           ...(accountIds ? [inArray(schema.transactionCategoryFlows.accountId, accountIds)] : []),
+          ...(tagCondition ? [tagCondition] : []),
         )
       )
       .groupBy(
@@ -124,6 +137,7 @@ export async function GET(request: NextRequest) {
           lte(schema.transactionCategoryFlows.date, `${year}-12-31`),
           sql`${schema.categories.type} IN ('I', 'E')`,
           ...(accountIds ? [inArray(schema.transactionCategoryFlows.accountId, accountIds)] : []),
+          ...(tagCondition ? [tagCondition] : []),
         )
       )
       .groupBy(
@@ -190,5 +204,5 @@ export async function GET(request: NextRequest) {
     };
   });
 
-  return NextResponse.json({ year1, year2, displayCurrency, categories, monthly });
+  return NextResponse.json({ year1, year2, displayCurrency, tag, tagLocked: !!tag && !dek, categories, monthly });
 }

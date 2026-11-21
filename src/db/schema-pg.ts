@@ -702,6 +702,44 @@ export const accountLogos = pgTable("account_logos", {
   check("account_logos_source_check", sql`${t.source} IN ('upload','domain')`),
 ]);
 
+// GH #428 (2026-11-21): payees the user marked "Not a subscription", left out
+// of the detected suggestions. payee_ct is DEK-encrypted; payee_lookup is the
+// nameLookup HMAC of the normalized payee. Store: lib/subscriptions/dismissals.ts.
+export const subscriptionDismissals = pgTable("subscription_dismissals", {
+  id: serial("id").primaryKey(),
+  userId: text("user_id").notNull(),
+  payeeCt: text("payee_ct").notNull(),
+  payeeLookup: text("payee_lookup").notNull(),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+}, (t) => [
+  uniqueIndex("subscription_dismissals_user_lookup_uq").on(t.userId, t.payeeLookup),
+]);
+
+// GH #427 (2026-11-21): saved reports and saved Transactions views. One row
+// per saved view; name AND config are encrypted with the user's DEK (the
+// config holds account ids, tag names and search text). name_lookup is the
+// HMAC that keeps names unique per (user, kind). is_default marks the
+// Transactions view that opens when the page loads with no URL filters (at
+// most one per user; reports have no default).
+// -> lib/saved-views/store.ts. Migration 20261121_saved_views.sql.
+export const savedViews = pgTable("saved_views", {
+  id: serial("id").primaryKey(),
+  userId: text("user_id").notNull(),
+  kind: text("kind").notNull().$type<"report" | "transactions">(),
+  nameCt: text("name_ct").notNull(),
+  nameLookup: text("name_lookup").notNull(),
+  configCt: text("config_ct").notNull(),
+  isDefault: boolean("is_default").notNull().default(false),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+}, (t) => [
+  index("idx_saved_views_user_id").on(t.userId),
+  uniqueIndex("saved_views_user_kind_name_unique").on(t.userId, t.kind, t.nameLookup),
+  uniqueIndex("saved_views_user_default_unique").on(t.userId, t.kind).where(sql`is_default`),
+  check("saved_views_kind_check", sql`${t.kind} IN ('report','transactions')`),
+  check("saved_views_default_kind_check", sql`(NOT ${t.isDefault}) OR ${t.kind} = 'transactions'`),
+]);
+
 // Multi-account goal linking (issue #130, 2026-05-03). JOIN grain is
 // `(goal_id, account_id, user_id)` — mirror the holding_accounts pattern
 // in CLAUDE.md. ON DELETE CASCADE on both FKs so deleting a goal or an

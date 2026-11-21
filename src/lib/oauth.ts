@@ -37,9 +37,12 @@ export const LAST_USED_THROTTLE_MINUTES = 15;
 
 /** Cap on `redirect_uris` per registered client. RFC 7591 doesn't mandate one,
  * but accepting an unbounded list lets a single DCR call seed every URI a
- * future attacker might want to reuse. Five is plenty for legitimate clients
- * (dev / staging / prod / mobile / desktop) and keeps the DB row small. */
-export const MAX_REDIRECT_URIS_PER_CLIENT = 5;
+ * future attacker might want to reuse. It was 5 until 2026-11-21: the Gemini
+ * web app registers SIX in one request (3 Google redirect hosts x the /r/ and
+ * /a/ paths) and DCR refuses the whole batch, which Gemini reports only as
+ * "This URL does not appear to be a valid MCP server". 10 leaves room for that
+ * and keeps the row small. */
+export const MAX_REDIRECT_URIS_PER_CLIENT = 10;
 
 /** The issuer / base URL for OAuth metadata.
  *
@@ -797,7 +800,7 @@ export class ClientRegistrationError extends Error {
  * Returns the canonicalized array on success; throws `ClientRegistrationError`
  * with an RFC 7591-shaped error code on failure.
  */
-function validateRedirectUris(input: unknown): string[] {
+export function validateRedirectUris(input: unknown): string[] {
   if (!Array.isArray(input)) {
     throw new ClientRegistrationError(
       "invalid_redirect_uri",
