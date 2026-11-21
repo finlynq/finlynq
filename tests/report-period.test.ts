@@ -62,7 +62,7 @@ describe("report periods", () => {
 
   // Every preset that flips the Period select to yearly must be a real preset.
   it("multi-year presets exist in getPresetRange", () => {
-    const page = readFileSync(join(process.cwd(), "src/app/(app)/reports/page.tsx"), "utf8");
+    const page = readFileSync(join(process.cwd(), "src/lib/reports/presets.ts"), "utf8");
     for (const preset of MULTI_YEAR_PRESETS) expect(page).toContain(`case "${preset}":`);
   });
 });

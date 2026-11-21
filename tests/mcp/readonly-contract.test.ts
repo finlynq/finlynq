@@ -57,8 +57,8 @@ const HAS_TEST_DB = /\/[^/]*_test([?#]|$)/.test(DB_URL);
 // This test enumerates the REGISTERED surface (== advertised now that no aliases
 // remain). Bump this when a read tool is added AND add its contract-table entry
 // below; the count assert is the tripwire.
-// 34 with get_guidance (FINLYNQ-219, 2026-11-16).
-const EXPECTED_READONLY_COUNT = 34;
+// 34 with get_guidance (FINLYNQ-219, 2026-11-16); 35 with get_saved_views (GH #427).
+const EXPECTED_READONLY_COUNT = 35;
 
 /**
  * A single MCP `content` response. Every handler returns `{ content: [{ type,
@@ -211,6 +211,14 @@ const CONTRACT: Record<string, Entry> = {
     assert: (d) => {
       expect(isObj(d)).toBe(true);
       expect(Array.isArray((d as { guides?: unknown }).guides)).toBe(true);
+    },
+  },
+
+  // ── Saved reports / Transactions views (GH #427) ──
+  get_saved_views: {
+    assert: (d) => {
+      expect(isObj(d)).toBe(true);
+      expect(Array.isArray((d as { views?: unknown }).views)).toBe(true);
     },
   },
 };
