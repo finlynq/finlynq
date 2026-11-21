@@ -28,6 +28,7 @@ import { buildFilteredToolsList } from "../../../../mcp-server/tools/_consolidat
 import { MCP_TOOL_COUNTS, MCP_SERVER_VERSION, MCP_SERVER_INSTRUCTIONS } from "@/lib/mcp/tool-counts";
 import { isToolInEnabledToolsets } from "@/lib/mcp/toolsets";
 import { shouldRejectMcpOrigin } from "@/lib/mcp/origin-guard";
+import { readBodyWithLimit } from "@/lib/mcp/bounded-body";
 
 // Origin guard: defense-in-depth for the session-cookie auth path only. A
 // request with a bearer token / API key, or with no session cookie, is judged
@@ -112,25 +113,36 @@ const MCP_MAX_BODY_BYTES = 1 * 1024 * 1024;
 export async function POST(request: NextRequest) {
   if (originRejected(request)) return rejectBadOrigin();
 
-  const contentLengthRaw = request.headers.get("content-length");
-  if (contentLengthRaw == null) {
-    return NextResponse.json(
-      { error: "Content-Length header required" },
-      { status: 411 },
-    );
-  }
-  const contentLength = Number(contentLengthRaw);
-  if (!Number.isFinite(contentLength) || contentLength < 0) {
-    return NextResponse.json(
-      { error: "Invalid Content-Length header" },
-      { status: 400 },
-    );
-  }
-  if (contentLength > MCP_MAX_BODY_BYTES) {
-    return NextResponse.json(
+  const tooLarge = () =>
+    NextResponse.json(
       { error: `Request body exceeds ${MCP_MAX_BODY_BYTES} byte limit` },
       { status: 413 },
     );
+  // A declared length is checked from the header. A chunked body (no
+  // Content-Length, which is how the Gemini web app sends it) is read here with
+  // the same cap and handed to the transport already parsed. It used to get 411.
+  let parsedBody: unknown = undefined;
+  const contentLengthRaw = request.headers.get("content-length");
+  if (contentLengthRaw != null) {
+    const contentLength = Number(contentLengthRaw);
+    if (!Number.isFinite(contentLength) || contentLength < 0) {
+      return NextResponse.json(
+        { error: "Invalid Content-Length header" },
+        { status: 400 },
+      );
+    }
+    if (contentLength > MCP_MAX_BODY_BYTES) return tooLarge();
+  } else {
+    const read = await readBodyWithLimit(request.body, MCP_MAX_BODY_BYTES);
+    if (!read.ok) return tooLarge();
+    try {
+      parsedBody = JSON.parse(read.text);
+    } catch {
+      return NextResponse.json(
+        { jsonrpc: "2.0", error: { code: -32700, message: "Parse error: Invalid JSON" }, id: null },
+        { status: 400 },
+      );
+    }
   }
 
   const auth = await authenticateMcp(request);
@@ -231,7 +243,10 @@ export async function POST(request: NextRequest) {
   });
 
   await server.connect(transport);
-  return transport.handleRequest(request);
+  return transport.handleRequest(
+    request,
+    parsedBody === undefined ? undefined : { parsedBody },
+  );
 }
 
 /**

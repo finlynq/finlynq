@@ -7,6 +7,7 @@ Versioning: [Semantic Versioning](https://semver.org/)
 ## Unreleased (2026-11-21)
 
 - MCP: the Gemini web app can register as an OAuth client. It registers six redirect addresses in one request and we accepted at most five, so Gemini reported the server as "not a valid MCP server". The limit is now ten.
+- MCP: `/api/mcp` accepts a request body sent without a Content-Length header (chunked), with the same 1 MB cap. The Gemini web app sends its first request that way and got 411 Length Required.
 
 ## [Unreleased]
 
