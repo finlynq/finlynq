@@ -32,7 +32,8 @@ import type { Account, Category, Holding, ColFilterShape, SortPref, ColumnPref }
 const ALL_COLUMNS = SHARED_COLUMN_IDS as readonly ColumnId[];
 const DEFAULT_COL_PREFS = SHARED_DEFAULT_COLUMNS;
 
-function mergeColPrefs(saved: ColumnPref[] | null | undefined): ColumnPref[] {
+/** Saved column prefs merged over the defaults (also used when a saved view is opened, GH #427). */
+export function mergeColPrefs(saved: ColumnPref[] | null | undefined): ColumnPref[] {
   if (!saved || saved.length === 0) return DEFAULT_COL_PREFS;
   const seen = new Set<ColumnId>();
   const out: ColumnPref[] = [];
@@ -99,6 +100,9 @@ export function useLookups() {
 export function useTxColumnPrefs() {
   const [columnPrefs, setColumnPrefs] = useState<ColumnPref[]>(DEFAULT_COL_PREFS);
   const colPrefsLoaded = useRef(false);
+  // State twin of the ref so a page can wait for the first load (GH #427:
+  // a default saved view must not be overwritten by a late preference load).
+  const [loaded, setLoaded] = useState(false);
   const colPrefsSaveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const { data: serverPayload, error } = useSWR<{ columns?: ColumnPref[] } | undefined>(
@@ -156,6 +160,7 @@ export function useTxColumnPrefs() {
       setColumnPrefs(legacy);
     }
     colPrefsLoaded.current = true;
+    setLoaded(true);
   }, [serverPayload, error]);
 
   // Debounced PUT-on-change — verbatim (same 400ms, same PUT contract).
@@ -175,7 +180,7 @@ export function useTxColumnPrefs() {
   }, [columnPrefs]);
 
   const resetColPrefs = () => setColumnPrefs(DEFAULT_COL_PREFS);
-  return { columnPrefs, setColumnPrefs, resetColPrefs };
+  return { columnPrefs, setColumnPrefs, resetColPrefs, loaded };
 }
 
 /**
@@ -185,10 +190,11 @@ export function useTxColumnPrefs() {
 export function useTxSortPref(onChange?: () => void) {
   const [sortPref, setSortPref] = useState<SortPref>({ columnId: null, direction: null });
   const sortPrefLoaded = useRef(false);
+  const [loaded, setLoaded] = useState(false);
   const sortPrefSaveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // Soft GET: the pre-115 hook fell back to the default (unsorted) on !ok / error.
-  const { data: loaded } = useSWR<SortPref | null>(
+  const { data: serverSort } = useSWR<SortPref | null>(
     swrKey("/api/settings/tx-sort"),
     softJsonFetcher<SortPref | null>(null),
     swrListOptions,
@@ -196,8 +202,8 @@ export function useTxSortPref(onChange?: () => void) {
 
   useEffect(() => {
     if (sortPrefLoaded.current) return;
-    if (loaded === undefined) return; // still loading
-    const d = loaded;
+    if (serverSort === undefined) return; // still loading
+    const d = serverSort;
     if (
       d &&
       (d.columnId === null || isSortableColumnId(d.columnId)) &&
@@ -206,7 +212,8 @@ export function useTxSortPref(onChange?: () => void) {
       setSortPref({ columnId: d.columnId, direction: d.direction });
     }
     sortPrefLoaded.current = true;
-  }, [loaded]);
+    setLoaded(true);
+  }, [serverSort]);
 
   useEffect(() => {
     if (!sortPrefLoaded.current) return;
@@ -231,7 +238,7 @@ export function useTxSortPref(onChange?: () => void) {
     });
     onChange?.();
   }
-  return { sortPref, setSortPref, cycleSort };
+  return { sortPref, setSortPref, cycleSort, loaded };
 }
 
 /**
@@ -242,10 +249,11 @@ export function useTxSortPref(onChange?: () => void) {
 export function useTxFilterPrefs(onChange?: () => void) {
   const [colFilters, setColFilters] = useState<ColFilterShape[]>([]);
   const colFiltersLoaded = useRef(false);
+  const [loaded, setLoaded] = useState(false);
   const colFiltersSaveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // Soft GET: the pre-115 hook fell back to no filters on !ok / error.
-  const { data: loaded } = useSWR<{ filters?: ColFilterShape[] } | null>(
+  const { data: serverFilters } = useSWR<{ filters?: ColFilterShape[] } | null>(
     swrKey("/api/settings/tx-filters"),
     softJsonFetcher<{ filters?: ColFilterShape[] } | null>(null),
     swrListOptions,
@@ -253,10 +261,11 @@ export function useTxFilterPrefs(onChange?: () => void) {
 
   useEffect(() => {
     if (colFiltersLoaded.current) return;
-    if (loaded === undefined) return; // still loading
-    if (loaded?.filters) setColFilters(loaded.filters);
+    if (serverFilters === undefined) return; // still loading
+    if (serverFilters?.filters) setColFilters(serverFilters.filters);
     colFiltersLoaded.current = true;
-  }, [loaded]);
+    setLoaded(true);
+  }, [serverFilters]);
 
   useEffect(() => {
     if (!colFiltersLoaded.current) return;
@@ -283,5 +292,5 @@ export function useTxFilterPrefs(onChange?: () => void) {
     });
     onChange?.();
   }
-  return { colFilters, setColFilters, findColFilter, setColFilter };
+  return { colFilters, setColFilters, findColFilter, setColFilter, loaded };
 }

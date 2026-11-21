@@ -9,6 +9,7 @@ import {
   FILTERABLE_COLUMN_IDS,
 } from "@/lib/transactions/columns";
 import { SOURCES } from "@/lib/tx-source";
+import { txColumnFiltersSchema, type TxColumnFilter } from "@/lib/transactions/col-filter-schema";
 
 /**
  * Per-user per-column filter blob for the /transactions table (issue #59).
@@ -30,53 +31,13 @@ import { SOURCES } from "@/lib/tx-source";
 
 const KEY = "tx_table_filters";
 
-const filterableColumnSchema = z.enum(
-  FILTERABLE_COLUMN_IDS as [string, ...string[]],
-);
-
-const dateFilterSchema = z.object({
-  type: z.literal("date"),
-  columnId: filterableColumnSchema,
-  from: z.string().trim().min(0).max(20).optional(),
-  to: z.string().trim().min(0).max(20).optional(),
-});
-
-const textFilterSchema = z.object({
-  type: z.literal("text"),
-  columnId: filterableColumnSchema,
-  value: z.string().min(1).max(200),
-});
-
-const numericFilterSchema = z.object({
-  type: z.literal("numeric"),
-  columnId: filterableColumnSchema,
-  op: z.enum(["eq", "gt", "lt", "between"]),
-  value: z.number(),
-  value2: z.number().optional(),
-});
-
-const enumFilterSchema = z.object({
-  type: z.literal("enum"),
-  columnId: filterableColumnSchema,
-  // Bounded to a reasonable upper limit so the blob stays small.
-  // 100 covers every realistic enum (sources, account types, categories).
-  values: z.array(z.string().max(200)).min(1).max(100),
-});
-
-const filterSchema = z.discriminatedUnion("type", [
-  dateFilterSchema,
-  textFilterSchema,
-  numericFilterSchema,
-  enumFilterSchema,
-]);
-
+// The filter shape lives in src/lib/transactions/col-filter-schema.ts, shared
+// with saved Transactions views (GH #427).
 const putSchema = z.object({
-  // Cap the array so a malformed client can't write a giant blob.
-  // One entry per filterable column is enough for any sane UI.
-  filters: z.array(filterSchema).max(COLUMN_IDS.length * 2),
+  filters: txColumnFiltersSchema,
 });
 
-export type TxFilter = z.infer<typeof filterSchema>;
+export type TxFilter = TxColumnFilter;
 export type TxFiltersBlob = z.infer<typeof putSchema>;
 
 const DEFAULT: TxFiltersBlob = { filters: [] };

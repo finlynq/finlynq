@@ -22,12 +22,20 @@ import { AccountFilter } from "./_components/account-filter";
 import { ReportDateInput } from "./_components/report-date-input";
 import { serializeAccountIds } from "@/lib/reports/account-filter";
 import {
-  ALL_TIME_START,
   MULTI_YEAR_PRESETS,
   REPORT_PERIODS,
   REPORT_PERIOD_LABELS,
   type ReportPeriod as Period,
 } from "@/lib/reports/period";
+import { getPresetRange, isReportDatePreset, REPORT_DATE_PRESETS, REPORT_DATE_PRESET_LABELS } from "@/lib/reports/presets";
+import {
+  REPORT_TABS,
+  resolveSavedDateRange,
+  type ReportTab,
+  type ReportViewConfig,
+} from "@/lib/saved-views/config";
+import { SavedViewsMenu } from "@/components/saved-views/saved-views-menu";
+import { Combobox, type ComboboxItemShape } from "@/components/ui/combobox";
 import { PageSkeleton } from "@/components/page-skeleton";
 import { SankeyChart } from "@/components/sankey-chart";
 import {
@@ -45,7 +53,7 @@ import {
   ChevronRight,
   ChevronDown,
   Calendar,
-  Layers, Wallet, ChartColumn } from "lucide-react";
+  Layers, Wallet, ChartColumn, Tag } from "lucide-react";
 import {
   BarChart,
   Bar,
@@ -139,79 +147,9 @@ type UnrealizedData = {
 
 // ── Helpers ──
 
-/** Build a `YYYY-MM-DD` string from LOCAL date components (avoids UTC timezone drift). */
-function localDateStr(y: number, mo: number, d: number): string {
-  return `${y}-${String(mo).padStart(2, "0")}-${String(d).padStart(2, "0")}`;
-}
-
-/**
- * Returns the `{ start, end }` date range for a named preset.
- *
- * Accepts an optional `now` date (defaults to `new Date()`) so the function
- * can be unit-tested with deterministic fixed dates.
- *
- * Exported for unit testing.
- */
-export function getPresetRange(preset: string, now: Date = new Date()): { start: string; end: string } {
-  const y = now.getFullYear();
-  const m = now.getMonth(); // 0-indexed
-  const end = todayISO();
-
-  switch (preset) {
-    case "mtd":
-      return { start: localDateStr(y, m + 1, 1), end };
-    case "qtd": {
-      const qStart = Math.floor(m / 3) * 3;
-      return { start: localDateStr(y, qStart + 1, 1), end };
-    }
-    case "ytd":
-      return { start: `${y}-01-01`, end };
-    case "last-month": {
-      const lm = m === 0 ? 11 : m - 1;
-      const ly = m === 0 ? y - 1 : y;
-      const days = new Date(ly, lm + 1, 0).getDate();
-      return {
-        start: localDateStr(ly, lm + 1, 1),
-        end: localDateStr(ly, lm + 1, days),
-      };
-    }
-    case "last-quarter": {
-      const cq = Math.floor(m / 3);
-      const lq = cq === 0 ? 3 : cq - 1;
-      const lqy = cq === 0 ? y - 1 : y;
-      const qsm = lq * 3;
-      const qem = qsm + 2;
-      const qed = new Date(lqy, qem + 1, 0).getDate();
-      return {
-        start: localDateStr(lqy, qsm + 1, 1),
-        end: localDateStr(lqy, qem + 1, qed),
-      };
-    }
-    case "last-year":
-      return { start: `${y - 1}-01-01`, end: `${y - 1}-12-31` };
-    case "last-12": {
-      // end = last day of the prior (most recently completed) month.
-      // new Date(y, m, 0) = day 0 of current month = last day of the prior month.
-      const endD = new Date(y, m, 0);
-      // start = first day of the month 12 months before the current month.
-      // new Date(y, m - 12, 1) handles year roll-back and leap years natively.
-      const startD = new Date(y, m - 12, 1);
-      return {
-        start: localDateStr(startD.getFullYear(), startD.getMonth() + 1, 1),
-        end: localDateStr(endD.getFullYear(), endD.getMonth() + 1, endD.getDate()),
-      };
-    }
-    case "last-5-years":
-      // Five calendar years including the current one, through today.
-      return { start: `${y - 4}-01-01`, end };
-    case "all-time":
-      return { start: ALL_TIME_START, end };
-    default: {
-      // Fallback: current year-to-date (same as "ytd") — safe, no partial months.
-      return { start: `${y}-01-01`, end };
-    }
-  }
-}
+// The preset math moved to src/lib/reports/presets.ts (GH #427: saved reports
+// and the MCP tool resolve the same presets). Re-exported for existing imports.
+export { getPresetRange };
 
 // ── Component ──
 
@@ -228,6 +166,11 @@ export default function ReportsPage() {
   const [datePreset, setDatePreset] = useState<string>("ytd");
   // Account scoping — empty = every account (see lib/reports/account-filter.ts).
   const [accountIds, setAccountIds] = useState<number[]>([]);
+  // GH #427: one tag (exact match), "" = no tag filter. Applies to the summary,
+  // trend chart, Income Statement, Cash Flow and Year over Year (all built from
+  // transactions); the Balance Sheet is balances on a date, so it ignores it.
+  const [tag, setTag] = useState("");
+  const [tagOptions, setTagOptions] = useState<{ tag: string; count: number }[]>([]);
 
   // Data states
   const [trendsData, setTrendsData] = useState<TrendsData | null>(null);
@@ -250,10 +193,36 @@ export default function ReportsPage() {
     const v = serializeAccountIds(accountIds);
     return v ? `&accountIds=${encodeURIComponent(v)}` : "";
   }, [accountIds]);
+  const tagParam = tag ? `&tag=${encodeURIComponent(tag)}` : "";
+
+  // The user's tags for the tag filter (decrypted server-side).
+  useEffect(() => {
+    let cancelled = false;
+    fetch("/api/transactions/tags")
+      .then((r) => (r.ok ? r.json() : null))
+      .then((d) => {
+        if (!cancelled) setTagOptions(Array.isArray(d?.data?.tags) ? d.data.tags : []);
+      })
+      .catch(() => {
+        if (!cancelled) setTagOptions([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  // A saved report linked as /reports?savedView=<id> opens on load.
+  // undefined until the URL has been read (it isn't available on the server).
+  const [linkedViewId, setLinkedViewId] = useState<number | null | undefined>(undefined);
+  useEffect(() => {
+    const raw = new URLSearchParams(window.location.search).get("savedView");
+    const id = raw ? Number(raw) : NaN;
+    setLinkedViewId(Number.isInteger(id) && id > 0 ? id : null);
+  }, []);
 
 
   // Active tab
-  const [activeTab, setActiveTab] = useState("income");
+  const [activeTab, setActiveTab] = useState<ReportTab>("income");
 
   // Preset handler
   const handlePreset = useCallback((preset: string) => {
@@ -266,11 +235,41 @@ export default function ReportsPage() {
     if (MULTI_YEAR_PRESETS.includes(preset)) setPeriod("yearly");
   }, []);
 
+  // GH #427 saved reports: the page's settings as a config, and back.
+  // A preset is saved by its key so it stays relative; "custom" saves dates.
+  const buildReportConfig = useCallback((): ReportViewConfig => ({
+    tab: activeTab,
+    date: isReportDatePreset(datePreset)
+      ? { kind: "preset", preset: datePreset }
+      : { kind: "custom", start: startDate, end: endDate },
+    period,
+    groupBy,
+    accountIds,
+    tag: tag || null,
+    business: isBusiness,
+    yoy: yoyYear1 === currentYear - 1 && yoyYear2 === currentYear ? null : { year1: yoyYear1, year2: yoyYear2 },
+  }), [activeTab, datePreset, startDate, endDate, period, groupBy, accountIds, tag, isBusiness, yoyYear1, yoyYear2, currentYear]);
+
+  const applyReportConfig = useCallback((c: ReportViewConfig) => {
+    const { start, end } = resolveSavedDateRange(c.date);
+    setDatePreset(c.date.kind === "preset" ? c.date.preset : "custom");
+    setStartDate(start);
+    setEndDate(end);
+    setPeriod(c.period);
+    setGroupBy(c.groupBy);
+    setAccountIds(c.accountIds);
+    setTag(c.tag ?? "");
+    setIsBusiness(c.business);
+    setYoyYear1(c.yoy?.year1 ?? currentYear - 1);
+    setYoyYear2(c.yoy?.year2 ?? currentYear);
+    setActiveTab(c.tab);
+  }, [currentYear]);
+
   // Fetch trends data
   useEffect(() => {
     let cancelled = false;
     const biz = isBusiness ? "&business=true" : "";
-    fetch(`/api/reports/trends?startDate=${startDate}&endDate=${endDate}&period=${period}&groupBy=${groupBy}${biz}${acctParam}&currency=${encodeURIComponent(displayCurrency)}`)
+    fetch(`/api/reports/trends?startDate=${startDate}&endDate=${endDate}&period=${period}&groupBy=${groupBy}${biz}${acctParam}${tagParam}&currency=${encodeURIComponent(displayCurrency)}`)
       .then((r) => (r.ok ? r.json() : null))
       .then((d) => {
         if (!cancelled) setTrendsData(d && typeof d === "object" ? (d as TrendsData) : null);
@@ -284,7 +283,7 @@ export default function ReportsPage() {
     return () => {
       cancelled = true;
     };
-  }, [startDate, endDate, period, groupBy, isBusiness, displayCurrency, acctParam]);
+  }, [startDate, endDate, period, groupBy, isBusiness, displayCurrency, acctParam, tagParam]);
 
   // Fetch balance sheet
   useEffect(() => {
@@ -315,7 +314,7 @@ export default function ReportsPage() {
   // Fetch YoY
   useEffect(() => {
     let cancelled = false;
-    fetch(`/api/reports/yoy?year1=${yoyYear1}&year2=${yoyYear2}${acctParam}&currency=${encodeURIComponent(displayCurrency)}`)
+    fetch(`/api/reports/yoy?year1=${yoyYear1}&year2=${yoyYear2}${acctParam}${tagParam}&currency=${encodeURIComponent(displayCurrency)}`)
       .then((r) => (r.ok ? r.json() : null))
       .then((d) => {
         if (!cancelled) setYoyData(d && typeof d === "object" ? (d as YoYData) : null);
@@ -326,7 +325,7 @@ export default function ReportsPage() {
     return () => {
       cancelled = true;
     };
-  }, [yoyYear1, yoyYear2, displayCurrency, acctParam]);
+  }, [yoyYear1, yoyYear2, displayCurrency, acctParam, tagParam]);
 
   // Sankey data: every CATEGORY goes in, each with its group, so the chart can
   // show groups and open one into its categories. When the page is grouped by
@@ -342,7 +341,7 @@ export default function ReportsPage() {
     }
     let cancelled = false;
     const biz = isBusiness ? "&business=true" : "";
-    fetch(`/api/reports/trends?startDate=${startDate}&endDate=${endDate}&period=${period}&groupBy=category${biz}${acctParam}&currency=${encodeURIComponent(displayCurrency)}`)
+    fetch(`/api/reports/trends?startDate=${startDate}&endDate=${endDate}&period=${period}&groupBy=category${biz}${acctParam}${tagParam}&currency=${encodeURIComponent(displayCurrency)}`)
       .then((r) => (r.ok ? r.json() : null))
       .then((d) => {
         if (!cancelled) setCashflowCategories(d && typeof d === "object" ? (d as TrendsData) : null);
@@ -353,7 +352,7 @@ export default function ReportsPage() {
     return () => {
       cancelled = true;
     };
-  }, [groupBy, startDate, endDate, period, isBusiness, displayCurrency, acctParam]);
+  }, [groupBy, startDate, endDate, period, isBusiness, displayCurrency, acctParam, tagParam]);
 
   const sankeySource = groupBy === "category" ? trendsData : cashflowCategories;
   const sankeyIncome = useMemo(() => {
@@ -432,11 +431,22 @@ export default function ReportsPage() {
   return (
     <div className="space-y-6">
       {/* Header */}
-      <div>
-        <h1 className="text-2xl font-bold tracking-tight">Financial Reports</h1>
-        <p className="text-sm text-muted-foreground mt-0.5">
-          Analyze income, expenses, cash flow, and trends across any time period
-        </p>
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div>
+          <h1 className="text-2xl font-bold tracking-tight">Financial Reports</h1>
+          <p className="text-sm text-muted-foreground mt-0.5">
+            Analyze income, expenses, cash flow, and trends across any time period
+          </p>
+        </div>
+        <SavedViewsMenu<ReportViewConfig>
+          kind="report"
+          title="Saved reports"
+          noun="report"
+          buildConfig={buildReportConfig}
+          onApply={applyReportConfig}
+          openViewId={linkedViewId ?? null}
+          ready={linkedViewId !== undefined}
+        />
       </div>
 
       {/* ── Filters Bar ── */}
@@ -451,15 +461,9 @@ export default function ReportsPage() {
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
-                  <SelectItem value="mtd">Month to Date</SelectItem>
-                  <SelectItem value="qtd">Quarter to Date</SelectItem>
-                  <SelectItem value="ytd">Year to Date</SelectItem>
-                  <SelectItem value="last-month">Last Month</SelectItem>
-                  <SelectItem value="last-quarter">Last Quarter</SelectItem>
-                  <SelectItem value="last-year">Last Year</SelectItem>
-                  <SelectItem value="last-12">Last 12 Months</SelectItem>
-                  <SelectItem value="last-5-years">Last 5 Years</SelectItem>
-                  <SelectItem value="all-time">All Time</SelectItem>
+                  {REPORT_DATE_PRESETS.map((p) => (
+                    <SelectItem key={p} value={p}>{REPORT_DATE_PRESET_LABELS[p]}</SelectItem>
+                  ))}
                   <SelectItem value="custom">Custom</SelectItem>
                 </SelectContent>
               </Select>
@@ -537,6 +541,30 @@ export default function ReportsPage() {
                 Accounts
               </Label>
               <AccountFilter selected={accountIds} onChange={setAccountIds} />
+            </div>
+
+            {/* Tag scoping (GH #427): one tag, exact match. */}
+            <div>
+              <Label className="text-xs text-muted-foreground mb-1 block">
+                <Tag className="inline h-3 w-3 mr-1" />
+                Tag
+              </Label>
+              <Combobox
+                value={tag}
+                onValueChange={(v) => setTag(v === "__all__" ? "" : v)}
+                items={[
+                  { value: "__all__", label: "All tags" } satisfies ComboboxItemShape,
+                  // A saved report's tag stays selectable even if no
+                  // transaction carries it any more.
+                  ...(tag && !tagOptions.some((o) => o.tag === tag) ? [{ value: tag, label: tag }] : []),
+                  ...tagOptions.map((o): ComboboxItemShape => ({ value: o.tag, label: `${o.tag} (${o.count})` })),
+                ]}
+                placeholder="All tags"
+                searchPlaceholder="Search tags…"
+                emptyMessage="No tags"
+                size="sm"
+                className="h-8 w-44 text-xs"
+              />
             </div>
 
             <Separator orientation="vertical" className="h-8 mx-1" />
@@ -687,7 +715,10 @@ export default function ReportsPage() {
       )}
 
       {/* ── Tabs ── */}
-      <Tabs value={activeTab} onValueChange={setActiveTab}>
+      <Tabs
+        value={activeTab}
+        onValueChange={(v) => setActiveTab((REPORT_TABS as readonly string[]).includes(v as string) ? (v as ReportTab) : "income")}
+      >
         <TabsList>
           <TabsTrigger value="income">
             <BarChart3 className="h-3.5 w-3.5 mr-1.5" /> Income Statement
@@ -804,10 +835,11 @@ export default function ReportsPage() {
                       currency={displayCurrency}
                       startDate={startDate}
                       endDate={endDate}
+                      tag={tag}
                       timeseries={trendsData.timeseries}
                     />
                   ) : (
-                    <FlatTable items={trendsData.income} colorClass="text-emerald-600 dark:text-emerald-400" currency={displayCurrency} startDate={startDate} endDate={endDate} timeseries={trendsData.timeseries} />
+                    <FlatTable items={trendsData.income} colorClass="text-emerald-600 dark:text-emerald-400" currency={displayCurrency} startDate={startDate} endDate={endDate} tag={tag} timeseries={trendsData.timeseries} />
                   )}
                   <div className="flex justify-between items-center p-3 mt-3 rounded-xl bg-muted/50">
                     <span className="font-semibold text-sm">Total Income</span>
@@ -853,10 +885,11 @@ export default function ReportsPage() {
                       currency={displayCurrency}
                       startDate={startDate}
                       endDate={endDate}
+                      tag={tag}
                       timeseries={trendsData.timeseries}
                     />
                   ) : (
-                    <FlatTable items={trendsData.expenses} colorClass="text-rose-600 dark:text-rose-400" currency={displayCurrency} startDate={startDate} endDate={endDate} timeseries={trendsData.timeseries} />
+                    <FlatTable items={trendsData.expenses} colorClass="text-rose-600 dark:text-rose-400" currency={displayCurrency} startDate={startDate} endDate={endDate} tag={tag} timeseries={trendsData.timeseries} />
                   )}
                   <div className="flex justify-between items-center p-3 mt-3 rounded-xl bg-muted/50">
                     <span className="font-semibold text-sm">Total Expenses</span>
@@ -888,8 +921,8 @@ export default function ReportsPage() {
                 </CardContent>
               </Card>
 
-              {/* ── Unrealized gains / losses ── */}
-              {unrealizedData && (unrealizedData.accounts.length > 0 || Math.abs(unrealizedData.totals.totalGL) > 0.005) && (
+              {/* ── Unrealized gains / losses (holdings, not tagged transactions: hidden under a tag filter) ── */}
+              {!tag && unrealizedData && (unrealizedData.accounts.length > 0 || Math.abs(unrealizedData.totals.totalGL) > 0.005) && (
                 <Card>
                   <CardHeader>
                     <CardTitle>Unrealized gains / losses (period change)</CardTitle>
@@ -1004,6 +1037,11 @@ export default function ReportsPage() {
 
         {/* ============ Balance Sheet ============ */}
         <TabsContent value="balance">
+          {tag && (
+            <p className="text-xs text-muted-foreground mb-3">
+              The Balance Sheet shows account balances on a date, so the tag filter doesn&apos;t apply to it.
+            </p>
+          )}
           {balanceSheet && (
             <Card>
               <CardHeader>
@@ -1399,6 +1437,7 @@ function GroupedTable({
   currency,
   startDate,
   endDate,
+  tag,
   timeseries,
 }: {
   groups: { name: string; items: BreakdownItem[]; total: number }[];
@@ -1409,6 +1448,8 @@ function GroupedTable({
   currency: string;
   startDate: string;
   endDate: string;
+  /** Carried into the drill-through links (GH #427). */
+  tag?: string;
   timeseries: TimeseriesPoint[];
 }) {
   const allTs = timeseries;
@@ -1447,6 +1488,7 @@ function GroupedTable({
                   currency={currency}
                   startDate={startDate}
                   endDate={endDate}
+                  tag={tag}
                   visibleTs={visibleTs}
                 />
               );
@@ -1476,6 +1518,7 @@ function GroupRow({
   currency,
   startDate,
   endDate,
+  tag,
   visibleTs,
 }: {
   group: { name: string; items: BreakdownItem[]; total: number };
@@ -1486,6 +1529,7 @@ function GroupRow({
   currency: string;
   startDate: string;
   endDate: string;
+  tag?: string;
   visibleTs: TimeseriesPoint[];
 }) {
   const pct = total > 0 ? ((group.total / total) * 100).toFixed(1) : "0.0";
@@ -1525,7 +1569,7 @@ function GroupRow({
                   {item.categoryId != null ? (
                     <span className="inline-flex items-center gap-1.5">
                       <Link
-                        href={buildTxDrillUrl({ categoryId: String(item.categoryId), startDate, endDate })}
+                        href={buildTxDrillUrl({ categoryId: String(item.categoryId), startDate, endDate, ...(tag ? { tag } : {}) })}
                         className="hover:underline hover:text-foreground"
                         title={`View ${item.name} transactions for this period`}
                       >
@@ -1559,6 +1603,7 @@ function FlatTable({
   currency,
   startDate,
   endDate,
+  tag,
   timeseries,
 }: {
   items: BreakdownItem[];
@@ -1566,6 +1611,8 @@ function FlatTable({
   currency: string;
   startDate: string;
   endDate: string;
+  /** Carried into the drill-through links (GH #427). */
+  tag?: string;
   timeseries: TimeseriesPoint[];
 }) {
   const total = items.reduce((s, i) => s + i.total, 0);
@@ -1599,7 +1646,7 @@ function FlatTable({
                     {item.categoryId != null ? (
                       <span className="inline-flex items-center gap-1.5">
                         <Link
-                          href={buildTxDrillUrl({ categoryId: String(item.categoryId), startDate, endDate })}
+                          href={buildTxDrillUrl({ categoryId: String(item.categoryId), startDate, endDate, ...(tag ? { tag } : {}) })}
                           className="hover:underline"
                           title={`View ${item.name} transactions for this period`}
                         >
