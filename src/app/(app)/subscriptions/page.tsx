@@ -60,6 +60,7 @@ import {
   CalendarClock,
   CalendarDays,
   CreditCard,
+  EyeOff,
   List,
   MoreHorizontal,
   Pause,
@@ -131,6 +132,12 @@ function SubscriptionsPageContent() {
   const [actionError, setActionError] = useState("");
   const [deleteId, setDeleteId] = useState<number | null>(null);
   const [deleting, setDeleting] = useState(false);
+  // GH #428 — "Not a subscription": payees the user dismissed (server-side,
+  // so the phone and the calendar stop suggesting them too).
+  const [dismissals, setDismissals] = useState<{ id: number; payee: string | null }[]>([]);
+  const [showDismissed, setShowDismissed] = useState(false);
+  const [dismissAllOpen, setDismissAllOpen] = useState(false);
+  const [deleteDismiss, setDeleteDismiss] = useState(false);
 
   const today = localDateISO();
 
@@ -161,9 +168,22 @@ function SubscriptionsPageContent() {
     }
   }, []);
 
+  const loadDismissals = useCallback(async () => {
+    try {
+      const res = await fetch("/api/subscriptions/dismissals");
+      if (!res.ok) return;
+      const json = await res.json();
+      const list = json?.data?.dismissals;
+      setDismissals(Array.isArray(list) ? list : []);
+    } catch {
+      /* non-fatal: the list just stays as it was */
+    }
+  }, []);
+
   useEffect(() => {
     loadSubs();
     loadRecurring();
+    loadDismissals();
     fetch("/api/categories")
       .then((r) => (r.ok ? r.json() : []))
       .then((data) => setCategories(Array.isArray(data) ? data : []))
@@ -172,7 +192,7 @@ function SubscriptionsPageContent() {
       .then((r) => (r.ok ? r.json() : []))
       .then((data) => setAccounts(Array.isArray(data) ? data : []))
       .catch(() => {});
-  }, [loadSubs, loadRecurring]);
+  }, [loadSubs, loadRecurring, loadDismissals]);
 
   function setView(next: View) {
     router.replace(next === "calendar" ? "/subscriptions?view=calendar" : "/subscriptions", { scroll: false });
@@ -289,6 +309,41 @@ function SubscriptionsPageContent() {
     );
   }
 
+  /** Mark payees "Not a subscription", then reload what depends on it. */
+  async function dismissPayees(payees: string[], key: string) {
+    const ok = await mutate(
+      key,
+      () =>
+        fetch("/api/subscriptions/dismissals", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ payees }),
+        }),
+      "Couldn't dismiss the suggestion",
+    );
+    if (ok) await Promise.all([loadRecurring(), loadDismissals()]);
+    return ok;
+  }
+
+  async function undoDismissal(id: number) {
+    const ok = await mutate(
+      `undismiss:${id}`,
+      () =>
+        fetch("/api/subscriptions/dismissals", {
+          method: "DELETE",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ ids: [id] }),
+        }),
+      "Couldn't bring the suggestion back",
+    );
+    if (ok) await Promise.all([loadRecurring(), loadDismissals()]);
+  }
+
+  async function dismissAllSuggestions() {
+    const ok = await dismissPayees([...new Set(suggestions.map((r) => r.payee))], "dismiss:all");
+    if (ok) setDismissAllOpen(false);
+  }
+
   function changeStatus(sub: Subscription, status: string) {
     return mutate(`status:${sub.id}`, () => putSub({ id: sub.id, status }), "Couldn't update the subscription");
   }
@@ -307,9 +362,16 @@ function SubscriptionsPageContent() {
   async function handleDelete() {
     if (deleteId == null) return;
     setDeleting(true);
+    const name = subs.find((s) => s.id === deleteId)?.name ?? "";
     const ok = await mutate(`delete:${deleteId}`, () => fetch(`/api/subscriptions?id=${deleteId}`, { method: "DELETE" }), "Couldn't delete the subscription");
+    // GH #428 — "Delete and don't suggest again": without it, deleting a
+    // tracked payee brings its suggestion back on the next load.
+    if (ok && deleteDismiss && name) await dismissPayees([name], `dismiss:${deleteId}`);
     setDeleting(false);
-    if (ok) setDeleteId(null);
+    if (ok) {
+      setDeleteId(null);
+      setDeleteDismiss(false);
+    }
   }
 
   const deletingSub = subs.find((s) => s.id === deleteId) ?? null;
@@ -439,6 +501,16 @@ function SubscriptionsPageContent() {
                           </p>
                         </div>
                         <div className="flex items-center gap-1.5">
+                          <Button
+                            variant="ghost"
+                            size="sm"
+                            onClick={() => dismissPayees([r.payee], `dismiss:${r.payee}`)}
+                            disabled={busyKey !== null}
+                            title="Not a subscription: stop suggesting this payee"
+                          >
+                            <EyeOff className="h-3.5 w-3.5 mr-1" />
+                            {busyKey === `dismiss:${r.payee}` ? "Hiding…" : "Not a subscription"}
+                          </Button>
                           <Button variant="ghost" size="sm" onClick={() => reviewDetected(r)}>Review</Button>
                           <Button size="sm" onClick={() => trackDetected(r)} disabled={busyKey !== null}>
                             <Plus className="h-3.5 w-3.5 mr-1" />
@@ -449,13 +521,42 @@ function SubscriptionsPageContent() {
                     );
                   })}
                 </div>
-                {suggestions.length > SUGGESTIONS_PREVIEW && (
-                  <Button variant="link" size="sm" className="px-0" onClick={() => setShowAllSuggestions((v) => !v)}>
-                    {showAllSuggestions ? "Show fewer" : `Show all ${suggestions.length}`}
-                  </Button>
-                )}
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  {suggestions.length > SUGGESTIONS_PREVIEW ? (
+                    <Button variant="link" size="sm" className="px-0" onClick={() => setShowAllSuggestions((v) => !v)}>
+                      {showAllSuggestions ? "Show fewer" : `Show all ${suggestions.length}`}
+                    </Button>
+                  ) : <span />}
+                  {suggestions.length > 1 && (
+                    <Button variant="link" size="sm" className="px-0 text-muted-foreground" onClick={() => setDismissAllOpen(true)} disabled={busyKey !== null}>
+                      None of these are subscriptions
+                    </Button>
+                  )}
+                </div>
               </CardContent>
             </Card>
+          )}
+
+          {/* Dismissed suggestions (GH #428), with undo */}
+          {dismissals.length > 0 && (
+            <div className="text-sm">
+              <Button variant="link" size="sm" className="px-0 text-muted-foreground" onClick={() => setShowDismissed((v) => !v)}>
+                {showDismissed ? "Hide" : "Show"} dismissed suggestions ({dismissals.length})
+              </Button>
+              {showDismissed && (
+                <div className="mt-1 divide-y rounded-lg border bg-background">
+                  {dismissals.map((d) => (
+                    <div key={d.id} className="flex items-center justify-between gap-2 px-3 py-2">
+                      <span className="truncate">{d.payee ?? "(can't be read with your current sign-in)"}</span>
+                      <Button variant="ghost" size="sm" onClick={() => undoDismissal(d.id)} disabled={busyKey !== null}>
+                        <RotateCcw className="h-3.5 w-3.5 mr-1" />
+                        {busyKey === `undismiss:${d.id}` ? "Restoring…" : "Suggest again"}
+                      </Button>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
           )}
 
           {/* Empty state */}
@@ -519,10 +620,33 @@ function SubscriptionsPageContent() {
         open={deleteId !== null}
         onOpenChange={(open) => { if (!open && !deleting) setDeleteId(null); }}
         title="Delete subscription"
-        description={<>Delete <strong>{deletingSub?.name ?? "this subscription"}</strong>? Your transactions are not affected. This cannot be undone.</>}
+        description={
+          <>
+            Delete <strong>{deletingSub?.name ?? "this subscription"}</strong>? Your transactions are not affected. This cannot be undone.
+            <label className="mt-3 flex items-center gap-2 text-sm text-foreground">
+              <input
+                type="checkbox"
+                className="h-4 w-4 accent-primary"
+                checked={deleteDismiss}
+                onChange={(e) => setDeleteDismiss(e.target.checked)}
+              />
+              Don&apos;t suggest this payee again
+            </label>
+          </>
+        }
         confirmLabel="Delete subscription"
         busy={deleting}
         onConfirm={handleDelete}
+      />
+
+      <ConfirmDialog
+        open={dismissAllOpen}
+        onOpenChange={(open) => { if (!open && busyKey !== "dismiss:all") setDismissAllOpen(false); }}
+        title="Dismiss all suggestions"
+        description={<>Stop suggesting these {suggestions.length} payees as subscriptions? You can bring any of them back from the dismissed list.</>}
+        confirmLabel="Dismiss all"
+        busy={busyKey === "dismiss:all"}
+        onConfirm={dismissAllSuggestions}
       />
     </div>
   );

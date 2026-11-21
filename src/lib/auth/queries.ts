@@ -884,6 +884,7 @@ async function deleteAllUserDataTx(tx: TxClient, userId: string) {
   // GH #420: cascades off accounts anyway; deleted explicitly so the coverage
   // gate sees it and the encrypted image never outlives its account.
   await tx.delete(s.accountLogos).where(eq(s.accountLogos.userId, userId));
+  await tx.delete(s.subscriptionDismissals).where(eq(s.subscriptionDismissals.userId, userId));
   await tx.delete(s.accounts).where(eq(s.accounts.userId, userId));
 
   // ── Portfolio snapshot / lot bookkeeping ──────────────────────────────────

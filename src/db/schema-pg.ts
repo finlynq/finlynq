@@ -702,6 +702,19 @@ export const accountLogos = pgTable("account_logos", {
   check("account_logos_source_check", sql`${t.source} IN ('upload','domain')`),
 ]);
 
+// GH #428 (2026-11-21): payees the user marked "Not a subscription", left out
+// of the detected suggestions. payee_ct is DEK-encrypted; payee_lookup is the
+// nameLookup HMAC of the normalized payee. Store: lib/subscriptions/dismissals.ts.
+export const subscriptionDismissals = pgTable("subscription_dismissals", {
+  id: serial("id").primaryKey(),
+  userId: text("user_id").notNull(),
+  payeeCt: text("payee_ct").notNull(),
+  payeeLookup: text("payee_lookup").notNull(),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+}, (t) => [
+  uniqueIndex("subscription_dismissals_user_lookup_uq").on(t.userId, t.payeeLookup),
+]);
+
 // Multi-account goal linking (issue #130, 2026-05-03). JOIN grain is
 // `(goal_id, account_id, user_id)` — mirror the holding_accounts pattern
 // in CLAUDE.md. ON DELETE CASCADE on both FKs so deleting a goal or an

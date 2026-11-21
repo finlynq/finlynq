@@ -47,6 +47,15 @@ import { tagAmount } from "../currency-tagging";
 import { registerManageTool } from "./_consolidate";
 import { monthlyEquivalent, normalizeFrequency } from "../../src/lib/subscriptions/schedule";
 import { advanceStaleSubscriptionDatesSafe } from "../../src/lib/subscriptions/advance-next-dates";
+import {
+  DismissalError,
+  MAX_DISMISSALS_PER_CALL,
+  dismissPayees,
+  dismissedLookups,
+  listDismissals,
+  undismiss,
+  withoutDismissed,
+} from "../../src/lib/subscriptions/dismissals";
 
 type ToolResult = { content: Array<{ type: "text"; text: string }> };
 
@@ -493,6 +502,12 @@ export function registerSubscriptionsTools(server: McpServer, ctx: PgToolContext
         });
       }
 
+      // GH #428 — payees the user marked "Not a subscription" are never offered.
+      const dismissedSet = await dismissedLookups(userId);
+      const kept = withoutDismissed(candidates, (c) => c.payee, dismissedSet, dek);
+      const dismissedCount = candidates.length - kept.length;
+      candidates.length = 0;
+      candidates.push(...kept);
       candidates.sort((a, b) => b.confidence - a.confidence || b.occurrences - a.occurrences);
 
       // Payload for the token: just the list Claude is authorised to commit.
@@ -515,6 +530,7 @@ export function registerSubscriptionsTools(server: McpServer, ctx: PgToolContext
           cacheDegraded: all.length > 0 && all.every((t) => t.payee.startsWith("v1:")),
           candidates,
           confirmationToken: token,
+          dismissedCount,
         },
       });
     }
@@ -582,7 +598,7 @@ export function registerSubscriptionsTools(server: McpServer, ctx: PgToolContext
   registerManageTool(
     server,
     "manage_subscriptions",
-    "Manage subscriptions: `op` selects add / update / delete / list. add: one (name/amount/cadence/next_billing_date) or many (pass `items[]` + the `confirmation_token` from detect_subscriptions). update: change any field by id. delete: remove by id. list: raw editable rows (filter by `status`); `include_summary:true` also adds cost/renewal totals under a `summary` key.",
+    "Manage subscriptions and dismissed suggestions: `op` picks the action. Ops: add / update / delete / list / dismiss_suggestion / undismiss_suggestion / list_dismissed. add: one (name/amount/cadence/next_billing_date) or many (pass `items[]` + the `confirmation_token` from detect_subscriptions). update: change any field by id. delete: remove by id. list: raw editable rows (filter by `status`); `include_summary:true` also adds cost/renewal totals under a `summary` key. dismiss_suggestion: mark detected payees as not subscriptions so detect_subscriptions and the app stop suggesting them (kept even if a subscription with that name is later deleted). undismiss_suggestion: undo by `ids` or `payees`. list_dismissed: the dismissed payees.",
     z.discriminatedUnion("op", [
       z.object({
         op: z.literal("add"),
@@ -634,6 +650,18 @@ export function registerSubscriptionsTools(server: McpServer, ctx: PgToolContext
         include_summary: z.boolean().optional().describe("When true, ALSO return aggregate monthly/annual cost + upcoming renewals under a `summary` key."),
         reportingCurrency: z.string().optional().describe("ISO code for the summary totals; defaults to user's display currency. Only used with include_summary."),
       }),
+      z.object({
+        op: z.literal("dismiss_suggestion"),
+        payees: z.array(z.string().min(1)).min(1).max(MAX_DISMISSALS_PER_CALL).describe("Payee names exactly as detect_subscriptions returned them (case and spacing don't matter)."),
+      }),
+      z.object({
+        op: z.literal("undismiss_suggestion"),
+        ids: z.array(z.number().int().positive()).optional().describe("Dismissal ids from list_dismissed."),
+        payees: z.array(z.string().min(1)).optional().describe("Payee names to suggest again."),
+      }),
+      z.object({
+        op: z.literal("list_dismissed"),
+      }),
     ]),
     async (input) => {
       switch (input.op) {
@@ -662,6 +690,29 @@ export function registerSubscriptionsTools(server: McpServer, ctx: PgToolContext
           return opDelete(input);
         case "list":
           return opListWithOptionalSummary(input);
+        case "dismiss_suggestion": {
+          if (!dek) return err("Dismissing a suggestion needs your data unlocked (sign in again).");
+          try {
+            const r = await dismissPayees(userId, dek, input.payees);
+            return text({ success: true, data: { ...r, payees: input.payees.length } });
+          } catch (e) {
+            if (e instanceof DismissalError) return err(e.message);
+            throw e;
+          }
+        }
+        case "undismiss_suggestion": {
+          try {
+            const r = await undismiss(userId, dek, { ids: input.ids, payees: input.payees });
+            return text({ success: true, data: r });
+          } catch (e) {
+            if (e instanceof DismissalError) return err(e.message);
+            throw e;
+          }
+        }
+        case "list_dismissed": {
+          const dismissals = await listDismissals(userId, dek);
+          return text({ success: true, data: { dismissals, locked: !dek } });
+        }
       }
     },
   );

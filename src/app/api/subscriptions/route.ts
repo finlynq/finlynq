@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { db, schema } from "@/db";
 import { eq, and, sql } from "drizzle-orm";
 import { detectRecurringTransactions } from "@/lib/recurring-detector";
+import { dismissedLookups, withoutDismissed } from "@/lib/subscriptions/dismissals";
 import { requireAuth } from "@/lib/auth/require-auth";
 import { requireEncryption } from "@/lib/auth/require-encryption";
 import { z } from "zod";
@@ -193,8 +194,10 @@ export async function POST(request: NextRequest) {
         { asOf: todayISO() },
       );
 
-      // Filter to likely subscriptions (recurring expenses)
-      const suggestions = detected
+      // Filter to likely subscriptions (recurring expenses), leaving out the
+      // payees the user marked "Not a subscription" (GH #428).
+      const dismissed = await dismissedLookups(userId);
+      const suggestions = withoutDismissed(detected, (r) => r.payee, dismissed, dek)
         .filter((r) => r.avgAmount < 0)
         .map((r) => ({
           name: r.payee,
