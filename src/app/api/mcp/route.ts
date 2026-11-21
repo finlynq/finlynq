@@ -27,26 +27,11 @@ import { withAutoAnnotations } from "../../../../mcp-server/auto-annotations";
 import { buildFilteredToolsList } from "../../../../mcp-server/tools/_consolidate";
 import { MCP_TOOL_COUNTS, MCP_SERVER_VERSION, MCP_SERVER_INSTRUCTIONS } from "@/lib/mcp/tool-counts";
 import { isToolInEnabledToolsets } from "@/lib/mcp/toolsets";
+import { shouldRejectMcpOrigin } from "@/lib/mcp/origin-guard";
 
-// Origin allowlist - defense-in-depth against DNS rebinding and cross-site
-// cookie attacks against the session-cookie auth path. Bearer-token requests
-// typically don't send Origin, so a missing Origin is allowed - auth still
-// has to pass.
-const ALLOWED_ORIGIN_HOSTS = new Set([
-  "finlynq.com",
-  "www.finlynq.com",
-  "demo.finlynq.com",
-  "dev.finlynq.com",
-  "claude.ai",
-  "www.claude.ai",
-  "claude.com",
-  "www.claude.com",
-  "chat.openai.com",
-  "chatgpt.com",
-  "cursor.com",
-  "windsurf.dev",
-  "codeium.com",
-]);
+// Origin guard: defense-in-depth for the session-cookie auth path only. A
+// request with a bearer token / API key, or with no session cookie, is judged
+// by its credentials, whatever its Origin (lib/mcp/origin-guard.ts, GH #424).
 
 /**
  * Narrow view of an `McpServer` whose `tool(...)` / `registerTool(...)` methods
@@ -65,16 +50,13 @@ interface ScopeFilterableServer {
   registerTool(name: string, ...args: unknown[]): RegisteredTool | undefined;
 }
 
-function isAllowedOrigin(origin: string | null): boolean {
-  if (!origin) return true;
-  try {
-    const u = new URL(origin);
-    if (u.hostname === "localhost" || u.hostname === "127.0.0.1") return true;
-    if (u.hostname.endsWith(".localhost")) return true;
-    return ALLOWED_ORIGIN_HOSTS.has(u.hostname);
-  } catch {
-    return false;
-  }
+function originRejected(request: NextRequest): boolean {
+  return shouldRejectMcpOrigin({
+    origin: request.headers.get("origin"),
+    authorization: request.headers.get("authorization"),
+    apiKey: request.headers.get("x-api-key"),
+    hasSessionCookie: request.cookies.has("pf_session"),
+  });
 }
 
 function rejectBadOrigin(): NextResponse {
@@ -128,7 +110,7 @@ async function authenticateMcp(request: NextRequest) {
 const MCP_MAX_BODY_BYTES = 1 * 1024 * 1024;
 
 export async function POST(request: NextRequest) {
-  if (!isAllowedOrigin(request.headers.get("origin"))) return rejectBadOrigin();
+  if (originRejected(request)) return rejectBadOrigin();
 
   const contentLengthRaw = request.headers.get("content-length");
   if (contentLengthRaw == null) {
@@ -273,7 +255,7 @@ export async function POST(request: NextRequest) {
  * advertising one re-arms the same re-auth reflex. Mirrors DELETE below.
  */
 export async function GET(request: NextRequest) {
-  if (!isAllowedOrigin(request.headers.get("origin"))) return rejectBadOrigin();
+  if (originRejected(request)) return rejectBadOrigin();
   return NextResponse.json(
     { error: "Stateless mode — no SSE stream. Use POST with a valid Bearer token." },
     { status: 405, headers: { Allow: "POST" } }
