@@ -500,7 +500,7 @@ function SubscriptionsPageContent() {
                             {formatCurrency(Math.abs(r.avgAmount), r.currency)} / {FREQUENCY_SUFFIX[freq]} · seen {r.count}× · last {formatDate(r.lastDate)}
                           </p>
                         </div>
-                        <div className="flex items-center gap-1.5">
+                        <div className="flex flex-wrap items-center justify-end gap-1.5">
                           <Button
                             variant="ghost"
                             size="sm"
@@ -509,7 +509,12 @@ function SubscriptionsPageContent() {
                             title="Not a subscription: stop suggesting this payee"
                           >
                             <EyeOff className="h-3.5 w-3.5 mr-1" />
-                            {busyKey === `dismiss:${r.payee}` ? "Hiding…" : "Not a subscription"}
+                            {busyKey === `dismiss:${r.payee}` ? "Hiding…" : (
+                              <>
+                                <span className="hidden sm:inline">Not a subscription</span>
+                                <span className="sm:hidden">Dismiss</span>
+                              </>
+                            )}
                           </Button>
                           <Button variant="ghost" size="sm" onClick={() => reviewDetected(r)}>Review</Button>
                           <Button size="sm" onClick={() => trackDetected(r)} disabled={busyKey !== null}>
