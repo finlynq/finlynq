@@ -4,6 +4,10 @@ All notable changes to Finlynq are documented here.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.0.0/)
 Versioning: [Semantic Versioning](https://semver.org/)
 
+## Unreleased (2026-11-21)
+
+- MCP: the Gemini web app can register as an OAuth client. It registers six redirect addresses in one request and we accepted at most five, so Gemini reported the server as "not a valid MCP server". The limit is now ten.
+
 ## [Unreleased]
 
 - **fix(mcp): the Gemini web app can reach the MCP server (2026-11-20, GH #424 follow-up).** Adding `https://finlynq.com/api/mcp` as a Gemini custom app failed with "This URL does not appear to be a valid MCP server". Two gaps: `/api/mcp` refused any request from an Origin not on its list with 403 before checking credentials, so an AI client's first unauthenticated request never got the 401 + `WWW-Authenticate` challenge that starts sign-in; and the OAuth protected-resource metadata was only served at `/api/mcp/.well-known/oauth-protected-resource`, not at the standard `/.well-known/oauth-protected-resource` and `/.well-known/oauth-protected-resource/api/mcp`. The Origin check now applies only to requests that would sign in with the browser session cookie (a token or API key, or no cookie, is judged by its credentials), `gemini.google.com` is listed, and the metadata is served at both standard addresses. Pinned by `tests/mcp-origin-guard.test.ts`.
