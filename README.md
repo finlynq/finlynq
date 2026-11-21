@@ -23,7 +23,7 @@ curl -O https://raw.githubusercontent.com/finlynq/finlynq/main/docker-compose.ym
 docker compose up -d
 ```
 
-Before the first `up`, create a sibling `.env` file with three secrets, each generated with `openssl rand -hex 32`: `PF_JWT_SECRET`, `PF_PEPPER` (≥32 chars), and `PF_STAGING_KEY` (≥32 chars). Compose fails fast with a clear message if any is missing. Then open [http://localhost:3000](http://localhost:3000) and register. App + PostgreSQL run in Docker; sensitive fields are encrypted at rest with a per-user key derived from the account password. Change the default PostgreSQL password (`POSTGRES_PASSWORD` in `.env`) before exposing the container to anything but localhost. Full setup notes at [finlynq.com/self-hosted](https://finlynq.com/self-hosted).
+Before the first `up`, create a sibling `.env` file with three secrets, each generated with `openssl rand -hex 32`: `PF_JWT_SECRET`, `PF_PEPPER` (≥32 chars), and `PF_STAGING_KEY` (≥32 chars). Compose fails fast with a clear message if any is missing. Then open [http://localhost:3000](http://localhost:3000) and register. App + PostgreSQL run in Docker; sensitive fields are encrypted at rest with a per-user key derived from the account password. Change the default PostgreSQL password (`POSTGRES_PASSWORD` in `.env`) before exposing the container to anything but localhost. The image is published for both `linux/amd64` and `linux/arm64`, so it runs natively on Intel/AMD machines, Apple Silicon, Raspberry Pi and ARM servers. Full setup notes at [finlynq.com/self-hosted](https://finlynq.com/self-hosted).
 
 ---
 

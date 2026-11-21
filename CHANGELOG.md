@@ -8,6 +8,7 @@ Versioning: [Semantic Versioning](https://semver.org/)
 
 - MCP: the Gemini web app can register as an OAuth client. It registers six redirect addresses in one request and we accepted at most five, so Gemini reported the server as "not a valid MCP server". The limit is now ten.
 - MCP: `/api/mcp` accepts a request body sent without a Content-Length header (chunked), with the same 1 MB cap. The Gemini web app sends its first request that way and got 411 Length Required.
+- Docker: the image at `ghcr.io/finlynq/finlynq` is now published for `linux/arm64` as well as `linux/amd64` (GH #430), built on native runners and smoke-tested on both (boot, register, schema) before publishing.
 
 ## [Unreleased]
 
