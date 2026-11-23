@@ -24,6 +24,12 @@ type SparklineProps = {
    * own range (niceDomain) where a change must be visible on a large value.
    */
   domain?: [number, number];
+  /**
+   * Classes for the drawn area (e.g. opacity). Set here rather than on a
+   * wrapper: an opacity on the wrapper makes it a stacking context, which puts
+   * the tooltip under any content layered above the chart (GH #446).
+   */
+  areaClassName?: string;
 };
 
 type SparkRow = { index: number; value: number; label?: string };
@@ -62,7 +68,7 @@ function SparklineTooltip({
   );
 }
 
-export function Sparkline({ data, color, labels, currency = "USD", fill = false, domain }: SparklineProps) {
+export function Sparkline({ data, color, labels, currency = "USD", fill = false, domain, areaClassName }: SparklineProps) {
   const chartData: SparkRow[] = data.map((value, index) => ({ index, value, label: labels?.[index] }));
   const interactive = Boolean(labels?.length);
 
@@ -85,10 +91,12 @@ export function Sparkline({ data, color, labels, currency = "USD", fill = false,
               // overflow-hidden card. Render the tooltip ABOVE the cursor
               // (escape + reverse on the Y axis) so it lands inside the card
               // body, and keep X inside the viewbox so it never clips the card
-              // edges. (Do NOT use the `portal` prop — recharts then drops the
-              // positioning transform entirely.)
-              allowEscapeViewBox={{ x: false, y: true }}
-              reverseDirection={{ x: false, y: true }}
+              // edges. A `fill` chart already covers its card, so its tooltip
+              // stays inside the chart on both axes (GH #446). (Do NOT use the
+              // `portal` prop — recharts then drops the positioning transform
+              // entirely.)
+              allowEscapeViewBox={{ x: false, y: !fill }}
+              reverseDirection={{ x: false, y: !fill }}
               offset={8}
               wrapperStyle={{ zIndex: 50, pointerEvents: "none" }}
               isAnimationActive={false}
@@ -101,6 +109,7 @@ export function Sparkline({ data, color, labels, currency = "USD", fill = false,
             strokeWidth={1.5}
             fill={`url(#spark-${color.replace("#", "")})`}
             isAnimationActive={false}
+            className={areaClassName}
             activeDot={interactive ? { r: 3, stroke: color, strokeWidth: 1, fill: color } : false}
           />
         </AreaChart>

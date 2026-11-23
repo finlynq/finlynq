@@ -8,6 +8,7 @@ import { formatCurrency, getCurrentMonth, getMonthLabel } from "@/lib/currency";
 import { buildTxDrillUrl } from "@/lib/transactions/drill-url";
 import { Sparkline } from "@/components/sparkline";
 import { niceDomain } from "@/lib/chart-series";
+import { splitSpendMonths } from "@/lib/dashboard/spend-month";
 import { DollarSign, ArrowUpRight, ArrowDownRight, TrendingUp, CreditCard, Target, User, Upload, FileUp } from "lucide-react";
 import { motion } from "framer-motion";
 import { AnimatedNumber } from "./_components/animated-number";
@@ -253,6 +254,9 @@ export default function DashboardPage() {
   const lastMonthIncome = refMonth ? refMonth.income : 0;
   const lastMonthExpenses = refMonth ? refMonth.expenses : 0;
   const availableToSpend = lastMonthIncome - lastMonthExpenses;
+  // GH #447: the Available to Spend card switches between the last complete
+  // month and the current month so far (the stat tiles stay on refMonth).
+  const spendMonths = splitSpendMonths(incExpData, currentMonthKey);
 
   // FINLYNQ-130 — drill-through: the Monthly Income / Expenses tiles show the
   // reference month above (incExpData is "YYYY-MM" sorted asc). Derive that
@@ -383,10 +387,13 @@ export default function DashboardPage() {
               {/* GH #434: the net worth line fills the whole tile behind the
                   text, scaled to the data's own range so an ordinary month's
                   change is visible (from 0, a 2.7% drop on a six-figure
-                  balance drew as a flat line). Decorative, so no tooltip. */}
+                  balance drew as a flat line). GH #446: hovering it shows
+                  each month's value; the text layer above ignores the mouse
+                  so the line gets hover everywhere, and a click still lands
+                  on the card's link. */}
               {nwSparkline.length > 1 && (
-                <div className="absolute inset-0 pointer-events-none opacity-60 group-hover:opacity-90 transition-opacity duration-300">
-                  <Sparkline data={nwSparkline} color="#6366f1" fill domain={niceDomain(nwSparkline, { padPct: 0.15, clampZeroFloor: false })} />
+                <div className="absolute inset-0">
+                  <Sparkline data={nwSparkline} labels={nwSparkLabels} currency={apiDisplayCurrency} color="#6366f1" fill areaClassName="opacity-60 group-hover:opacity-90 transition-opacity duration-300" domain={niceDomain(nwSparkline, { padPct: 0.15, clampZeroFloor: false })} />
                 </div>
               )}
 
@@ -394,7 +401,7 @@ export default function DashboardPage() {
               <div className="absolute -top-20 -right-20 w-48 h-48 rounded-full bg-indigo-500/8 blur-3xl dark:bg-indigo-400/5 pointer-events-none" />
               <div className="absolute -bottom-16 -left-16 w-40 h-40 rounded-full bg-violet-500/6 blur-3xl dark:bg-violet-400/4 pointer-events-none" />
 
-              <CardContent className="relative pt-6 pb-6 px-6">
+              <CardContent className="relative pt-6 pb-6 px-6 pointer-events-none">
                 <div className="flex items-start justify-between">
                   <div className="space-y-3">
                     {/* Label */}
@@ -482,7 +489,7 @@ export default function DashboardPage() {
             <SpendingCategoryChart data={spendingData} currency={apiDisplayCurrency} />
           </div>
           <div className="grid grid-cols-1 lg:grid-cols-3 gap-5">
-            <AvailableToSpend income={lastMonthIncome} expenses={lastMonthExpenses} currency={apiDisplayCurrency} monthLabel={lastMonthKey ? getMonthLabel(lastMonthKey) : undefined} />
+            <AvailableToSpend {...spendMonths} currency={apiDisplayCurrency} />
           </div>
           <InsightsSection currency={apiDisplayCurrency} />
         </>
