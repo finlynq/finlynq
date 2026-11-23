@@ -1,17 +1,11 @@
 "use client";
 
-import { useState } from "react";
 import { Card, CardContent } from "@/components/ui/card";
-import { Button } from "@/components/ui/button";
 import { formatCurrency, getMonthLabel } from "@/lib/currency";
-import {
-  SPEND_MONTH_STORAGE_KEY,
-  parseSpendMonthMode,
-  type SpendMonthFigures,
-  type SpendMonthMode,
-} from "@/lib/dashboard/spend-month";
-import { ArrowLeftRight, Wallet } from "lucide-react";
+import type { SpendMonthFigures, SpendMonthMode } from "@/lib/dashboard/spend-month";
+import { Wallet } from "lucide-react";
 import { motion } from "framer-motion";
+import { MonthSwitch } from "./month-switch";
 
 const itemVariants = {
   hidden: { opacity: 0, y: 16 },
@@ -23,33 +17,18 @@ type Props = {
   last: SpendMonthFigures | null;
   /** The current month so far. */
   current: SpendMonthFigures;
+  /** The dashboard's shared month choice (useSpendMonthMode). */
+  mode: SpendMonthMode;
+  onToggleMode: () => void;
   currency?: string;
 };
 
-function readStoredMode(): SpendMonthMode {
-  try {
-    return parseSpendMonthMode(window.localStorage.getItem(SPEND_MONTH_STORAGE_KEY));
-  } catch {
-    return "last";
-  }
-}
-
 /**
  * GH #447: shows the last complete month (closed figures, worded as such) or
- * the current month so far, switched on the card and remembered per browser.
+ * the current month so far. The choice is shared with the Income, Expenses and
+ * Budgets cards and remembered per browser.
  */
-export function AvailableToSpend({ last, current, currency = "USD" }: Props) {
-  const [mode, setMode] = useState<SpendMonthMode>(readStoredMode);
-
-  function choose(next: SpendMonthMode) {
-    setMode(next);
-    try {
-      window.localStorage.setItem(SPEND_MONTH_STORAGE_KEY, next);
-    } catch {
-      // Storage blocked: the choice still applies until the page reloads.
-    }
-  }
-
+export function AvailableToSpend({ last, current, mode, onToggleMode, currency = "USD" }: Props) {
   const showingCurrent = mode === "current" || !last;
   const figures = showingCurrent ? current : last;
   const { income, expenses } = figures;
@@ -60,7 +39,6 @@ export function AvailableToSpend({ last, current, currency = "USD" }: Props) {
   const subtitle = showingCurrent ? `${monthLabel} so far` : `Left over in ${monthLabel}`;
   const spentLabel = showingCurrent ? "Spent so far" : "Spent";
   const totalLabel = showingCurrent ? "Remaining" : "Left over";
-  const switchLabel = showingCurrent ? "Show last month" : "Show this month";
 
   return (
     <motion.div variants={itemVariants}>
@@ -79,23 +57,7 @@ export function AvailableToSpend({ last, current, currency = "USD" }: Props) {
                 <p className="text-[11px] text-muted-foreground">{subtitle}</p>
               </div>
             </div>
-            {last && (
-              <div className="flex items-center gap-1">
-                <Button
-                  size="icon-xs"
-                  variant="ghost"
-                  className="text-muted-foreground hover:text-foreground"
-                  aria-label={switchLabel}
-                  title={switchLabel}
-                  onClick={() => choose(showingCurrent ? "last" : "current")}
-                >
-                  <ArrowLeftRight />
-                </Button>
-                <span className="text-[11px] font-medium text-muted-foreground" data-testid="spend-month-shown">
-                  {showingCurrent ? "This month" : "Last month"}
-                </span>
-              </div>
-            )}
+            {last && <MonthSwitch showingCurrent={showingCurrent} onToggle={onToggleMode} />}
           </div>
 
           <p className={`text-3xl font-bold tracking-tight tabular-nums ${available >= 0 ? "text-emerald-600 dark:text-emerald-400" : "text-rose-500"}`}>
