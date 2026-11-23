@@ -1,6 +1,6 @@
 "use client";
 
-import { AreaChart, Area, ResponsiveContainer, Tooltip } from "recharts";
+import { AreaChart, Area, ResponsiveContainer, Tooltip, YAxis } from "recharts";
 import { formatCurrency, getMonthLabel } from "@/lib/currency";
 
 type SparklineProps = {
@@ -14,6 +14,16 @@ type SparklineProps = {
   labels?: string[];
   /** Currency used to format the tooltip value. */
   currency?: string;
+  /**
+   * Fill the parent's height instead of the fixed 30px (GH #434: the dashboard
+   * Net Worth card draws its line across the whole tile).
+   */
+  fill?: boolean;
+  /**
+   * Y range. Omitted = from 0, as every stat-tile sparkline. Pass the data's
+   * own range (niceDomain) where a change must be visible on a large value.
+   */
+  domain?: [number, number];
 };
 
 type SparkRow = { index: number; value: number; label?: string };
@@ -52,14 +62,15 @@ function SparklineTooltip({
   );
 }
 
-export function Sparkline({ data, color, labels, currency = "USD" }: SparklineProps) {
+export function Sparkline({ data, color, labels, currency = "USD", fill = false, domain }: SparklineProps) {
   const chartData: SparkRow[] = data.map((value, index) => ({ index, value, label: labels?.[index] }));
   const interactive = Boolean(labels?.length);
 
   return (
-    <div className="w-full h-[30px]">
-      <ResponsiveContainer width="100%" height={30} minWidth={0}>
-        <AreaChart data={chartData} margin={{ top: 2, right: 2, bottom: 2, left: 2 }}>
+    <div className={fill ? "w-full h-full" : "w-full h-[30px]"}>
+      <ResponsiveContainer width="100%" height={fill ? "100%" : 30} minWidth={0}>
+        <AreaChart data={chartData} margin={fill ? { top: 0, right: 0, bottom: 0, left: 0 } : { top: 2, right: 2, bottom: 2, left: 2 }}>
+          {domain && <YAxis hide domain={domain} />}
           <defs>
             <linearGradient id={`spark-${color.replace("#", "")}`} x1="0" y1="0" x2="0" y2="1">
               <stop offset="0%" stopColor={color} stopOpacity={0.3} />

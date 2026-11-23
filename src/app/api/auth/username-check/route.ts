@@ -19,6 +19,7 @@
 
 import { NextRequest, NextResponse } from "next/server";
 import { getDialect } from "@/db";
+import { isRegistrationOpen, REGISTRATION_CLOSED_MESSAGE } from "@/lib/auth/registration";
 import { checkRateLimit } from "@/lib/rate-limit";
 import { validateUsername } from "@/lib/auth/username";
 import { isIdentifierClaimed } from "@/lib/auth/queries";
@@ -26,6 +27,11 @@ import { isIdentifierClaimed } from "@/lib/auth/queries";
 export async function GET(request: NextRequest) {
   if (getDialect() !== "postgres") {
     return NextResponse.json({ available: false }, { status: 403 });
+  }
+  // GH #435: with sign-up off there is nothing to check, and answering would
+  // let anyone probe which usernames exist.
+  if (!isRegistrationOpen()) {
+    return NextResponse.json({ available: false, error: REGISTRATION_CLOSED_MESSAGE }, { status: 403 });
   }
 
   const ip =

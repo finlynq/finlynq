@@ -20,6 +20,8 @@ import { CHART_COLORS } from "@/lib/chart-colors";
 import { todayISO } from "@/lib/utils/date";
 import { AccountFilter } from "./_components/account-filter";
 import { ReportDateInput } from "./_components/report-date-input";
+import { BalanceSheetGroupRows, type BalanceSheetRow } from "./_components/balance-sheet-group-rows";
+import { parseGroupOrder, type AccountGroupOrder } from "@/lib/accounts/groups";
 import { serializeAccountIds } from "@/lib/reports/account-filter";
 import {
   MULTI_YEAR_PRESETS,
@@ -107,8 +109,8 @@ type TrendsData = {
 
 type BalanceSheet = {
   date: string;
-  assets: { accountGroup: string; accountName: string; currency: string; balance: number }[];
-  liabilities: { accountGroup: string; accountName: string; currency: string; balance: number }[];
+  assets: BalanceSheetRow[];
+  liabilities: BalanceSheetRow[];
   totalAssets: number;
   totalLiabilities: number;
   netWorth: number;
@@ -175,6 +177,20 @@ export default function ReportsPage() {
   // Data states
   const [trendsData, setTrendsData] = useState<TrendsData | null>(null);
   const [balanceSheet, setBalanceSheet] = useState<BalanceSheet | null>(null);
+  // GH #440: Balance Sheet groups follow the order saved on the Accounts page.
+  const [groupOrder, setGroupOrder] = useState<AccountGroupOrder>({ A: [], L: [] });
+  useEffect(() => {
+    let cancelled = false;
+    fetch("/api/settings/account-group-order")
+      .then((r) => (r.ok ? r.json() : null))
+      .then((d) => {
+        if (!cancelled && d?.order) setGroupOrder(parseGroupOrder(JSON.stringify(d.order)));
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, []);
   const [yoyData, setYoyData] = useState<YoYData | null>(null);
   const [unrealizedData, setUnrealizedData] = useState<UnrealizedData | null>(null);
   // First-paint gate: the page is full of charts that render blank axes against
@@ -1079,20 +1095,12 @@ export default function ReportsPage() {
                 </div>
                 <Table>
                   <TableBody>
-                    {balanceSheet.assets.map((r, i) => (
-                      <TableRow key={i} className="hover:bg-muted/30">
-                        <TableCell className="text-muted-foreground text-xs">{r.accountGroup}</TableCell>
-                        <TableCell className="text-sm">{r.accountName}</TableCell>
-                        <TableCell>
-                          <Badge variant="outline" className="text-[10px]">
-                            {r.currency}
-                          </Badge>
-                        </TableCell>
-                        <TableCell className="text-right font-mono text-sm font-semibold">
-                          {formatCurrency(r.balance, r.currency)}
-                        </TableCell>
-                      </TableRow>
-                    ))}
+                    <BalanceSheetGroupRows
+                      rows={balanceSheet.assets}
+                      kind="asset"
+                      savedOrder={groupOrder.A}
+                      displayCurrency={displayCurrency}
+                    />
                     <TableRow className="font-bold border-t-2">
                       <TableCell colSpan={3}>Total Assets</TableCell>
                       <TableCell className="text-right font-mono text-emerald-600 dark:text-emerald-400">
@@ -1108,20 +1116,12 @@ export default function ReportsPage() {
                 </div>
                 <Table>
                   <TableBody>
-                    {balanceSheet.liabilities.map((r, i) => (
-                      <TableRow key={i} className="hover:bg-muted/30">
-                        <TableCell className="text-muted-foreground text-xs">{r.accountGroup}</TableCell>
-                        <TableCell className="text-sm">{r.accountName}</TableCell>
-                        <TableCell>
-                          <Badge variant="outline" className="text-[10px]">
-                            {r.currency}
-                          </Badge>
-                        </TableCell>
-                        <TableCell className="text-right font-mono text-sm font-semibold">
-                          {formatCurrency(r.balance, r.currency)}
-                        </TableCell>
-                      </TableRow>
-                    ))}
+                    <BalanceSheetGroupRows
+                      rows={balanceSheet.liabilities}
+                      kind="liability"
+                      savedOrder={groupOrder.L}
+                      displayCurrency={displayCurrency}
+                    />
                     <TableRow className="font-bold border-t-2">
                       <TableCell colSpan={3}>Total Liabilities</TableCell>
                       <TableCell className="text-right font-mono text-rose-600 dark:text-rose-400">

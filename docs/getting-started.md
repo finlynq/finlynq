@@ -88,6 +88,15 @@ Finlynq accounts use a **username and password**. Email is optional.
 
 To sign in later, use the **Sign In** tab and enter either your username **or** your email, plus your password.
 
+### Turning off sign-up on your own server
+
+If your server is reachable from the internet (so your phone or an AI assistant can connect), anyone who finds the address could create an account on it. Once your own account exists, set `ALLOW_REGISTRATION=false` in `.env` and restart:
+
+- The **Create Account** tab and the one-click demo link disappear from the sign-in page, and the sign-up API answers 403.
+- Existing users sign in as before, and AI assistants still connect over OAuth (that registers the assistant, not a new person).
+
+Remove the line, or set it to `true`, to open sign-up again.
+
 ### Important: your password protects your data
 
 Finlynq encrypts your sensitive fields (payees, notes, account and category names, and more) with a key derived from your password. That key never leaves your session — the operator can't see it.

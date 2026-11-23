@@ -7,6 +7,7 @@ import { Card, CardContent } from "@/components/ui/card";
 import { formatCurrency, getCurrentMonth, getMonthLabel } from "@/lib/currency";
 import { buildTxDrillUrl } from "@/lib/transactions/drill-url";
 import { Sparkline } from "@/components/sparkline";
+import { niceDomain } from "@/lib/chart-series";
 import { DollarSign, ArrowUpRight, ArrowDownRight, TrendingUp, CreditCard, Target, User, Upload, FileUp } from "lucide-react";
 import { motion } from "framer-motion";
 import { AnimatedNumber } from "./_components/animated-number";
@@ -379,6 +380,16 @@ export default function DashboardPage() {
               className="relative overflow-hidden group cursor-pointer card-hover mouse-glow hover:scale-[1.005] transition-transform duration-300 rounded-2xl"
               onMouseMove={handleMouseMove}
             >
+              {/* GH #434: the net worth line fills the whole tile behind the
+                  text, scaled to the data's own range so an ordinary month's
+                  change is visible (from 0, a 2.7% drop on a six-figure
+                  balance drew as a flat line). Decorative, so no tooltip. */}
+              {nwSparkline.length > 1 && (
+                <div className="absolute inset-0 pointer-events-none opacity-60 group-hover:opacity-90 transition-opacity duration-300">
+                  <Sparkline data={nwSparkline} color="#6366f1" fill domain={niceDomain(nwSparkline, { padPct: 0.15, clampZeroFloor: false })} />
+                </div>
+              )}
+
               {/* Decorative gradient orbs */}
               <div className="absolute -top-20 -right-20 w-48 h-48 rounded-full bg-indigo-500/8 blur-3xl dark:bg-indigo-400/5 pointer-events-none" />
               <div className="absolute -bottom-16 -left-16 w-40 h-40 rounded-full bg-violet-500/6 blur-3xl dark:bg-violet-400/4 pointer-events-none" />
@@ -415,10 +426,6 @@ export default function DashboardPage() {
                     </div>
                   </div>
 
-                  {/* Mini sparkline */}
-                  <div className="hidden md:block w-40 h-20 opacity-50 group-hover:opacity-100 transition-opacity duration-300">
-                    <Sparkline data={nwSparkline} color="#6366f1" labels={nwSparkLabels} currency={apiDisplayCurrency} />
-                  </div>
                 </div>
               </CardContent>
             </Card>

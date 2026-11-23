@@ -43,6 +43,7 @@
  * identical on every surface.
  */
 
+import { liabilityOwed } from "./reports/liability-owed";
 import { sql } from "drizzle-orm";
 import { calculateAgeOfMoney } from "./age-of-money";
 import { getRate } from "./fx-service";
@@ -518,7 +519,8 @@ export async function calculateFinancialHealth(
     // returns their ledger balance unchanged — these two totals are unaffected
     // by the market pass, and only net worth below actually moves.
     const converted = (marked.rows[i]?.balance ?? Number(b.balance)) * fx;
-    if (b.type === "L") totalLiabilities += Math.abs(converted);
+    // GH #433: a liability in credit reduces what is owed, never adds to it.
+    if (b.type === "L") totalLiabilities += liabilityOwed(converted);
     if (b.type === "A") {
       if (b.is_investment !== true && isCashGroup(b.group)) {
         liquidAssets += converted;

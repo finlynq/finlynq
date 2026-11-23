@@ -10,6 +10,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
 import { getDialect } from "@/db";
+import { isRegistrationOpen, REGISTRATION_CLOSED_MESSAGE } from "@/lib/auth/registration";
 import { hashPassword, createSessionToken, AUTH_COOKIE } from "@/lib/auth";
 import { SESSION_TTL_MS } from "@/lib/auth/jwt";
 import {
@@ -54,6 +55,10 @@ export async function POST(request: NextRequest) {
       { error: "Registration is only available in managed mode." },
       { status: 403 }
     );
+  }
+  // GH #435: a self-hosted server can turn sign-up off (ALLOW_REGISTRATION=false).
+  if (!isRegistrationOpen()) {
+    return NextResponse.json({ error: REGISTRATION_CLOSED_MESSAGE }, { status: 403 });
   }
 
   // Rate limit: 3 registrations per minute per IP

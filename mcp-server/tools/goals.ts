@@ -118,6 +118,14 @@ export function registerGoalsTools(server: McpServer, ctx: PgToolContext) {
       displayCurrency: await resolveReportingCurrency(db, userId, null),
     });
     const n = dek ? encryptName(dek, name) : { ct: null, lookup: null };
+    // Goal names are unique per user (goals_user_name_lookup_uniq): refuse a
+    // taken name clearly instead of letting the INSERT fail with a raw 23505.
+    if (n.lookup) {
+      const taken = await q(db, sql`
+        SELECT 1 FROM goals WHERE user_id = ${userId} AND name_lookup = ${n.lookup} LIMIT 1
+      `);
+      if (taken.length > 0) return err(`A goal named "${name}" already exists. Pick a different name.`);
+    }
     // Stream D Phase 4 — plaintext name column dropped. Issue #130 — dual-write
     // the legacy `goals.account_id` (first id only) AND the goal_accounts join.
     const inserted = await q(db, sql`
@@ -203,6 +211,10 @@ export function registerGoalsTools(server: McpServer, ctx: PgToolContext) {
     if (name !== undefined) {
       if (!dek) return err("Cannot rename goal without an unlocked DEK (Stream D Phase 4).");
       const n = encryptName(dek, name);
+      const taken = await q(db, sql`
+        SELECT 1 FROM goals WHERE user_id = ${userId} AND name_lookup = ${n.lookup} AND id <> ${g.id} LIMIT 1
+      `);
+      if (taken.length > 0) return err(`A goal named "${name}" already exists. Pick a different name.`);
       updates.push(sql`name_ct = ${n.ct}`, sql`name_lookup = ${n.lookup}`);
     }
     if (target_amount !== undefined) updates.push(sql`target_amount = ${target_amount}`);

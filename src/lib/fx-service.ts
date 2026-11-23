@@ -321,6 +321,12 @@ async function fetchYahooChartRateToUsd(symbol: string, date: string): Promise<n
     const close = latestPositiveClose(result);
     if (close != null) return close;
     const rate = result.meta?.regularMarketPrice;
+    // close[] is empty on a day with no bar yet (seen for UZS on a Monday just
+    // after 00:00 UTC, 2026-11-23). For a small currency meta is then the
+    // rounded 0.0001, never the real rate: refuse it, so the lookup falls back
+    // to the last good stored rate instead of serving and storing a 20% error
+    // (and asking Yahoo again on every lookup, since findCached skips the row).
+    if (typeof rate === "number" && isRoundedSmallRate(rate)) return null;
     return typeof rate === "number" && rate > 0 ? rate : null;
   } catch {
     return null;
@@ -444,9 +450,20 @@ async function findNearestCached(
       )
     )
     .orderBy(desc(schema.fxRates.date))
-    .limit(1);
-  if (row[0]) return { rate: row[0].rateToUsd, effectiveDate: row[0].date };
-  return null;
+    .limit(10);
+  return pickNearestUsable(row);
+}
+
+/**
+ * The newest row that is not a rounded Yahoo rate (see isRoundedSmallRate).
+ * Rows arrive newest first. A rounded row for today must not become the
+ * "last good rate" the fallback serves.
+ */
+export function pickNearestUsable(
+  rows: Array<{ rateToUsd: number; date: string }>,
+): { rate: number; effectiveDate: string } | null {
+  const usable = rows.find((r) => !isRoundedSmallRate(r.rateToUsd));
+  return usable ? { rate: usable.rateToUsd, effectiveDate: usable.date } : null;
 }
 
 async function writeCached(

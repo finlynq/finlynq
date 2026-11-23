@@ -19,6 +19,7 @@
 
 import { NextRequest, NextResponse } from "next/server";
 import { getDialect } from "@/db";
+import { isRegistrationOpen } from "@/lib/auth/registration";
 import { verifyPassword, createSessionToken, AUTH_COOKIE } from "@/lib/auth";
 import { SESSION_TTL_MS } from "@/lib/auth/jwt";
 import { getUserByIdentifier, recordSuccessfulLogin } from "@/lib/auth/queries";
@@ -70,6 +71,11 @@ export async function zeroClickLogin(
       { error: `/${account.slug} is only available on the managed deployment.` },
       { status: 403 },
     );
+  }
+  // GH #435: a server with sign-up turned off offers no public demo login
+  // either; send the visitor to the sign-in page instead.
+  if (!isRegistrationOpen()) {
+    return NextResponse.redirect(new URL("/cloud", request.url));
   }
 
   const nextRaw = request.nextUrl.searchParams.get("next");
