@@ -6,6 +6,9 @@ Versioning: [Semantic Versioning](https://semver.org/)
 
 ## Unreleased (2026-11-21)
 
+- FX: a small currency is no longer priced at Yahoo's rounded quote when today's chart has no closing price yet. On 2026-11-23 just after 00:00 UTC, Yahoo's one-day chart for UZS had no bars, so the live lookup fell back to the rounded 0.0001 (real ≈0.0000835, about 20% high), served and stored it, and asked Yahoo again on every lookup. Such a quote is now refused and the last good stored rate is used, skipping any rounded row. Pinned in `tests/fx-live-full-precision.test.ts`.
+- Goals: saving a goal under a name you already use answers 409 "A goal with this name already exists" instead of a 500 "Failed" (web `POST`/`PUT /api/goals`); MCP `manage_goals` add/update refuse a taken name with the same message. Pinned by `tests/api/goals-duplicate-name.test.ts`.
+- Reports: on the Balance Sheet, a liability in credit (for example an overpaid card) now reduces Total Liabilities and is shown as a credit, instead of being counted as money owed (GH #433). Net worth on that tab now matches the Accounts page. The financial health score's liabilities figure had the same fault and is fixed too. Pinned by `tests/balance-sheet-liability-credit.test.ts`.
 - MCP: the Gemini web app can register as an OAuth client. It registers six redirect addresses in one request and we accepted at most five, so Gemini reported the server as "not a valid MCP server". The limit is now ten.
 - MCP: `/api/mcp` accepts a request body sent without a Content-Length header (chunked), with the same 1 MB cap. The Gemini web app sends its first request that way and got 411 Length Required.
 - Docker: the image at `ghcr.io/finlynq/finlynq` is now published for `linux/arm64` as well as `linux/amd64` (GH #430), built on native runners and smoke-tested on both (boot, register, schema) before publishing.

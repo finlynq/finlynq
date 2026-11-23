@@ -1,4 +1,5 @@
 ﻿import { NextRequest, NextResponse } from "next/server";
+import { liabilityOwed } from "@/lib/reports/liability-owed";
 import { db, schema } from "@/db";
 import { sql, eq, and, gte, lte, inArray } from "drizzle-orm";
 import { requireAuth } from "@/lib/auth/require-auth";
@@ -235,7 +236,9 @@ export async function GET(request: NextRequest) {
     const assets = converted.filter((b) => b.accountType === "A");
     const liabilities = converted.filter((b) => b.accountType === "L");
     const totalAssets = assets.reduce((s, b) => s + b.convertedBalance, 0);
-    const totalLiabilities = liabilities.reduce((s, b) => s + Math.abs(b.convertedBalance), 0);
+    // GH #433: owed is positive, a liability in credit (an overpaid card) is
+    // negative and reduces the total. Math.abs counted the credit as debt.
+    const totalLiabilities = liabilities.reduce((s, b) => s + liabilityOwed(b.convertedBalance), 0);
 
     return NextResponse.json({
       type: "balance-sheet",
@@ -248,8 +251,8 @@ export async function GET(request: NextRequest) {
       })),
       liabilities: liabilities.map((b) => ({
         ...b,
-        balance: Math.round(Math.abs(b.balance) * 100) / 100,
-        convertedBalance: Math.round(Math.abs(b.convertedBalance) * 100) / 100,
+        balance: Math.round(liabilityOwed(b.balance) * 100) / 100,
+        convertedBalance: Math.round(liabilityOwed(b.convertedBalance) * 100) / 100,
       })),
       totalAssets: Math.round(totalAssets * 100) / 100,
       totalLiabilities: Math.round(totalLiabilities * 100) / 100,

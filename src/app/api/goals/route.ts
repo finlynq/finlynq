@@ -11,6 +11,23 @@ import { GOAL_PROGRESS_MODES, growthGoalRefusal, normalizeProgressMode } from "@
 import { todayISO } from "@/lib/utils/date";
 import { getDisplayCurrency, getRateMap, convertWithRateMap } from "@/lib/fx-service";
 import { pickRecordCurrency } from "@/lib/fx/record-currency";
+import { isPgErrorCode, pgErrorConstraint } from "@/lib/db-utils";
+
+/**
+ * Goal names are unique per user (`goals_user_name_lookup_uniq` over the
+ * name_lookup HMAC). Creating or renaming onto a taken name is ordinary user
+ * behaviour: answer 409 with a clear message, not a 500 "Failed" (prod
+ * diagnostics_log 2026-11-22 06:35). Same shape as the accounts route.
+ */
+function duplicateNameResponse(error: unknown): NextResponse | null {
+  if (!isPgErrorCode(error, "23505")) return null;
+  const constraint = pgErrorConstraint(error);
+  if (constraint && constraint !== "goals_user_name_lookup_uniq") return null;
+  return NextResponse.json(
+    { error: "A goal with this name already exists. Pick a different name." },
+    { status: 409 },
+  );
+}
 
 const postSchema = z.object({
   name: z.string(),
@@ -306,6 +323,8 @@ export async function POST(request: NextRequest) {
       : null;
     return NextResponse.json({ ...goal, accountIds }, { status: 201 });
   } catch (error: unknown) {
+    const duplicate = duplicateNameResponse(error);
+    if (duplicate) return duplicate;
     return NextResponse.json({ error: safeErrorMessage(error, "Failed") }, { status: 500 });
   }
 }
@@ -404,6 +423,8 @@ export async function PUT(request: NextRequest) {
 
     return NextResponse.json(goal);
   } catch (error: unknown) {
+    const duplicate = duplicateNameResponse(error);
+    if (duplicate) return duplicate;
     return NextResponse.json({ error: safeErrorMessage(error, "Failed") }, { status: 500 });
   }
 }

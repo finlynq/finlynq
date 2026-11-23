@@ -30,7 +30,7 @@ vi.mock("@/db", () => {
   };
 });
 
-import { getRateToUsdDetailed, isRoundedSmallRate, validateCurrencyCode } from "@/lib/fx-service";
+import { getRateToUsdDetailed, isRoundedSmallRate, pickNearestUsable, validateCurrencyCode } from "@/lib/fx-service";
 import { todayISO } from "@/lib/utils/date";
 
 const NOW_S = Math.floor(Date.now() / 1000);
@@ -120,5 +120,27 @@ describe("live FX rate uses the unrounded close", () => {
     fetchSpy.mockResolvedValueOnce(ok(chartBody(undefined, [null])));
     const r = await getRateToUsdDetailed("KRW", todayISO(), "u1");
     expect(r.source).not.toBe("yahoo");
+  });
+
+  // 2026-11-23: Yahoo's range=1d chart for UZS had NO bars (no timestamp, no
+  // close) just after 00:00 UTC on a Monday, and meta was the rounded 0.0001.
+  it("empty close[] and a rounded small meta → refused, not served as a yahoo rate", async () => {
+    fetchSpy.mockResolvedValueOnce(
+      ok({ chart: { result: [{ meta: { regularMarketPrice: 0.0001 }, indicators: { quote: [{}] } }] } }),
+    );
+    const r = await getRateToUsdDetailed("PYG", todayISO(), "u1");
+    expect(r.source).not.toBe("yahoo");
+    expect(r.rate).not.toBe(0.0001);
+  });
+
+  it("the stale fallback skips a rounded row and takes the last good one", () => {
+    expect(
+      pickNearestUsable([
+        { rateToUsd: 0.0001, date: "2026-11-23" },
+        { rateToUsd: 8.3542188804131e-5, date: "2026-11-22" },
+      ]),
+    ).toEqual({ rate: 8.3542188804131e-5, effectiveDate: "2026-11-22" });
+    expect(pickNearestUsable([{ rateToUsd: 0.0001, date: "2026-11-23" }])).toBeNull();
+    expect(pickNearestUsable([{ rateToUsd: 0.735, date: "2026-11-23" }])).toEqual({ rate: 0.735, effectiveDate: "2026-11-23" });
   });
 });

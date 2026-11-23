@@ -1118,7 +1118,16 @@ export default function ReportsPage() {
                           </Badge>
                         </TableCell>
                         <TableCell className="text-right font-mono text-sm font-semibold">
-                          {formatCurrency(r.balance, r.currency)}
+                          {/* GH #433: owed is positive; a negative amount is a
+                              credit (an overpaid card), which reduces the total. */}
+                          {r.balance < 0 ? (
+                            <>
+                              {formatCurrency(-r.balance, r.currency)}
+                              <span className="ml-1 text-xs font-normal text-emerald-600 dark:text-emerald-400">credit</span>
+                            </>
+                          ) : (
+                            formatCurrency(r.balance, r.currency)
+                          )}
                         </TableCell>
                       </TableRow>
                     ))}
