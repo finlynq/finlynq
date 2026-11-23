@@ -18,6 +18,7 @@ import { buildTxDrillUrl } from "@/lib/transactions/drill-url";
 import { loanHref } from "@/lib/hooks/useLinkedLoans";
 import type { BudgetGroup, BudgetLine, BudgetMonth, DebtLine, LinePlan } from "@/lib/budgets/month";
 import { monthEndDate, monthStartDate } from "@/lib/budgets/lines";
+import { spendingHasCarry } from "@/lib/budgets/month-view";
 import { BudgetCell } from "./budget-cell";
 import { RuleBudgetCell } from "./rule-budget-cell";
 
@@ -96,8 +97,14 @@ function RulesMarker({ plan, lineKey, name, actions }: { plan: LinePlan | null |
 // up the progress bars line up in a column of their own.
 const GRID =
   "grid grid-cols-[minmax(0,1fr)_7.5rem_2rem] sm:grid-cols-[minmax(0,1fr)_7rem_6.5rem_8rem_2rem] xl:grid-cols-[minmax(0,1fr)_minmax(6rem,13rem)_7rem_6.5rem_8rem_2rem] items-center gap-x-3 gap-y-0.5";
+// The Spending section with a "Carried in" column after Budgeted (from `sm` up;
+// on phones the amount stays in the line under the name).
+const GRID_CARRY =
+  "grid grid-cols-[minmax(0,1fr)_7.5rem_2rem] sm:grid-cols-[minmax(0,1fr)_7rem_6.5rem_6.5rem_8rem_2rem] xl:grid-cols-[minmax(0,1fr)_minmax(6rem,13rem)_7rem_6.5rem_6.5rem_8rem_2rem] items-center gap-x-3 gap-y-0.5";
 const NAME = "col-span-3 sm:col-span-1 min-w-0";
-const ROW = `${GRID} rounded-md px-2 py-1 hover:bg-muted/40`;
+const ROW_EXTRA = "rounded-md px-2 py-1 hover:bg-muted/40";
+const ROW = `${GRID} ${ROW_EXTRA}`;
+const gridFor = (carry: boolean) => (carry ? GRID_CARRY : GRID);
 const NUM = "font-mono text-xs tabular-nums";
 
 function pillClass(status: BudgetLine["status"]): string {
@@ -181,6 +188,23 @@ function LeftCell({ line, currency }: { line: Pick<BudgetLine, "left" | "status"
   );
 }
 
+/** The "Carried in" column: the amount for a rollover line, empty otherwise. */
+function CarryCell({ carriedIn, currency, strong }: { carriedIn: number | null; currency: string; strong?: boolean }) {
+  const tone =
+    carriedIn == null
+      ? ""
+      : carriedIn < -0.005
+        ? "text-rose-600 dark:text-rose-400"
+        : Math.abs(carriedIn) <= 0.005
+          ? "text-muted-foreground"
+          : "";
+  return (
+    <div className={`hidden sm:block text-right ${NUM} ${strong ? "font-medium" : ""} ${tone}`}>
+      {carriedIn != null ? formatCurrency(carriedIn, currency) : null}
+    </div>
+  );
+}
+
 function RolloverMenuItems({
   rollover,
   negative,
@@ -239,10 +263,13 @@ function SubText({
   line,
   currency,
   showSpent,
+  carryColumn,
 }: {
   line: Pick<BudgetLine, "carriedIn" | "upcoming" | "rollover" | "actual">;
   currency: string;
   showSpent: boolean;
+  /** The amount carried in has its own column from `sm` up. */
+  carryColumn: boolean;
 }) {
   const bits: React.ReactNode[] = [];
   if (showSpent && line.actual !== 0) {
@@ -253,7 +280,11 @@ function SubText({
     );
   }
   if (line.rollover && line.carriedIn != null && line.carriedIn !== 0) {
-    bits.push(<span key="c">carried in {formatCurrency(line.carriedIn, currency)}</span>);
+    bits.push(
+      <span key="c" className={carryColumn ? "sm:hidden" : undefined}>
+        carried in {formatCurrency(line.carriedIn, currency)}
+      </span>,
+    );
   }
   if (line.upcoming > 0) bits.push(<span key="u">{formatCurrency(line.upcoming, currency)} due later</span>);
   if (!bits.length) return null;
@@ -264,11 +295,13 @@ function SpendingLineRow({
   line,
   data,
   inGroupBudget,
+  carry,
   actions,
 }: {
   line: BudgetLine;
   data: BudgetMonth;
   inGroupBudget: boolean;
+  carry: boolean;
   actions: RowActions;
 }) {
   const cur = data.currency;
@@ -277,7 +310,7 @@ function SpendingLineRow({
     : null;
   const bar = inGroupBudget ? null : spendBar(line);
   return (
-    <div className={`${ROW} pl-6`}>
+    <div className={`${gridFor(carry)} ${ROW_EXTRA} pl-6`}>
       <div className={NAME}>
         <div className="flex items-center gap-1.5 min-w-0">
           {line.categoryId ? (
@@ -291,7 +324,7 @@ function SpendingLineRow({
           {!inGroupBudget && <RulesMarker plan={line.plan} lineKey={line.key} name={line.name} actions={actions} />}
           {line.upcoming > 0 && <CalendarClock className="h-3 w-3 shrink-0 text-muted-foreground" aria-label="Payments due later this month" />}
         </div>
-        <SubText line={line} currency={cur} showSpent={!inGroupBudget} />
+        <SubText line={line} currency={cur} showSpent={!inGroupBudget} carryColumn={carry} />
         <InlineBar bar={bar} />
       </div>
       <BarColumn bar={bar} />
@@ -311,6 +344,7 @@ function SpendingLineRow({
           />
         )}
       </div>
+      {carry && <CarryCell carriedIn={inGroupBudget ? null : line.carriedIn} currency={cur} />}
       <div className={`hidden sm:block text-right ${NUM}`}>
         {drill ? (
           <Link href={drill} className="hover:underline">
@@ -399,6 +433,7 @@ function SpendingGroupBlock({
   collapsed,
   onToggle,
   filter,
+  carry,
   actions,
 }: {
   group: BudgetGroup;
@@ -406,6 +441,7 @@ function SpendingGroupBlock({
   collapsed: boolean;
   onToggle: () => void;
   filter: BudgetFilter;
+  carry: boolean;
   actions: RowActions;
 }) {
   const cur = data.currency;
@@ -416,7 +452,7 @@ function SpendingGroupBlock({
   const count = group.lines.length;
   return (
     <div className="border-t first:border-t-0">
-      <div className={`${GRID} px-2 py-1.5`}>
+      <div className={`${gridFor(carry)} px-2 py-1.5`}>
         <div className={NAME}>
           <button type="button" onClick={onToggle} aria-expanded={!collapsed} className="flex w-full min-w-0 items-center gap-1.5 text-left">
             {collapsed ? <ChevronRight className="h-3.5 w-3.5 shrink-0 text-muted-foreground" /> : <ChevronDown className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />}
@@ -430,7 +466,7 @@ function SpendingGroupBlock({
               </span>
             )}
           </button>
-          {group.byGroup && <SubText line={group} currency={cur} showSpent />}
+          {group.byGroup && <SubText line={group} currency={cur} showSpent carryColumn={carry} />}
           <InlineBar bar={bar} />
         </div>
         <BarColumn bar={bar} />
@@ -452,6 +488,7 @@ function SpendingGroupBlock({
             </span>
           )}
         </div>
+        {carry && <CarryCell carriedIn={group.carriedIn} currency={cur} strong />}
         <div className={`hidden sm:block text-right font-medium ${NUM}`}>{formatCurrency(group.actual, cur)}</div>
         <div className="text-right">
           {group.byGroup ? (
@@ -514,7 +551,7 @@ function SpendingGroupBlock({
       {!collapsed && (
         <div>
           {visibleLines.map((l) => (
-            <SpendingLineRow key={l.key} line={l} data={data} inGroupBudget={group.byGroup} actions={actions} />
+            <SpendingLineRow key={l.key} line={l} data={data} inGroupBudget={group.byGroup} carry={carry} actions={actions} />
           ))}
         </div>
       )}
@@ -531,12 +568,15 @@ function SectionHeader({
   budgetLabel,
   actualLabel,
   leftLabel,
+  carryLabel,
   toolbar,
 }: {
   title: string;
   budgetLabel: string;
   actualLabel: string;
   leftLabel: string;
+  /** Adds the "Carried in" column after the budget one. */
+  carryLabel?: string;
   toolbar?: React.ReactNode;
 }) {
   const label = "text-right text-[11px] uppercase tracking-wide text-muted-foreground";
@@ -549,10 +589,11 @@ function SectionHeader({
           {toolbar}
         </div>
       )}
-      <div className={`${GRID} border-b px-2 pb-1.5 ${toolbar ? "" : "pt-0.5"}`}>
+      <div className={`${gridFor(!!carryLabel)} border-b px-2 pb-1.5 ${toolbar ? "" : "pt-0.5"}`}>
         {toolbar ? <span className="hidden sm:block" /> : <div className={NAME}>{heading}</div>}
         <span className="hidden xl:block" />
         <span className={`pr-2 ${label}`}>{budgetLabel}</span>
+        {carryLabel && <span className={`hidden sm:block ${label}`}>{carryLabel}</span>}
         <span className={`hidden sm:block ${label}`}>{actualLabel}</span>
         <span className={`pr-2 ${label}`}>{leftLabel}</span>
         <span />
@@ -706,9 +747,18 @@ export function SpendingSection({
   actions: RowActions;
   toolbar?: React.ReactNode;
 }) {
+  // Decided on the whole month, not the filter, so the columns don't move as the filter changes.
+  const carry = spendingHasCarry(data.spending);
   return (
     <section className="rounded-xl border bg-card p-2">
-      <SectionHeader title="Spending" budgetLabel="Budgeted" actualLabel="Spent" leftLabel="Left" toolbar={toolbar} />
+      <SectionHeader
+        title="Spending"
+        budgetLabel="Budgeted"
+        actualLabel="Spent"
+        leftLabel="Left"
+        carryLabel={carry ? "Carried in" : undefined}
+        toolbar={toolbar}
+      />
       {data.spending.map((g) => (
         <SpendingGroupBlock
           key={g.key}
@@ -717,6 +767,7 @@ export function SpendingSection({
           collapsed={collapsed.has(g.key)}
           onToggle={() => onToggleGroup(g.key)}
           filter={filter}
+          carry={carry}
           actions={actions}
         />
       ))}
