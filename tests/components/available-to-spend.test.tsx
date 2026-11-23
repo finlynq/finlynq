@@ -4,7 +4,8 @@
  * GH #447: the dashboard's Available to Spend card always showed the last
  * complete month while reading like a live view ("remaining", "Spent so far").
  * It now switches between Last month (worded as a closed month) and This month
- * (so far), and remembers the choice in this browser.
+ * (so far), and remembers the choice in this browser. The Income, Expenses and
+ * Budgets tiles got the same switch; each card switches on its own.
  */
 
 import { describe, it, expect, afterEach, beforeEach, vi } from "vitest";
@@ -14,7 +15,7 @@ import { AvailableToSpend } from "@/app/(app)/dashboard/_components/available-to
 import { StatCard } from "@/app/(app)/dashboard/_components/stat-card";
 import { useSpendMonthMode } from "@/app/(app)/dashboard/_components/month-switch";
 import { TrendingUp } from "lucide-react";
-import type { SpendMonthFigures } from "@/lib/dashboard/spend-month";
+import { DASHBOARD_MONTH_KEYS, pickSpendMonth, type SpendMonthFigures } from "@/lib/dashboard/spend-month";
 
 const push = vi.fn();
 vi.mock("next/navigation", () => ({ useRouter: () => ({ push }) }));
@@ -58,28 +59,32 @@ describe("splitSpendMonths", () => {
   });
 });
 
-/** The dashboard's wiring: one shared choice for the card and a stat tile. */
+/** A stat tile wired the way the dashboard wires the Income tile: its own choice. */
+function IncomeTile({ last, current }: { last: SpendMonthFigures | null; current: SpendMonthFigures }) {
+  const [mode, toggle] = useSpendMonthMode(DASHBOARD_MONTH_KEYS.income);
+  const { showingCurrent, figures } = pickSpendMonth({ last, current }, mode);
+  return (
+    <StatCard
+      label="Monthly Income"
+      value={figures.income}
+      sub={figures.month}
+      icon={TrendingUp}
+      iconBg=""
+      sparkColor="#10b981"
+      sparkData={[1, 2]}
+      href="/transactions"
+      currency="USD"
+      monthSwitch={last ? { showingCurrent, onToggle: toggle } : undefined}
+    />
+  );
+}
+
+/** The Available to Spend card, optionally beside an Income tile. */
 function Harness({ last, current, withTile = false }: { last: SpendMonthFigures | null; current: SpendMonthFigures; withTile?: boolean }) {
-  const [mode, toggle] = useSpendMonthMode();
-  const showingCurrent = mode === "current" || !last;
-  const fig = showingCurrent ? current : last!;
   return (
     <>
-      <AvailableToSpend last={last} current={current} mode={mode} onToggleMode={toggle} currency="USD" />
-      {withTile && (
-        <StatCard
-          label="Monthly Income"
-          value={fig.income}
-          sub={fig.month}
-          icon={TrendingUp}
-          iconBg=""
-          sparkColor="#10b981"
-          sparkData={[1, 2]}
-          href="/transactions"
-          currency="USD"
-          monthSwitch={last ? { showingCurrent, onToggle: toggle } : undefined}
-        />
-      )}
+      <AvailableToSpend last={last} current={current} currency="USD" />
+      {withTile && <IncomeTile last={last} current={current} />}
     </>
   );
 }
@@ -139,25 +144,39 @@ describe("AvailableToSpend card", () => {
   });
 });
 
-describe("stat tiles share the switch (Income, Expenses, Budgets)", () => {
+describe("stat tiles switch on their own (Income, Expenses, Budgets)", () => {
   beforeEach(() => {
     window.localStorage.clear();
     push.mockClear();
   });
   afterEach(cleanup);
 
-  it("the tile's switch flips every card together", () => {
+  const shownAll = () => screen.getAllByTestId("spend-month-shown").map((e) => e.textContent);
+
+  it("switching the tile leaves the other card alone, and each choice is remembered apart", () => {
     render(<Harness last={october} current={november} withTile />);
-    expect(screen.getAllByTestId("spend-month-shown").map((e) => e.textContent)).toEqual(["Last month", "Last month"]);
+    expect(shownAll()).toEqual(["Last month", "Last month"]);
     expect(screen.getByText("2026-10")).toBeTruthy();
 
     const tileSwitch = screen.getAllByRole("button", { name: "Show this month" })[1];
     fireEvent.click(tileSwitch);
-    expect(screen.getAllByTestId("spend-month-shown").map((e) => e.textContent)).toEqual(["This month", "This month"]);
+    // Only the tile moved to this month; Available to Spend stays on last month.
+    expect(shownAll()).toEqual(["Last month", "This month"]);
     expect(screen.getByText("2026-11")).toBeTruthy();
-    expect(screen.getByText(`${getMonthLabel("2026-11")} so far`)).toBeTruthy();
+    expect(screen.getByText(`Left over in ${getMonthLabel("2026-10")}`)).toBeTruthy();
+    expect(window.localStorage.getItem(DASHBOARD_MONTH_KEYS.income)).toBe("current");
+    expect(window.localStorage.getItem(DASHBOARD_MONTH_KEYS.availableToSpend)).toBeNull();
     // Toggling does not navigate away.
     expect(push).not.toHaveBeenCalled();
+
+    cleanup();
+    render(<Harness last={october} current={november} withTile />);
+    expect(shownAll()).toEqual(["Last month", "This month"]);
+  });
+
+  it("every card has its own stored choice", () => {
+    const keys = Object.values(DASHBOARD_MONTH_KEYS);
+    expect(new Set(keys).size).toBe(keys.length);
   });
 
   it("the tile still opens its page, and its switch is not inside the link", () => {
@@ -170,13 +189,18 @@ describe("stat tiles share the switch (Income, Expenses, Budgets)", () => {
 });
 
 describe("dashboard wiring", () => {
-  it("drops the small Net Worth tile and gives the tiles the shared switch", async () => {
+  it("drops the small Net Worth tile and gives each tile its own switch", async () => {
     const { readFileSync } = await import("node:fs");
     const { join } = await import("node:path");
     const src = readFileSync(join(__dirname, "..", "..", "src/app/(app)/dashboard/page.tsx"), "utf8");
     expect(src).not.toMatch(/label: "Net Worth"/);
-    expect(src).toContain('monthSwitch={monthSwitch}');
-    expect(src).toContain("const [spendMode, toggleSpendMode] = useSpendMonthMode();");
-    expect(src).toContain("mode={spendMode} onToggleMode={toggleSpendMode}");
+    for (const key of ["income", "expenses", "budgets"]) {
+      expect(src).toContain(`useSpendMonthMode(DASHBOARD_MONTH_KEYS.${key})`);
+    }
+    expect(src).toContain("monthSwitch: incomeCard.monthSwitch");
+    expect(src).toContain("monthSwitch: expensesCard.monthSwitch");
+    expect(src).toContain("monthSwitch: budgetsCard.monthSwitch");
+    // Available to Spend keeps its own choice inside the card.
+    expect(src).toContain("<AvailableToSpend {...spendMonths} currency={apiDisplayCurrency} />");
   });
 });

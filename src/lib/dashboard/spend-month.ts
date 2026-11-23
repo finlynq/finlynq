@@ -8,7 +8,16 @@ export type SpendMonthMode = "last" | "current";
 
 export type SpendMonthFigures = { month: string; income: number; expenses: number };
 
+/** Available to Spend's stored choice (kept from the first version of #447). */
 export const SPEND_MONTH_STORAGE_KEY = "pf-available-to-spend-month";
+
+/** Each dashboard card switches on its own, so each remembers its own choice. */
+export const DASHBOARD_MONTH_KEYS = {
+  income: "pf-dashboard-month-income",
+  expenses: "pf-dashboard-month-expenses",
+  budgets: "pf-dashboard-month-budgets",
+  availableToSpend: SPEND_MONTH_STORAGE_KEY,
+} as const;
 
 /**
  * From the dashboard's ascending "YYYY-MM" income/expense rows, the newest
@@ -33,4 +42,16 @@ export function splitSpendMonths(
 /** A stored choice, or the default (last complete month) for anything else. */
 export function parseSpendMonthMode(value: string | null | undefined): SpendMonthMode {
   return value === "current" ? "current" : "last";
+}
+
+/**
+ * The figures one card shows for its choice. With no complete month yet the
+ * card shows the current month whatever was chosen (and offers no switch).
+ */
+export function pickSpendMonth(
+  months: { last: SpendMonthFigures | null; current: SpendMonthFigures },
+  mode: SpendMonthMode,
+): { showingCurrent: boolean; figures: SpendMonthFigures } {
+  const showingCurrent = mode === "current" || !months.last;
+  return { showingCurrent, figures: showingCurrent ? months.current : months.last! };
 }

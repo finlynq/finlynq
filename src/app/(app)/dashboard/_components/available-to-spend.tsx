@@ -2,10 +2,10 @@
 
 import { Card, CardContent } from "@/components/ui/card";
 import { formatCurrency, getMonthLabel } from "@/lib/currency";
-import type { SpendMonthFigures, SpendMonthMode } from "@/lib/dashboard/spend-month";
+import { DASHBOARD_MONTH_KEYS, pickSpendMonth, type SpendMonthFigures } from "@/lib/dashboard/spend-month";
 import { Wallet } from "lucide-react";
 import { motion } from "framer-motion";
-import { MonthSwitch } from "./month-switch";
+import { MonthSwitch, useSpendMonthMode } from "./month-switch";
 
 const itemVariants = {
   hidden: { opacity: 0, y: 16 },
@@ -17,20 +17,17 @@ type Props = {
   last: SpendMonthFigures | null;
   /** The current month so far. */
   current: SpendMonthFigures;
-  /** The dashboard's shared month choice (useSpendMonthMode). */
-  mode: SpendMonthMode;
-  onToggleMode: () => void;
   currency?: string;
 };
 
 /**
  * GH #447: shows the last complete month (closed figures, worded as such) or
- * the current month so far. The choice is shared with the Income, Expenses and
- * Budgets cards and remembered per browser.
+ * the current month so far. Switched on its own (each dashboard card has its
+ * own choice) and remembered per browser.
  */
-export function AvailableToSpend({ last, current, mode, onToggleMode, currency = "USD" }: Props) {
-  const showingCurrent = mode === "current" || !last;
-  const figures = showingCurrent ? current : last;
+export function AvailableToSpend({ last, current, currency = "USD" }: Props) {
+  const [mode, toggleMode] = useSpendMonthMode(DASHBOARD_MONTH_KEYS.availableToSpend);
+  const { showingCurrent, figures } = pickSpendMonth({ last, current }, mode);
   const { income, expenses } = figures;
   const monthLabel = getMonthLabel(figures.month);
   const available = income - expenses;
@@ -57,7 +54,7 @@ export function AvailableToSpend({ last, current, mode, onToggleMode, currency =
                 <p className="text-[11px] text-muted-foreground">{subtitle}</p>
               </div>
             </div>
-            {last && <MonthSwitch showingCurrent={showingCurrent} onToggle={onToggleMode} />}
+            {last && <MonthSwitch showingCurrent={showingCurrent} onToggle={toggleMode} />}
           </div>
 
           <p className={`text-3xl font-bold tracking-tight tabular-nums ${available >= 0 ? "text-emerald-600 dark:text-emerald-400" : "text-rose-500"}`}>
