@@ -171,6 +171,39 @@ describeDb("budget month loader", () => {
     expect(line(m, "Rent").carriedIn).toBe(100);
   });
 
+  it("turning rollover off in a later month leaves earlier months as they were", async () => {
+    await updateLineSettings(userId, "USD", { categoryId: ids.rent }, { rollover: true }, "2026-09");
+    // Stopped while looking at December.
+    await updateLineSettings(userId, "USD", { categoryId: ids.rent }, { rollover: false }, "2026-12");
+    let m = await loadBudgetMonth(userId, TEST_DEK, M);
+    expect(line(m, "Rent")).toMatchObject({ carriedIn: 100, left: 1100, rollover: true });
+    m = await loadBudgetMonth(userId, TEST_DEK, "2026-12");
+    expect(line(m, "Rent")).toMatchObject({ carriedIn: null, rollover: false });
+    m = await loadBudgetMonth(userId, TEST_DEK, "2027-02");
+    expect(line(m, "Rent").rollover).toBe(false);
+
+    // Turning it on again where it is already on changes nothing.
+    await updateLineSettings(userId, "USD", { categoryId: ids.rent }, { rollover: true }, M);
+    m = await loadBudgetMonth(userId, TEST_DEK, M);
+    expect(line(m, "Rent").carriedIn).toBe(100);
+    m = await loadBudgetMonth(userId, TEST_DEK, "2026-12");
+    expect(line(m, "Rent").rollover).toBe(false);
+
+    // Back on from February: on from there, December still off.
+    await updateLineSettings(userId, "USD", { categoryId: ids.rent }, { rollover: true }, "2027-02");
+    m = await loadBudgetMonth(userId, TEST_DEK, "2027-02");
+    expect(line(m, "Rent")).toMatchObject({ carriedIn: 0, rollover: true });
+    m = await loadBudgetMonth(userId, TEST_DEK, "2026-12");
+    expect(line(m, "Rent").rollover).toBe(false);
+
+    // Turning it off in October clears what came after: off from October on.
+    await updateLineSettings(userId, "USD", { categoryId: ids.rent }, { rollover: false }, M);
+    m = await loadBudgetMonth(userId, TEST_DEK, "2027-02");
+    expect(line(m, "Rent").rollover).toBe(false);
+    m = await loadBudgetMonth(userId, TEST_DEK, "2026-09");
+    expect(line(m, "Rent").rollover).toBe(true);
+  });
+
   it("fills later months from October with a monthly increase, previewing first", async () => {
     const req = {
       months: ["2026-11", "2026-12"],

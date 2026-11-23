@@ -8,7 +8,8 @@ import { formatCurrency, getCurrentMonth, getMonthLabel } from "@/lib/currency";
 import { buildTxDrillUrl } from "@/lib/transactions/drill-url";
 import { Sparkline } from "@/components/sparkline";
 import { niceDomain } from "@/lib/chart-series";
-import { DollarSign, ArrowUpRight, ArrowDownRight, TrendingUp, CreditCard, Target, User, Upload, FileUp } from "lucide-react";
+import { DASHBOARD_MONTH_KEYS, pickSpendMonth, splitSpendMonths, type SpendMonthMode } from "@/lib/dashboard/spend-month";
+import { ArrowUpRight, ArrowDownRight, TrendingUp, CreditCard, Target, User, Upload, FileUp } from "lucide-react";
 import { motion } from "framer-motion";
 import { AnimatedNumber } from "./_components/animated-number";
 import { StatCard } from "./_components/stat-card";
@@ -23,6 +24,7 @@ import { IncomeExpenseChart } from "./_components/income-expense-chart";
 import { SpendingCategoryChart } from "./_components/spending-category-chart";
 import { NetWorthHistoryChart } from "@/components/net-worth-history-chart";
 import { AvailableToSpend } from "./_components/available-to-spend";
+import { useSpendMonthMode } from "./_components/month-switch";
 import { InsightsSection } from "./_components/insights-section";
 import { useDevMode } from "@/hooks/use-dev-mode";
 import { useDisplayCurrency } from "@/components/currency-provider";
@@ -104,8 +106,8 @@ function DashboardSkeleton() {
         <div className="lg:col-span-2 h-44 animate-shimmer rounded-2xl" />
         <div className="h-44 animate-shimmer rounded-2xl" />
       </div>
-      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
-        {[1, 2, 3, 4].map((i) => <div key={i} className="h-32 animate-shimmer rounded-2xl" />)}
+      <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
+        {[1, 2, 3].map((i) => <div key={i} className="h-32 animate-shimmer rounded-2xl" />)}
       </div>
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-5">
         {[1, 2, 3].map((i) => <div key={i} className="h-52 animate-shimmer rounded-2xl" />)}
@@ -121,6 +123,10 @@ export default function DashboardPage() {
   const [health, setHealth] = useState<HealthData | null>(null);
   const [showOnboarding, setShowOnboarding] = useState(false);
   const [userInfo, setUserInfo] = useState<{ email: string; displayName?: string } | null>(null);
+  // GH #447: each card switches between last month and this month on its own.
+  const [incomeMode, toggleIncomeMode] = useSpendMonthMode(DASHBOARD_MONTH_KEYS.income);
+  const [expensesMode, toggleExpensesMode] = useSpendMonthMode(DASHBOARD_MONTH_KEYS.expenses);
+  const [budgetsMode, toggleBudgetsMode] = useSpendMonthMode(DASHBOARD_MONTH_KEYS.budgets);
 
   useEffect(() => {
     if (currencyLoading) return; // wait until provider has read settings
@@ -221,7 +227,7 @@ export default function DashboardPage() {
   const netWorthData = Array.from(nwMap.entries())
     .map(([month, value]) => ({ month, value }))
     .slice(-24);
-  // Net Worth sparkline shows the last twelve months (hero + stat tile share it).
+  // Net Worth sparkline shows the last twelve months (the hero card's line).
   const nwSparkPoints = netWorthData.slice(-12);
   const nwSparkline = nwSparkPoints.map((d) => d.value);
   const nwSparkLabels = nwSparkPoints.map((d) => d.month);
@@ -236,40 +242,43 @@ export default function DashboardPage() {
     momPct = prev !== 0 ? (momChange / Math.abs(prev)) * 100 : 0;
   }
 
-  // FINLYNQ-291 (C1) — the Monthly Income / Expenses / Budgets tiles summarize a
-  // single reference month. The newest tracked month is usually the CURRENT
-  // calendar month, which is incomplete mid-month: before payroll lands its
-  // income reads $0, so the Monthly Income tile looked broken. Prefer the last
-  // COMPLETE month — if the newest entry is the current calendar month and an
-  // earlier month exists, step back one. A brand-new user with only the current
-  // month still sees it. Income + expenses + drill-through all key off this one
-  // index so the trio stays internally consistent.
+  // FINLYNQ-291 (C1) + GH #447 — the Monthly Income / Expenses / Budgets tiles
+  // and the Available to Spend card each summarize one month: the last complete
+  // month by default (the current month is incomplete mid-month: before payroll
+  // lands its income reads $0), or the current month so far when the user
+  // switches THAT card. Each card has its own choice. A brand-new user with no
+  // complete month yet sees the current month and no switch. A card's figure,
+  // subtitle and drill-through all come from its own month.
   const currentMonthKey = getCurrentMonth();
-  let refIdx = incExpData.length - 1;
-  if (refIdx > 0 && incExpData[refIdx].month === currentMonthKey) {
-    refIdx -= 1;
-  }
-  const refMonth = incExpData.length > 0 ? incExpData[refIdx] : null;
-  const lastMonthIncome = refMonth ? refMonth.income : 0;
-  const lastMonthExpenses = refMonth ? refMonth.expenses : 0;
-  const availableToSpend = lastMonthIncome - lastMonthExpenses;
+  const spendMonths = splitSpendMonths(incExpData, currentMonthKey);
 
-  // FINLYNQ-130 — drill-through: the Monthly Income / Expenses tiles show the
-  // reference month above (incExpData is "YYYY-MM" sorted asc). Derive that
-  // month's [startDate, endDate] so the tile links into /transactions scoped to
-  // exactly the rows that produced the figure. Empty range ⇒ plain /transactions.
-  const lastMonthKey = refMonth ? refMonth.month : "";
-  const monthDrill = (() => {
-    const m = /^(\d{4})-(\d{2})$/.exec(lastMonthKey);
-    if (!m) return { startDate: "", endDate: "" };
+  // FINLYNQ-130 — drill-through: the Income / Expenses tiles link into
+  // /transactions scoped to exactly the month that produced the figure.
+  const monthDrillUrl = (monthKey: string) => {
+    const m = /^(\d{4})-(\d{2})$/.exec(monthKey);
+    if (!m) return buildTxDrillUrl({ startDate: "", endDate: "" });
     const year = Number(m[1]);
     const month = Number(m[2]); // 1-12
-    const startDate = `${m[1]}-${m[2]}-01`;
     // Day 0 of the next month = last day of this month.
     const last = new Date(Date.UTC(year, month, 0)).getUTCDate();
-    const endDate = `${m[1]}-${m[2]}-${String(last).padStart(2, "0")}`;
-    return { startDate, endDate };
-  })();
+    return buildTxDrillUrl({ startDate: `${m[1]}-${m[2]}-01`, endDate: `${m[1]}-${m[2]}-${String(last).padStart(2, "0")}` });
+  };
+  const cardMonth = (mode: SpendMonthMode, onToggle: () => void) => {
+    const { showingCurrent, figures } = pickSpendMonth(spendMonths, mode);
+    return {
+      showingCurrent,
+      figures,
+      label: showingCurrent ? `${getMonthLabel(figures.month)} so far` : getMonthLabel(figures.month),
+      monthSwitch: spendMonths.last ? { showingCurrent, onToggle } : undefined,
+    };
+  };
+  const incomeCard = cardMonth(incomeMode, toggleIncomeMode);
+  const expensesCard = cardMonth(expensesMode, toggleExpensesMode);
+  const budgetsCard = cardMonth(budgetsMode, toggleBudgetsMode);
+  const budgetLeft = budgetsCard.figures.income - budgetsCard.figures.expenses;
+  const expensePct = expensesCard.figures.income > 0
+    ? ` · ${Math.round((expensesCard.figures.expenses / expensesCard.figures.income) * 100)}% of income`
+    : "";
   const budgetSparkline = incExpLast6.map((d) => d.income - d.expenses);
 
   // Dev-mode: spending by category for charts
@@ -280,50 +289,44 @@ export default function DashboardPage() {
   // Stat cards config
   const summaryCards = [
     {
-      label: "Net Worth",
-      value: totalNetWorth,
-      sub: `Assets ${formatCurrency(totalAssets, apiDisplayCurrency)}`,
-      icon: DollarSign,
-      iconBg: "bg-primary/10 text-primary",
-      sparkColor: "#6366f1",
-      sparkData: nwSparkline,
-      sparkLabels: nwSparkLabels,
-      href: "/accounts",
-    },
-    {
       label: "Monthly Income",
-      // Name the month the figure covers — it's the last COMPLETE month, not
-      // necessarily the current one (FINLYNQ-291 C1), so the label must be explicit.
-      value: lastMonthIncome,
-      sub: lastMonthKey ? getMonthLabel(lastMonthKey) : `${incExpData.length} months tracked`,
+      // Name the month the figure covers, so a closed month and the month so
+      // far can't be mistaken for each other.
+      value: incomeCard.figures.income,
+      sub: incomeCard.label,
       icon: TrendingUp,
       iconBg: "bg-emerald-100 text-emerald-600 dark:bg-emerald-950/60 dark:text-emerald-400",
       sparkColor: "#10b981",
       sparkData: incomeSparkline,
       sparkLabels: incExpSparkLabels,
-      href: buildTxDrillUrl({ startDate: monthDrill.startDate, endDate: monthDrill.endDate }),
+      href: monthDrillUrl(incomeCard.figures.month),
+      monthSwitch: incomeCard.monthSwitch,
     },
     {
       label: "Monthly Expenses",
-      value: lastMonthExpenses,
-      sub: lastMonthIncome > 0 ? `${Math.round((lastMonthExpenses / lastMonthIncome) * 100)}% of income` : "",
+      value: expensesCard.figures.expenses,
+      sub: `${expensesCard.label}${expensePct}`,
       icon: CreditCard,
       iconBg: "bg-rose-100 text-rose-600 dark:bg-rose-950/60 dark:text-rose-400",
       sparkColor: "#f43f5e",
       sparkData: expenseSparkline,
       sparkLabels: incExpSparkLabels,
-      href: buildTxDrillUrl({ startDate: monthDrill.startDate, endDate: monthDrill.endDate }),
+      href: monthDrillUrl(expensesCard.figures.month),
+      monthSwitch: expensesCard.monthSwitch,
     },
     {
       label: "Budgets",
-      value: availableToSpend,
-      sub: availableToSpend >= 0 ? "Available to spend" : "Over budget",
+      value: budgetLeft,
+      sub: budgetsCard.showingCurrent
+        ? (budgetLeft >= 0 ? "Available to spend" : "Over budget")
+        : (budgetLeft >= 0 ? "Left over" : "Overspent"),
       icon: Target,
       iconBg: "bg-amber-100 text-amber-600 dark:bg-amber-950/60 dark:text-amber-400",
       sparkColor: "#f59e0b",
       sparkData: budgetSparkline,
       sparkLabels: incExpSparkLabels,
       href: "/budgets",
+      monthSwitch: budgetsCard.monthSwitch,
     },
   ];
 
@@ -383,10 +386,13 @@ export default function DashboardPage() {
               {/* GH #434: the net worth line fills the whole tile behind the
                   text, scaled to the data's own range so an ordinary month's
                   change is visible (from 0, a 2.7% drop on a six-figure
-                  balance drew as a flat line). Decorative, so no tooltip. */}
+                  balance drew as a flat line). GH #446: hovering it shows
+                  each month's value; the text layer above ignores the mouse
+                  so the line gets hover everywhere, and a click still lands
+                  on the card's link. */}
               {nwSparkline.length > 1 && (
-                <div className="absolute inset-0 pointer-events-none opacity-60 group-hover:opacity-90 transition-opacity duration-300">
-                  <Sparkline data={nwSparkline} color="#6366f1" fill domain={niceDomain(nwSparkline, { padPct: 0.15, clampZeroFloor: false })} />
+                <div className="absolute inset-0">
+                  <Sparkline data={nwSparkline} labels={nwSparkLabels} currency={apiDisplayCurrency} color="#6366f1" fill areaClassName="opacity-60 group-hover:opacity-90 transition-opacity duration-300" domain={niceDomain(nwSparkline, { padPct: 0.15, clampZeroFloor: false })} />
                 </div>
               )}
 
@@ -394,7 +400,7 @@ export default function DashboardPage() {
               <div className="absolute -top-20 -right-20 w-48 h-48 rounded-full bg-indigo-500/8 blur-3xl dark:bg-indigo-400/5 pointer-events-none" />
               <div className="absolute -bottom-16 -left-16 w-40 h-40 rounded-full bg-violet-500/6 blur-3xl dark:bg-violet-400/4 pointer-events-none" />
 
-              <CardContent className="relative pt-6 pb-6 px-6">
+              <CardContent className="relative pt-6 pb-6 px-6 pointer-events-none">
                 <div className="flex items-start justify-between">
                   <div className="space-y-3">
                     {/* Label */}
@@ -437,9 +443,10 @@ export default function DashboardPage() {
       </div>
 
       {/* ============================================
-          ROW 2 — 4 Metric Cards
+          ROW 2 — 3 Metric Cards (the small Net Worth tile was dropped: the
+          hero card above shows it)
           ============================================ */}
-      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
+      <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
         {summaryCards.map((card) => (
           <StatCard key={card.label} {...card} currency={apiDisplayCurrency} />
         ))}
@@ -482,7 +489,7 @@ export default function DashboardPage() {
             <SpendingCategoryChart data={spendingData} currency={apiDisplayCurrency} />
           </div>
           <div className="grid grid-cols-1 lg:grid-cols-3 gap-5">
-            <AvailableToSpend income={lastMonthIncome} expenses={lastMonthExpenses} currency={apiDisplayCurrency} monthLabel={lastMonthKey ? getMonthLabel(lastMonthKey) : undefined} />
+            <AvailableToSpend {...spendMonths} currency={apiDisplayCurrency} />
           </div>
           <InsightsSection currency={apiDisplayCurrency} />
         </>
