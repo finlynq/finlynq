@@ -68,6 +68,7 @@ import type { RawTransaction } from "@/lib/import-pipeline";
 import { findUnreasonableAmountError } from "@/lib/import-pipeline";
 import { resolveIsinTickersInPlace } from "@/lib/securities/isin-resolve";
 import { resolveIsinForUser } from "@/lib/securities/isin-store";
+import { planFuzzyBankSkips } from "@/lib/import/fuzzy-bank-dedup";
 
 /** 60 days — matches the route + stage-email-import.ts. */
 const STAGE_TTL_MS = 60 * 24 * 60 * 60 * 1000;
@@ -78,18 +79,13 @@ const STAGE_TTL_MS = 60 * 24 * 60 * 60 * 1000;
  * descriptor (e.g. an email-connector alert "Spotify" vs the statement's
  * "Spotify P43795D0D1", posted a day or two later) slips past it and would
  * re-create a duplicate bank_transactions row. This payee-agnostic amount +
- * date net catches those. Skipping a real transaction is recoverable (force-load
+ * date net catches those. It compares against the account's BANK LEDGER only,
+ * one bank row per file row (see planFuzzyBankSkips for why). Skipping a real transaction is recoverable (force-load
  * from /import/pending); a duplicate is expensive to find and clean up — so the
  * default leans toward over-skipping. A caller may widen it (connectors pass 3
  * explicitly for the same reason); it is never silently disabled.
  */
 const DEFAULT_FUZZY_DEDUP_WINDOW_DAYS = 3;
-
-/** "YYYY-MM-DD" → whole-day epoch number (UTC), or null if unparseable. */
-function isoToEpochDay(iso: string): number | null {
-  const t = Date.parse(`${iso}T00:00:00Z`);
-  return Number.isNaN(t) ? null : Math.floor(t / 86_400_000);
-}
 
 /** Shift a "YYYY-MM-DD" by ±days, returning "YYYY-MM-DD". */
 function shiftIsoDate(iso: string, deltaDays: number): string {
@@ -462,8 +458,9 @@ export interface WriteStagedImportContext {
   /**
    * Fuzzy-dedup window (days). A still-`new` row is additionally marked
    * `existing` (→ reconcile_state 'skipped_duplicate', excluded from the send by
-   * default) if the bound account already has a transaction OR bank-ledger row
-   * with the same amount within ±this many days — EVEN under a different payee.
+   * default) if the bound account's bank ledger has a row with the same amount
+   * within ±this many days — EVEN under a different payee — that no other file
+   * row already took. Ledger transactions never count (planFuzzyBankSkips).
    * This is the payee-agnostic "auto-skip duplicates I already have" pass; it's
    * re-derived every run (no stored state), and a false match can still be
    * force-loaded from /import/pending.
@@ -597,64 +594,57 @@ export async function writeStagedImport(
     }
   }
 
-  // ─── Feed fuzzy dedup (opt-in via fuzzyDedupWindowDays) ───────────────────
-  // A live feed often restates a transaction the user already has under a
-  // DIFFERENT payee ("Interest Income" vs "Deposit interest"), which exact
-  // hash/fitId can't connect. Mark a still-'new' row 'existing' (skipped) when
-  // the bound account already has a ledger transaction OR bank-ledger row with
-  // the SAME amount within ±window days. Re-derived every sync → a match stays
-  // skipped with no stored state; a false positive can still be force-loaded.
+  // ─── Feed fuzzy dedup (payee-agnostic, bank ledger only) ──────────────────
+  // A live feed often restates a row the bank already sent under a DIFFERENT
+  // payee ("Interest Income" vs "Deposit interest"), which exact hash/fitId
+  // can't connect. Mark a still-'new' row 'existing' (skipped) when the bound
+  // account's BANK LEDGER has an untaken row of the SAME amount within ±window
+  // days. Ledger `transactions` never count, and one bank row covers at most
+  // one file row — both rules and why live in planFuzzyBankSkips. Re-derived
+  // every sync → no stored state; a false positive can still be force-loaded.
   const fuzzySkip = new Set<number>();
   // Defaults on for every account-bound ingest (see DEFAULT_FUZZY_DEDUP_WINDOW_DAYS);
   // only cross-account CSVs (accountId null) skip it, since it's account-scoped.
   const fuzzyWindowDays = ctx.fuzzyDedupWindowDays ?? DEFAULT_FUZZY_DEDUP_WINDOW_DAYS;
   if (accountId !== null) {
     const windowDays = fuzzyWindowDays;
-    const candidates = shaped.filter(
-      (r) => r.dedupStatus === "new" && r.accountId === accountId,
-    );
-    if (candidates.length > 0) {
-      const sortedDates = candidates.map((r) => r.date).sort();
+    const bound = shaped.filter((r) => r.accountId === accountId);
+    if (bound.some((r) => r.dedupStatus === "new")) {
+      // Window over EVERY bound row, so the bank rows the exact checks matched
+      // are in hand and can be taken before the fuzzy pass.
+      const sortedDates = bound.map((r) => r.date).sort();
       const lo = shiftIsoDate(sortedDates[0], -windowDays);
       const hi = shiftIsoDate(sortedDates[sortedDates.length - 1], windowDays);
-      const [txRows, bankRows] = await Promise.all([
-        db
-          .select({ date: schema.transactions.date, amount: schema.transactions.amount })
-          .from(schema.transactions)
-          .where(and(
-            eq(schema.transactions.userId, userId),
-            eq(schema.transactions.accountId, accountId),
-            gte(schema.transactions.date, lo),
-            lte(schema.transactions.date, hi),
-          ))
-          .all(),
-        db
-          .select({ date: schema.bankTransactions.date, amount: schema.bankTransactions.amount })
-          .from(schema.bankTransactions)
-          .where(and(
-            eq(schema.bankTransactions.userId, userId),
-            eq(schema.bankTransactions.accountId, accountId),
-            gte(schema.bankTransactions.date, lo),
-            lte(schema.bankTransactions.date, hi),
-          ))
-          .all(),
-      ]);
-      // amount(cents) → sorted epoch-day list of existing rows.
-      const byAmount = new Map<string, number[]>();
-      for (const e of [...txRows, ...bankRows]) {
-        const day = isoToEpochDay(e.date);
-        if (day == null) continue;
-        const key = e.amount.toFixed(2);
-        const arr = byAmount.get(key);
-        if (arr) arr.push(day);
-        else byAmount.set(key, [day]);
-      }
-      for (const r of candidates) {
-        const days = byAmount.get(r.amount.toFixed(2));
-        if (!days) continue;
-        const rd = isoToEpochDay(r.date);
-        if (rd == null) continue;
-        if (days.some((d) => Math.abs(d - rd) <= windowDays)) {
+      const bankRows = await db
+        .select({
+          id: schema.bankTransactions.id,
+          date: schema.bankTransactions.date,
+          amount: schema.bankTransactions.amount,
+          importHash: schema.bankTransactions.importHash,
+          fitId: schema.bankTransactions.fitId,
+        })
+        .from(schema.bankTransactions)
+        .where(and(
+          eq(schema.bankTransactions.userId, userId),
+          eq(schema.bankTransactions.accountId, accountId),
+          gte(schema.bankTransactions.date, lo),
+          lte(schema.bankTransactions.date, hi),
+        ))
+        .all();
+      const skips = planFuzzyBankSkips(
+        bound.map((r) => ({
+          rowIndex: r.rowIndex,
+          date: r.date,
+          amount: r.amount,
+          hash: r.hash,
+          fitId: r.fitId ?? null,
+          exact: r.dedupStatus !== "new",
+        })),
+        bankRows,
+        windowDays,
+      );
+      for (const r of bound) {
+        if (r.dedupStatus === "new" && skips.has(r.rowIndex)) {
           r.dedupStatus = "existing";
           fuzzySkip.add(r.rowIndex);
         }
