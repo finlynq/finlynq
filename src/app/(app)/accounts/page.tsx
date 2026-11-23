@@ -252,16 +252,21 @@ export default function AccountsPage() {
       </div>
       {groups(list).map(([group, accts]) => (
         <Card key={group} size="sm">
-          <CardHeader className="flex flex-row items-center justify-between gap-2">
-            <CardTitle className="text-xs font-medium uppercase tracking-wider text-muted-foreground">
+          {/* GH #440: the group header is a gray band across the top of the
+              card (-mt-3 cancels the sm card's top padding) with the group's
+              total in the display currency, over the accounts shown in this
+              card (same basis as the page totals). */}
+          <CardHeader className="-mt-3 flex flex-row items-center justify-between gap-2 border-b border-border/60 bg-muted/60 py-2.5">
+            <CardTitle className="flex items-baseline gap-2 text-xs font-semibold uppercase tracking-wider text-foreground/80">
               {group}
+              <span className="text-[11px] font-normal normal-case tracking-normal text-muted-foreground">
+                {accts.length} {accts.length === 1 ? "account" : "accounts"}
+              </span>
             </CardTitle>
-            {/* GH #440: the group's total in the display currency, over the
-                accounts shown in this card (same basis as the page totals). */}
             {(() => {
               const total = Math.round(accts.reduce((s, a) => s + (a.convertedBalance ?? a.balance), 0) * 100) / 100;
               return (
-                <span className={`font-mono text-sm font-semibold mr-2 ${total >= 0 ? color : "text-rose-600"}`}>
+                <span className={`font-mono text-sm font-bold mr-2 ${total >= 0 ? color : "text-rose-600"}`}>
                   {formatCurrency(total, displayCurrency)}
                 </span>
               );
