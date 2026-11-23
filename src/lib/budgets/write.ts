@@ -18,7 +18,7 @@ import { applyAdjust, planFill, sourceAmount, type FillAdjust, type FillLine, ty
 import { isBudgetRole, monthRange, parseLineKey, shiftMonth, type BudgetRole, type LineKey } from "./lines";
 import { loadActualsByMonth, loadBudgetContext, loadBudgetsByMonth, type BudgetContext } from "./load-month";
 import { groupLabel } from "./month";
-import type { RolloverNegative } from "./carryover";
+import { rolloverOnIn, type RolloverNegative } from "./carryover";
 import { BudgetWriteError } from "./errors";
 import {
   applyRuleReplacement,
@@ -365,25 +365,52 @@ async function upsertLineSettings(userId: string, target: { categoryId: number }
   }
 }
 
-async function ensureCarryStart(userId: string, target: { categoryId: number } | { group: string }, month: string, currency: string) {
-  if ("categoryId" in target) {
-    await db.execute(sql`
-      INSERT INTO budget_carryover_sets (user_id, category_id, month, amount, currency)
-      VALUES (${userId}, ${target.categoryId}, ${month}, 0, ${currency})
-      ON CONFLICT (user_id, category_id, month) WHERE category_id IS NOT NULL DO NOTHING
-    `);
-  } else {
-    await db.execute(sql`
-      INSERT INTO budget_carryover_sets (user_id, group_name, month, amount, currency)
-      VALUES (${userId}, ${target.group}, ${month}, 0, ${currency})
-      ON CONFLICT (user_id, group_name, month) WHERE group_name IS NOT NULL DO NOTHING
-    `);
-  }
+/** The SQL that picks one line's carry sets. */
+function carryTarget(target: { categoryId: number } | { group: string }) {
+  return "categoryId" in target ? sql`category_id = ${target.categoryId}` : sql`group_name = ${target.group}`;
+}
+
+/**
+ * Turn rollover on or off from `month` on. Months before it are left as they
+ * are; sets after it are cleared, so the switch holds for every later month.
+ * Turning it on where it is already on changes nothing (a fresh 0 would reset
+ * the carry); turning it on starts the carry at 0 (or keeps an amount already
+ * pinned on that month).
+ */
+async function setRolloverFrom(
+  userId: string,
+  target: { categoryId: number } | { group: string },
+  month: string,
+  currency: string,
+  on: boolean,
+): Promise<void> {
+  const where = carryTarget(target);
+  const rows = normalizeDbRows<{ month: string; amount: number; off: boolean }>(
+    await db.execute(sql`SELECT month, amount, off FROM budget_carryover_sets WHERE user_id = ${userId} AND ${where}`),
+  );
+  const sets: Record<string, number | null> = {};
+  for (const r of rows) sets[r.month] = r.off ? null : Number(r.amount);
+  if (on && rolloverOnIn(sets, month)) return;
+  await db.execute(sql`DELETE FROM budget_carryover_sets WHERE user_id = ${userId} AND ${where} AND month > ${month}`);
+  const off = !on;
+  const insert =
+    "categoryId" in target
+      ? sql`INSERT INTO budget_carryover_sets (user_id, category_id, month, amount, currency, off)
+            VALUES (${userId}, ${target.categoryId}, ${month}, 0, ${currency}, ${off})
+            ON CONFLICT (user_id, category_id, month) WHERE category_id IS NOT NULL`
+      : sql`INSERT INTO budget_carryover_sets (user_id, group_name, month, amount, currency, off)
+            VALUES (${userId}, ${target.group}, ${month}, 0, ${currency}, ${off})
+            ON CONFLICT (user_id, group_name, month) WHERE group_name IS NOT NULL`;
+  await db.execute(sql`${insert} DO UPDATE SET
+    off = EXCLUDED.off,
+    amount = CASE WHEN EXCLUDED.off OR budget_carryover_sets.off THEN 0 ELSE budget_carryover_sets.amount END,
+    currency = CASE WHEN EXCLUDED.off OR budget_carryover_sets.off THEN EXCLUDED.currency ELSE budget_carryover_sets.currency END`);
 }
 
 /**
  * Change a category's or an expense group's budget settings. `month` is the
- * month the user is looking at: rollover starts there, and switching a group
+ * month the user is looking at: rollover turns on or off from there (earlier
+ * months keep theirs), and switching a group
  * to one line moves its categories' budgets from that month on into the
  * group's (summed per month; an existing group amount is kept).
  */
@@ -404,7 +431,7 @@ export async function updateLineSettings(
   const rateMap = "group" in target && patch.byGroup === true ? await getRateMap(currency, userId) : null;
   await withDbTransaction(async () => {
     await upsertLineSettings(userId, target, patch);
-    if (patch.rollover) await ensureCarryStart(userId, target, month, currency);
+    if (patch.rollover != null) await setRolloverFrom(userId, target, month, currency, patch.rollover);
     if ("group" in target && patch.byGroup === true && rateMap) {
       const current = currentMonth();
       const rows = normalizeDbRows<{ id: number; month: string; amount: number; currency: string | null; rules_amount: number | null; override: boolean }>(
@@ -477,7 +504,9 @@ export async function setAccountBudgetRole(
 
 /**
  * Pin what a rollover line carries into `month` (0 = reset), or remove the
- * user's own pin with null so the carry is computed again.
+ * user's own pin with null so the carry is computed again. Removing never
+ * removes an "off from this month" mark; pinning an amount on a month marked
+ * off turns rollover back on there.
  */
 export async function setCarryover(userId: string, currency: string, key: string, month: string, amount: number | null): Promise<void> {
   const parsed = parseLineKey(key);
@@ -486,25 +515,25 @@ export async function setCarryover(userId: string, currency: string, key: string
   if (parsed.kind === "category") {
     await assertOwnCategory(userId, parsed.categoryId);
     if (amount == null) {
-      await db.execute(sql`DELETE FROM budget_carryover_sets WHERE user_id = ${userId} AND category_id = ${parsed.categoryId} AND month = ${month}`);
+      await db.execute(sql`DELETE FROM budget_carryover_sets WHERE user_id = ${userId} AND category_id = ${parsed.categoryId} AND month = ${month} AND NOT off`);
       return;
     }
     await db.execute(sql`
       INSERT INTO budget_carryover_sets (user_id, category_id, month, amount, currency)
       VALUES (${userId}, ${parsed.categoryId}, ${month}, ${round2(amount)}, ${currency})
       ON CONFLICT (user_id, category_id, month) WHERE category_id IS NOT NULL
-      DO UPDATE SET amount = EXCLUDED.amount, currency = EXCLUDED.currency
+      DO UPDATE SET amount = EXCLUDED.amount, currency = EXCLUDED.currency, off = false
     `);
     return;
   }
   if (amount == null) {
-    await db.execute(sql`DELETE FROM budget_carryover_sets WHERE user_id = ${userId} AND group_name = ${parsed.group} AND month = ${month}`);
+    await db.execute(sql`DELETE FROM budget_carryover_sets WHERE user_id = ${userId} AND group_name = ${parsed.group} AND month = ${month} AND NOT off`);
     return;
   }
   await db.execute(sql`
     INSERT INTO budget_carryover_sets (user_id, group_name, month, amount, currency)
     VALUES (${userId}, ${parsed.group}, ${month}, ${round2(amount)}, ${currency})
     ON CONFLICT (user_id, group_name, month) WHERE group_name IS NOT NULL
-    DO UPDATE SET amount = EXCLUDED.amount, currency = EXCLUDED.currency
+    DO UPDATE SET amount = EXCLUDED.amount, currency = EXCLUDED.currency, off = false
   `);
 }

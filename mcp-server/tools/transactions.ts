@@ -520,7 +520,7 @@ export function registerTransactionsTools(server: McpServer, ctx: PgToolContext)
         category_id: z.number().int().positive().optional(),
         group: z.string().optional().describe("Expense category group name."),
         account_id: z.number().int().positive().optional().describe("Set how this account counts in the budget."),
-        month: ymPeriod.optional().describe("Month the change starts (rollover start; budgets moved into a group). Default: this month."),
+        month: ymPeriod.optional().describe("Month the change starts (rollover turns on or off from here, earlier months keep theirs; budgets moved into a group). Default: this month."),
         excluded: z.boolean().optional().describe("Leave the category/group out of the budget."),
         rollover: z.boolean().optional().describe("Roll leftover into the next month (spending only)."),
         rollover_negative: z.enum(["carry", "reset"]).optional().describe("Whether overspending carries as a negative or resets to 0."),

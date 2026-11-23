@@ -529,6 +529,9 @@ export const budgetCarryoverSets = pgTable("budget_carryover_sets", {
   month: text("month").notNull(),
   amount: doublePrecision("amount").notNull().default(0),
   currency: text("currency").notNull().default("USD"),
+  // Rollover is off from this month (amount unused). A month rolls over when
+  // the latest row at or before it is not off. Migration 20261123b.
+  off: boolean("off").notNull().default(false),
 }, (t) => [
   index("idx_budget_carryover_sets_user_id").on(t.userId),
   uniqueIndex("budget_carryover_sets_category_unique").on(t.userId, t.categoryId, t.month).where(sql`(category_id IS NOT NULL)`),

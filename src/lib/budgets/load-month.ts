@@ -28,7 +28,7 @@ import { buildLoanSchedule, loanScheduleExtras, LoanValidationError } from "@/li
 import { occurrencesBetween } from "@/lib/subscriptions/schedule";
 import { advanceStaleSubscriptionDatesSafe } from "@/lib/subscriptions/advance-next-dates";
 import { todayISO } from "@/lib/utils/date";
-import { walkCarryover, type RolloverNegative } from "./carryover";
+import { rolloverOnIn, walkCarryover, type RolloverNegative } from "./carryover";
 import { debtStatus, scheduledInMonth, type ScheduleRowLike } from "./debt-line";
 import {
   automaticBudgetRole,
@@ -337,18 +337,21 @@ export async function loadLinePlans(ctx: BudgetContext, month: string): Promise<
   return out;
 }
 
-/** Carryover resets and edits per line key, in the display currency. */
-export async function loadCarrySets(ctx: BudgetContext): Promise<Map<string, Record<string, number>>> {
-  const rows = normalizeDbRows<{ category_id: number | null; group_name: string | null; month: string; amount: number; currency: string | null }>(
+/**
+ * Carryover starts, resets and edits per line key, in the display currency;
+ * null = rollover turned off from that month.
+ */
+export async function loadCarrySets(ctx: BudgetContext): Promise<Map<string, Record<string, number | null>>> {
+  const rows = normalizeDbRows<{ category_id: number | null; group_name: string | null; month: string; amount: number; currency: string | null; off: boolean }>(
     await db.execute(sql`
-      SELECT category_id, group_name, month, amount, currency FROM budget_carryover_sets WHERE user_id = ${ctx.userId}
+      SELECT category_id, group_name, month, amount, currency, off FROM budget_carryover_sets WHERE user_id = ${ctx.userId}
     `),
   );
-  const out = new Map<string, Record<string, number>>();
+  const out = new Map<string, Record<string, number | null>>();
   for (const r of rows) {
     const key = r.category_id != null ? categoryKey(Number(r.category_id)) : groupKey(r.group_name ?? "");
     const m = out.get(key) ?? {};
-    m[r.month] = round2(convertWithRateMap(num(r.amount), r.currency ?? ctx.currency, ctx.rateMap));
+    m[r.month] = r.off ? null : round2(convertWithRateMap(num(r.amount), r.currency ?? ctx.currency, ctx.rateMap));
     out.set(key, m);
   }
   return out;
@@ -552,7 +555,7 @@ function shiftDay(iso: string, days: number): string {
 }
 
 /** The month at which the carry walk for any rollover line in `ctx` must start. */
-function earliestCarryStart(ctx: BudgetContext, sets: Map<string, Record<string, number>>, month: string): string | null {
+function earliestCarryStart(ctx: BudgetContext, sets: Map<string, Record<string, number | null>>, month: string): string | null {
   let earliest: string | null = null;
   const consider = (key: string) => {
     const s = sets.get(key);
@@ -574,8 +577,21 @@ export async function loadBudgetMonth(
   currencyOverride?: string | null,
 ): Promise<BudgetMonth> {
   await refreshRuleHorizon(userId);
-  const ctx = await loadBudgetContext(userId, dek, currencyOverride);
-  const sets = await loadCarrySets(ctx);
+  const loaded = await loadBudgetContext(userId, dek, currencyOverride);
+  const sets = await loadCarrySets(loaded);
+  // Rollover is on or off per month: the latest carry set at or before this
+  // month decides, not the line's single flag (which only remembers the last
+  // switch), so turning it off in a later month leaves earlier months alone.
+  const ctx: BudgetContext = {
+    ...loaded,
+    categories: loaded.categories.map((c) => ({
+      ...c,
+      rollover: c.type === "E" && rolloverOnIn(sets.get(categoryKey(c.id)) ?? {}, month),
+    })),
+    groupSettings: new Map(
+      [...loaded.groupSettings].map(([name, gs]) => [name, { ...gs, rollover: rolloverOnIn(sets.get(groupKey(name)) ?? {}, month) }]),
+    ),
+  };
   const lastComplete = shiftMonth(ctx.currentMonth, -1);
   const avgEnd = shiftMonth(month, -1) < lastComplete ? shiftMonth(month, -1) : lastComplete;
   const avgStart = shiftMonth(avgEnd, -2);

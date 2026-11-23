@@ -7,7 +7,7 @@
  */
 import { describe, it, expect } from "vitest";
 import { applyAdjust, planFill, sourceAmount, yearlySteps, type FillLine } from "@/lib/budgets/fill";
-import { walkCarryover } from "@/lib/budgets/carryover";
+import { rolloverOnIn, walkCarryover } from "@/lib/budgets/carryover";
 import { debtStatus, scheduledInMonth } from "@/lib/budgets/debt-line";
 import { automaticBudgetRole, monthRange, parseLineKey, resolveBudgetRole } from "@/lib/budgets/lines";
 import { buildBudgetMonth, type BuildMonthInput, type MonthCategoryInput } from "@/lib/budgets/month";
@@ -107,6 +107,20 @@ describe("carryover", () => {
       carriedIn: 400,
       left: 600,
     });
+  });
+
+  it("turning rollover off in a later month leaves earlier months carrying", () => {
+    // On from August, off from October.
+    const sets = { "2026-08": 0, "2026-10": null };
+    expect(rolloverOnIn(sets, "2026-07")).toBe(false);
+    expect(rolloverOnIn(sets, "2026-09")).toBe(true);
+    expect(rolloverOnIn(sets, "2026-10")).toBe(false);
+    expect(rolloverOnIn(sets, "2027-03")).toBe(false);
+    // September still carries August's leftover; October carries nothing.
+    expect(walkCarryover({ target: "2026-09", sets, months, negative: "carry" })).toMatchObject({ carriedIn: 50, left: -50 });
+    expect(walkCarryover({ target: "2026-10", sets, months, negative: "carry" })).toMatchObject({ carriedIn: 0, left: 200, startMonth: null });
+    // Back on in November: starts again from its own 0.
+    expect(rolloverOnIn({ ...sets, "2026-11": 0 }, "2026-11")).toBe(true);
   });
 });
 
