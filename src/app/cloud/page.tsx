@@ -35,6 +35,23 @@ function CloudAuthPageInner() {
   // the /try-demo route.
   const demoPrefill = searchParams.get("demo") === "1";
   const [tab, setTab] = useState<Tab>(initialTab);
+  // GH #435: a self-hosted server can turn sign-up off (ALLOW_REGISTRATION=false).
+  // Read at runtime; until it answers, the page shows sign-up as before.
+  const [registrationOpen, setRegistrationOpen] = useState(true);
+  useEffect(() => {
+    let cancelled = false;
+    fetch("/api/auth/registration")
+      .then((r) => (r.ok ? r.json() : null))
+      .then((d) => {
+        if (cancelled || d?.open !== false) return;
+        setRegistrationOpen(false);
+        setTab("login");
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   // Login form: single 'identifier' field accepts username OR email.
   const [identifier, setIdentifier] = useState(
@@ -227,6 +244,11 @@ function CloudAuthPageInner() {
             Free forever. AGPL v3. Encrypted with your password.
           </p>
         )}
+        {!registrationOpen && initialTab === "register" && (
+          <p className="mb-6 -mt-4 rounded-lg border border-border bg-card px-4 py-3 text-sm text-muted-foreground">
+            Sign-up is turned off on this server. Ask its administrator for an account.
+          </p>
+        )}
         {tab === "login" && sessionLocked && (
           <p className="mb-6 -mt-4 rounded-lg border border-border bg-card px-4 py-3 text-sm text-muted-foreground">
             Your session was locked after a period of inactivity. Sign in again to unlock your data.
@@ -274,7 +296,8 @@ function CloudAuthPageInner() {
               </div>
             )}
 
-            {/* Tab switcher */}
+            {/* Tab switcher (hidden when this server has sign-up turned off) */}
+            {registrationOpen && (
             <div className="mb-6 flex rounded-xl border border-border bg-muted p-1">
               <button
                 onClick={() => { setTab("login"); setError(""); }}
@@ -297,6 +320,7 @@ function CloudAuthPageInner() {
                 Create Account
               </button>
             </div>
+            )}
 
             <form
               onSubmit={tab === "login" ? handleLogin : handleRegister}
@@ -444,6 +468,7 @@ function CloudAuthPageInner() {
               </button>
             </form>
 
+            {registrationOpen && (
             <p className="mt-6 text-center text-sm text-muted-foreground">
               Just looking?{" "}
               <Link
@@ -455,6 +480,7 @@ function CloudAuthPageInner() {
               </Link>
               . No signup, resets nightly.
             </p>
+            )}
           </>
         )}
       </div>

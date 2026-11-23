@@ -166,3 +166,27 @@ export function orderGroups(
     return fallbackCompare(a, b);
   });
 }
+
+/**
+ * Rows grouped by account group in the user's saved order, each with its
+ * subtotal (GH #440, Balance Sheet). Rows keep their order within a group; a
+ * blank group goes to "Other". The subtotal is rounded to cents. Pure.
+ */
+export function groupWithSubtotals<T>(
+  rows: ReadonlyArray<T>,
+  groupOf: (row: T) => string | null | undefined,
+  valueOf: (row: T) => number,
+  savedOrder: ReadonlyArray<string>,
+): { group: string; rows: T[]; subtotal: number }[] {
+  const byGroup = new Map<string, T[]>();
+  for (const row of rows) {
+    const group = (groupOf(row) ?? "").trim() || OTHER_GROUP;
+    const key = Array.from(byGroup.keys()).find((k) => k.toLowerCase() === group.toLowerCase()) ?? group;
+    byGroup.set(key, [...(byGroup.get(key) ?? []), row]);
+  }
+  return orderGroups(Array.from(byGroup.keys()), savedOrder).map((group) => {
+    const groupRows = byGroup.get(group) ?? [];
+    const subtotal = groupRows.reduce((s, r) => s + (Number(valueOf(r)) || 0), 0);
+    return { group, rows: groupRows, subtotal: Math.round(subtotal * 100) / 100 };
+  });
+}

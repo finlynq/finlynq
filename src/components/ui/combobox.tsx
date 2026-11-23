@@ -125,6 +125,11 @@ function ComboboxContent({
       >
         <ComboboxPrimitive.Popup
           data-slot="combobox-content"
+          // GH #437: Base UI's own initial focus targets the search box with
+          // `preventScroll: false`, queued before the popup is positioned, so
+          // inside a scroll-locked dialog the page behind it jumped to the top.
+          // ComboboxInput focuses itself with `preventScroll: true` instead.
+          initialFocus={false}
           className={cn(
             "relative isolate z-50 max-h-(--available-height) min-w-(--anchor-width) max-w-[24rem] origin-(--transform-origin) overflow-hidden rounded-lg bg-popover text-popover-foreground shadow-md ring-1 ring-foreground/10 duration-100 data-[side=bottom]:slide-in-from-top-2 data-[side=top]:slide-in-from-bottom-2 data-open:animate-in data-open:fade-in-0 data-open:zoom-in-95 data-closed:animate-out data-closed:fade-out-0 data-closed:zoom-out-95",
             className
@@ -139,12 +144,16 @@ function ComboboxContent({
 }
 
 /**
- * `autoFocus` is deliberate: opening the popup leaves focus on the TRIGGER
- * button, so without it you had to click the search box before typing —
- * which defeats the point of a type-ahead control (measured on
- * /settings/general: `document.activeElement` was `BUTTON[role=combobox]`
- * after opening). Keyboard users were unaffected either way (base-ui forwards
- * printable keys from the trigger), but pointer users had to click twice.
+ * The search box takes focus when the popup opens: without it you had to
+ * click the search box before typing, which defeats the point of a type-ahead
+ * control (measured on /settings/general: `document.activeElement` was
+ * `BUTTON[role=combobox]` after opening).
+ *
+ * It focuses itself with `preventScroll: true` rather than through the
+ * `autoFocus` attribute or Base UI's initial focus (switched off on the
+ * popup), both of which scroll the element into view. The popup mounts before
+ * it is positioned, so inside a scroll-locked dialog that scrolled the page
+ * behind it to the top (GH #437).
  *
  * The caller can still pass `autoFocus={false}` to opt out.
  */
@@ -154,13 +163,17 @@ function ComboboxInput({
   autoFocus = true,
   ...props
 }: ComboboxPrimitive.Input.Props) {
+  const inputRef = React.useRef<HTMLInputElement | null>(null)
+  React.useEffect(() => {
+    if (autoFocus) inputRef.current?.focus({ preventScroll: true })
+  }, [autoFocus])
   return (
     <div className="flex items-center gap-2 border-b border-border/60 px-2.5 py-2">
       <SearchIcon className="pointer-events-none size-4 shrink-0 text-muted-foreground" />
       <ComboboxPrimitive.Input
+        ref={inputRef}
         data-slot="combobox-input"
         placeholder={placeholder}
-        autoFocus={autoFocus}
         className={cn(
           "flex-1 bg-transparent text-sm text-foreground outline-none placeholder:text-muted-foreground disabled:cursor-not-allowed disabled:opacity-50",
           className

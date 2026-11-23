@@ -10,8 +10,11 @@
  *
  * Every logo is normalized in the browser to a PNG of at most 128x128 before
  * it is saved, so the server stores and serves one small, safe format and
- * needs no image library. The logo sits on a white tile in both themes, so a
- * dark-on-transparent brand mark stays visible in dark mode.
+ * needs no image library. How a logo is framed is read from its own pixels
+ * (chooseLogoTile, GH #436): a full-bleed logo fills the avatar, a
+ * letterboxed one sits on its own edge colour, a light mark on transparency
+ * gets a dark tile, and any other mark keeps the white tile so it stays
+ * visible in dark mode.
  */
 
 import { useCallback, useEffect, useRef, useState } from "react";
@@ -21,6 +24,7 @@ import { Label } from "@/components/ui/label";
 import { Globe, Loader2, Trash2, Upload } from "lucide-react";
 import { parseSaveError } from "@/lib/save-error";
 import { cn } from "@/lib/utils";
+import { chooseLogoTile, type LogoTile } from "@/lib/accounts/logo-tile";
 
 const LOGO_MAX = 128;
 
@@ -71,6 +75,26 @@ export function useAccountLogos() {
   return { versions, reload };
 }
 
+/** Frame per logo URL, so each image is read once per page load. */
+const tileCache = new Map<string, LogoTile>();
+
+function readTile(img: HTMLImageElement): LogoTile {
+  const w = img.naturalWidth;
+  const h = img.naturalHeight;
+  if (!w || !h) return { kind: "light" };
+  try {
+    const canvas = document.createElement("canvas");
+    canvas.width = w;
+    canvas.height = h;
+    const ctx = canvas.getContext("2d", { willReadFrequently: true });
+    if (!ctx) return { kind: "light" };
+    ctx.drawImage(img, 0, 0);
+    return chooseLogoTile(ctx.getImageData(0, 0, w, h).data, w, h);
+  } catch {
+    return { kind: "light" };
+  }
+}
+
 export function AccountAvatar({
   accountId,
   name,
@@ -87,16 +111,41 @@ export function AccountAvatar({
   letterClassName?: string;
 }) {
   const [failed, setFailed] = useState(false);
-  useEffect(() => setFailed(false), [logoVersion]);
+  const src = logoVersion ? `/api/accounts/${accountId}/logo?v=${logoVersion}` : "";
+  const [tile, setTile] = useState<LogoTile | null>(() => (src ? tileCache.get(src) ?? null : null));
+  useEffect(() => {
+    setFailed(false);
+    setTile(src ? tileCache.get(src) ?? null : null);
+  }, [src]);
   const letter = (name ?? "?").charAt(0).toUpperCase() || "?";
-  if (logoVersion && !failed) {
+  if (src && !failed) {
+    const kind = tile?.kind ?? "light";
+    const fill = tile?.kind === "fill" ? tile.color : null;
     return (
-      <div className={cn("shrink-0 flex items-center justify-center bg-white ring-1 ring-black/10 overflow-hidden", className)}>
+      <div
+        className={cn(
+          "shrink-0 flex items-center justify-center overflow-hidden",
+          kind === "light" && "bg-white ring-1 ring-black/10",
+          kind === "dark" && "bg-zinc-900 ring-1 ring-white/10",
+          kind === "fill" && "ring-1 ring-black/10 dark:ring-white/10",
+          className,
+        )}
+        // Background via ref, not style=, to keep inline styles off the HTML (CSP).
+        ref={(el) => {
+          if (el) el.style.backgroundColor = fill ?? "";
+        }}
+      >
         {/* eslint-disable-next-line @next/next/no-img-element */}
         <img
-          src={`/api/accounts/${accountId}/logo?v=${logoVersion}`}
+          src={src}
           alt=""
-          className="h-full w-full object-contain p-0.5"
+          className={cn("h-full w-full", kind === "bleed" ? "object-cover" : "object-contain", (kind === "light" || kind === "dark") && "p-0.5")}
+          onLoad={(e) => {
+            if (tileCache.has(src)) return;
+            const t = readTile(e.currentTarget);
+            tileCache.set(src, t);
+            setTile(t);
+          }}
           onError={() => setFailed(true)}
         />
       </div>

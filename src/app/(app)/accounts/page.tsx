@@ -252,10 +252,20 @@ export default function AccountsPage() {
       </div>
       {groups(list).map(([group, accts]) => (
         <Card key={group} size="sm">
-          <CardHeader>
+          <CardHeader className="flex flex-row items-center justify-between gap-2">
             <CardTitle className="text-xs font-medium uppercase tracking-wider text-muted-foreground">
               {group}
             </CardTitle>
+            {/* GH #440: the group's total in the display currency, over the
+                accounts shown in this card (same basis as the page totals). */}
+            {(() => {
+              const total = Math.round(accts.reduce((s, a) => s + (a.convertedBalance ?? a.balance), 0) * 100) / 100;
+              return (
+                <span className={`font-mono text-sm font-semibold mr-2 ${total >= 0 ? color : "text-rose-600"}`}>
+                  {formatCurrency(total, displayCurrency)}
+                </span>
+              );
+            })()}
           </CardHeader>
           <CardContent className="space-y-1">
             {accts.map((a) => (

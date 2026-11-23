@@ -6,7 +6,7 @@ import { useRouter } from "next/navigation";
 import { Card, CardContent } from "@/components/ui/card";
 import { formatCurrency, getCurrentMonth, getMonthLabel } from "@/lib/currency";
 import { buildTxDrillUrl } from "@/lib/transactions/drill-url";
-import { Sparkline } from "@/components/sparkline";
+import { NetWorthChangeBars } from "./_components/net-worth-change-bars";
 import { DollarSign, ArrowUpRight, ArrowDownRight, TrendingUp, CreditCard, Target, User, Upload, FileUp } from "lucide-react";
 import { motion } from "framer-motion";
 import { AnimatedNumber } from "./_components/animated-number";
@@ -415,9 +415,11 @@ export default function DashboardPage() {
                     </div>
                   </div>
 
-                  {/* Mini sparkline */}
-                  <div className="hidden md:block w-40 h-20 opacity-50 group-hover:opacity-100 transition-opacity duration-300">
-                    <Sparkline data={nwSparkline} color="#6366f1" labels={nwSparkLabels} currency={apiDisplayCurrency} />
+                  {/* GH #434: each month's change as a bar, so an ordinary
+                      month reads as clearly up or down (a sparkline of net
+                      worth itself drew a 2.7% drop as a flat line). */}
+                  <div className="hidden md:block w-56 lg:w-64 shrink-0">
+                    <NetWorthChangeBars values={nwSparkline} months={nwSparkLabels} currency={apiDisplayCurrency} />
                   </div>
                 </div>
               </CardContent>
