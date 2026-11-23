@@ -49,10 +49,9 @@ import { upsertBankTransaction } from "@/lib/bank-ledger";
 import {
   validateBankBalances,
   upsertBankBalanceAnchors,
+  anchorsFromStagedImport,
   type BalanceAnchor,
   type BalanceMismatch,
-  ANCHOR_SOURCES,
-  type AnchorSource,
 } from "@/lib/bank-ledger-balance";
 import {
   finishStatementIfFullyInLedger,
@@ -206,47 +205,8 @@ export async function sendStagedRowsToBankLedger(
   }
 
   // ─── Anchor preparation ──────────────────────────────────────────────────
-  const balanceAnchors: BalanceAnchor[] = [];
-  if (staged.boundAccountId != null) {
-    const parsed = staged.parsedAnchors;
-    if (Array.isArray(parsed)) {
-      for (const raw of parsed as unknown[]) {
-        if (!raw || typeof raw !== "object") continue;
-        const a = raw as Record<string, unknown>;
-        if (typeof a.date !== "string") continue;
-        if (typeof a.balance !== "number") continue;
-        const ccy = typeof a.currency === "string" ? a.currency : "CAD";
-        const src = typeof a.source === "string" ? a.source : "csv_column";
-        if (!(ANCHOR_SOURCES as readonly string[]).includes(src)) continue;
-        balanceAnchors.push({
-          date: a.date,
-          balance: a.balance,
-          currency: ccy,
-          source: src as AnchorSource,
-        });
-      }
-    }
-    if (
-      typeof staged.statementBalance === "number" &&
-      typeof staged.statementBalanceDate === "string"
-    ) {
-      balanceAnchors.push({
-        date: staged.statementBalanceDate,
-        balance: staged.statementBalance,
-        currency: staged.statementCurrency ?? "CAD",
-        source: "upload_form",
-      });
-    }
-  }
-  // De-dup anchors per-date, preferring upload_form when both exist.
-  const anchorByDate = new Map<string, BalanceAnchor>();
-  for (const a of balanceAnchors) {
-    const existing = anchorByDate.get(a.date);
-    if (!existing || existing.source === "upload_form") {
-      anchorByDate.set(a.date, a);
-    }
-  }
-  const dedupedAnchors = Array.from(anchorByDate.values());
+  const dedupedAnchors: BalanceAnchor[] =
+    staged.boundAccountId != null ? anchorsFromStagedImport(staged) : [];
 
   const anchorsOnlyApprove =
     staged.boundAccountId != null && dedupedAnchors.length > 0;
