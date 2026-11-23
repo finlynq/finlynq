@@ -204,6 +204,102 @@ export async function validateBankBalances(
   return mismatches;
 }
 
+/** The balance fields a staged import carries. */
+export interface StagedImportBalanceFields {
+  parsedAnchors: unknown;
+  statementBalance: number | null;
+  statementBalanceDate: string | null;
+  statementCurrency: string | null;
+}
+
+/**
+ * The balance anchors a staged import would load: its per-day parsed anchors
+ * plus the statement balance (source 'upload_form'), one per date, preferring
+ * upload_form. The ONE builder for both the approve path
+ * (`sendStagedRowsToBankLedger`) and closing an already-loaded statement
+ * (`finishStatement`).
+ */
+export function anchorsFromStagedImport(staged: StagedImportBalanceFields): BalanceAnchor[] {
+  const balanceAnchors: BalanceAnchor[] = [];
+  const parsed = staged.parsedAnchors;
+  if (Array.isArray(parsed)) {
+    for (const raw of parsed as unknown[]) {
+      if (!raw || typeof raw !== "object") continue;
+      const a = raw as Record<string, unknown>;
+      if (typeof a.date !== "string") continue;
+      if (typeof a.balance !== "number") continue;
+      const ccy = typeof a.currency === "string" ? a.currency : "CAD";
+      const src = typeof a.source === "string" ? a.source : "csv_column";
+      if (!(ANCHOR_SOURCES as readonly string[]).includes(src)) continue;
+      balanceAnchors.push({
+        date: a.date,
+        balance: a.balance,
+        currency: ccy,
+        source: src as AnchorSource,
+      });
+    }
+  }
+  if (
+    typeof staged.statementBalance === "number" &&
+    typeof staged.statementBalanceDate === "string"
+  ) {
+    balanceAnchors.push({
+      date: staged.statementBalanceDate,
+      balance: staged.statementBalance,
+      currency: staged.statementCurrency ?? "CAD",
+      source: "upload_form",
+    });
+  }
+  // De-dup anchors per-date, preferring upload_form when both exist.
+  const anchorByDate = new Map<string, BalanceAnchor>();
+  for (const a of balanceAnchors) {
+    const existing = anchorByDate.get(a.date);
+    if (!existing || existing.source === "upload_form") {
+      anchorByDate.set(a.date, a);
+    }
+  }
+  return Array.from(anchorByDate.values());
+}
+
+/**
+ * Insert anchors only for dates that have none yet; never overwrites. Used when
+ * a statement is closed because its rows are already in the bank ledger: that
+ * statement may be OLDER than one already loaded, so its balance must not
+ * replace a newer balance for the same date. Returns how many were inserted.
+ */
+export async function insertMissingBankBalanceAnchors(
+  userId: string,
+  accountId: number,
+  anchors: BalanceAnchor[],
+  filename: string | null,
+  uploadBatchId: string | null,
+): Promise<number> {
+  if (anchors.length === 0) return 0;
+  const inserted = await db
+    .insert(schema.bankDailyBalances)
+    .values(
+      anchors.map((a) => ({
+        userId,
+        accountId,
+        date: a.date,
+        balance: a.balance,
+        currency: a.currency,
+        source: a.source,
+        sourceFilenames: filename ? [filename] : [],
+        uploadBatchId,
+      })),
+    )
+    .onConflictDoNothing({
+      target: [
+        schema.bankDailyBalances.userId,
+        schema.bankDailyBalances.accountId,
+        schema.bankDailyBalances.date,
+      ],
+    })
+    .returning({ date: schema.bankDailyBalances.date });
+  return inserted.length;
+}
+
 /**
  * Upsert anchors into bank_daily_balances. ON CONFLICT (user, account,
  * date) DO UPDATE — newer balance wins, last_seen_at bumps,

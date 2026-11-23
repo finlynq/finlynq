@@ -30,13 +30,14 @@
  */
 
 import { db, schema, withDbTransaction } from "@/db";
-import { and, eq, inArray, ne } from "drizzle-orm";
+import { and, eq, inArray, ne, sql } from "drizzle-orm";
 import {
   checkDuplicates,
   checkFitIdDuplicates,
   checkFitIdDuplicatesForAccount,
 } from "@/lib/import-hash";
 import { encryptStagingMeta, decryptStagingMeta } from "@/lib/crypto/staging-metadata";
+import { anchorsFromStagedImport, insertMissingBankBalanceAnchors } from "@/lib/bank-ledger-balance";
 
 /** A staged row reduced to the fields the resolution rule reads. */
 export interface ResolutionRow {
@@ -195,6 +196,10 @@ export async function finishStatement(
       boundAccountId: schema.stagedImports.boundAccountId,
       originalFilename: schema.stagedImports.originalFilename,
       encryptionTier: schema.stagedImports.encryptionTier,
+      parsedAnchors: schema.stagedImports.parsedAnchors,
+      statementBalance: schema.stagedImports.statementBalance,
+      statementBalanceDate: schema.stagedImports.statementBalanceDate,
+      statementCurrency: schema.stagedImports.statementCurrency,
     })
     .from(schema.stagedImports)
     .where(
@@ -230,23 +235,48 @@ export async function finishStatement(
   const sourceLabel =
     staged.source === "connector" ? "connector" : staged.source === "email" ? "email" : "upload";
 
+  // The statement's bank-reported balance still belongs in the ledger, even
+  // though its rows are already there. Every bank-feed sync carries one, and
+  // closing a statement used to drop it, so an account synced daily only had a
+  // balance on the days its file was approved by hand (2026-11-23). Only dates
+  // with no balance yet are filled: this statement may be older than one
+  // already loaded, and an older balance must not replace a newer one.
+  const anchors = anchorsFromStagedImport(staged);
+
   await withDbTransaction(async () => {
+    let batchId = existing?.id ?? null;
     if (!existing) {
-      await db.insert(schema.bankUploadBatches).values({
-        userId,
-        accountId: staged.boundAccountId as number,
-        templateId: null,
-        source: sourceLabel,
-        mode: "detailed",
-        filename: encryptStagingMeta(plainFilename, "user", dek),
-        encryptionTier: "user",
-        // Zero rows and zero anchors is the marker: nothing was loaded because
-        // everything was already in the ledger. A future retention policy can
-        // target exactly these.
-        rowCount: 0,
-        anchorCount: 0,
-        stagedImportId,
-      });
+      const [batch] = await db
+        .insert(schema.bankUploadBatches)
+        .values({
+          userId,
+          accountId: staged.boundAccountId as number,
+          templateId: null,
+          source: sourceLabel,
+          mode: "detailed",
+          filename: encryptStagingMeta(plainFilename, "user", dek),
+          encryptionTier: "user",
+          // Zero rows is the marker: nothing was loaded because every row was
+          // already in the ledger. A future retention policy can target these.
+          rowCount: 0,
+          anchorCount: 0,
+          stagedImportId,
+        })
+        .returning({ id: schema.bankUploadBatches.id });
+      batchId = batch.id;
+    }
+    const loadedAnchors = await insertMissingBankBalanceAnchors(
+      userId,
+      staged.boundAccountId as number,
+      anchors,
+      staged.originalFilename ?? null,
+      batchId,
+    );
+    if (loadedAnchors > 0 && batchId) {
+      await db
+        .update(schema.bankUploadBatches)
+        .set({ anchorCount: sql`${schema.bankUploadBatches.anchorCount} + ${loadedAnchors}` })
+        .where(eq(schema.bankUploadBatches.id, batchId));
     }
     await db
       .update(schema.stagedImports)
