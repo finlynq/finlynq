@@ -10,6 +10,17 @@
  */
 
 export async function registerNodeJobs(): Promise<void> {
+  // A stop signal must not wait forever on a request that stays open: Next's
+  // graceful stop has no limit, and systemd SIGKILLs after 90s with the site
+  // down the whole time (prod 2026-11-20 + 2026-11-23). Installed first and
+  // regardless of the database, so it covers every deployment.
+  try {
+    const { installShutdownWatchdog } = await import("./lib/shutdown-watchdog");
+    installShutdownWatchdog();
+  } catch (err) {
+    console.error("[instrumentation] Failed to install shutdown watchdog:", err);
+  }
+
   const databaseUrl = process.env.PF_DATABASE_URL || process.env.DATABASE_URL;
   if (!databaseUrl) {
     // Self-hosted mode — SQLite adapter is initialized on first unlock via the UI.
