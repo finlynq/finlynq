@@ -11,7 +11,7 @@ import { walkCarryover } from "@/lib/budgets/carryover";
 import { debtStatus, scheduledInMonth } from "@/lib/budgets/debt-line";
 import { automaticBudgetRole, monthRange, parseLineKey, resolveBudgetRole } from "@/lib/budgets/lines";
 import { buildBudgetMonth, type BuildMonthInput, type MonthCategoryInput } from "@/lib/budgets/month";
-import { incomeAllocation, monthProgress } from "@/lib/budgets/month-view";
+import { incomeAllocation, monthProgress, spendingHasCarry } from "@/lib/budgets/month-view";
 
 describe("fill", () => {
   const line: FillLine = {
@@ -183,6 +183,20 @@ describe("page summary helpers", () => {
     const noIncome = incomeAllocation({ plannedIncome: 0, plannedSpending: 800, plannedDebt: 0 });
     expect(noIncome.segments.map((s) => s.key)).toEqual(["spending"]);
     expect(noIncome.incomeMark).toBe(0);
+  });
+
+  it("shows the Carried in column only when a line carried something into the month", () => {
+    const line = (carriedIn: number | null) => ({ carriedIn });
+    const group = (byGroup: boolean, carriedIn: number | null, lines: Array<{ carriedIn: number | null }>) => ({ byGroup, carriedIn, lines });
+    expect(spendingHasCarry([])).toBe(false);
+    // Rollover on but nothing carried (0) and lines with no rollover (null).
+    expect(spendingHasCarry([group(false, 0, [line(0), line(null)])])).toBe(false);
+    expect(spendingHasCarry([group(false, null, [line(null)]), group(false, 821.92, [line(821.92)])])).toBe(true);
+    // Carried overspending counts too.
+    expect(spendingHasCarry([group(false, -40, [line(-40)])])).toBe(true);
+    // A one-line group carries as a whole; its categories are not looked at.
+    expect(spendingHasCarry([group(true, 0, [line(50)])])).toBe(false);
+    expect(spendingHasCarry([group(true, 120, [line(null)])])).toBe(true);
   });
 });
 

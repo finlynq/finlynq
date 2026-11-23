@@ -62,3 +62,20 @@ export function incomeAllocation(s: { plannedIncome: number; plannedSpending: nu
     overPlanned: planned - income > 0.005 ? planned - income : 0,
   };
 }
+
+type CarryFields = { carriedIn: number | null };
+type CarryGroup = CarryFields & { byGroup: boolean; lines: readonly CarryFields[] };
+
+/** A line or one-line group brought money (or overspending) in from last month. */
+export function hasCarriedIn(x: CarryFields): boolean {
+  return x.carriedIn != null && Math.abs(x.carriedIn) > 0.005;
+}
+
+/**
+ * Whether the Spending section shows its "Carried in" column: when any line
+ * carried an amount into this month. A group budgeted as one line carries as a
+ * whole, so its categories are not looked at.
+ */
+export function spendingHasCarry(groups: readonly CarryGroup[]): boolean {
+  return groups.some((g) => (g.byGroup ? hasCarriedIn(g) : g.lines.some(hasCarriedIn)));
+}
