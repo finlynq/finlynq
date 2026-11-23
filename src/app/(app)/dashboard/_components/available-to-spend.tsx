@@ -71,7 +71,9 @@ export function AvailableToSpend({ last, current, currency = "USD" }: Props) {
       <Card className="h-full card-hover relative overflow-hidden">
         <div className="absolute -bottom-12 -right-12 w-32 h-32 rounded-full bg-cyan-500/5 blur-2xl pointer-events-none" />
         <CardContent className="relative pt-5 pb-5 px-5">
-          <div className="flex items-start justify-between gap-2 mb-4">
+          {/* flex-wrap: in the 3-column row at lg the card is ~225px, narrower
+              than title + switch, so the switch drops to its own line. */}
+          <div className="flex flex-wrap items-start justify-between gap-2 mb-4">
             <div className="flex items-center gap-2.5">
               <div className="flex h-8 w-8 items-center justify-center rounded-xl bg-cyan-100 text-cyan-600 dark:bg-cyan-950/60 dark:text-cyan-400">
                 <Wallet className="h-4 w-4" />

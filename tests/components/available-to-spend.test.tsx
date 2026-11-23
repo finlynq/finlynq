@@ -80,6 +80,12 @@ describe("AvailableToSpend card", () => {
     expect(screen.getByRole("button", { name: "This month" }).getAttribute("aria-pressed")).toBe("true");
   });
 
+  it("the header wraps so the switch fits a narrow card", () => {
+    render(<AvailableToSpend last={october} current={november} currency="USD" />);
+    const header = screen.getByRole("group", { name: "Month shown" }).parentElement!;
+    expect(header.className).toContain("flex-wrap");
+  });
+
   it("with no complete month yet, shows the current month and no switch", () => {
     render(<AvailableToSpend last={null} current={november} currency="USD" />);
     expect(screen.getByText(`${getMonthLabel("2026-11")} so far`)).toBeTruthy();
