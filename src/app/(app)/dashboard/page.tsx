@@ -415,12 +415,13 @@ export default function DashboardPage() {
                     </div>
                   </div>
 
-                  {/* GH #434: each month's change as a bar, so an ordinary
-                      month reads as clearly up or down (a sparkline of net
-                      worth itself drew a 2.7% drop as a flat line). */}
-                  <div className="hidden md:block w-56 lg:w-64 shrink-0">
-                    <NetWorthChangeBars values={nwSparkline} months={nwSparkLabels} currency={apiDisplayCurrency} />
-                  </div>
+                </div>
+                {/* GH #434: each month's change as a bar, so an ordinary month
+                    reads as clearly up or down (a sparkline of net worth itself
+                    drew a 2.7% drop as a flat line). Full card width under the
+                    number, so a six-figure balance never runs into it. */}
+                <div className="mt-5">
+                  <NetWorthChangeBars values={nwSparkline} months={nwSparkLabels} currency={apiDisplayCurrency} />
                 </div>
               </CardContent>
             </Card>

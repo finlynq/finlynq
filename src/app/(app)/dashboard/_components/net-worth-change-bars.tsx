@@ -50,10 +50,10 @@ export function NetWorthChangeBars({
   if (data.length === 0) return null;
   return (
     <div className="w-full">
-      <p className="text-[10px] font-medium text-muted-foreground text-right mb-1">
+      <p className="text-[10px] font-medium text-muted-foreground mb-1">
         Monthly change, last {data.length} {data.length === 1 ? "month" : "months"}
       </p>
-      <div className="h-20 w-full">
+      <div className="h-16 w-full">
         <ResponsiveContainer width="100%" height="100%" minWidth={0}>
           <BarChart data={data} margin={{ top: 2, right: 2, bottom: 2, left: 2 }}>
             <ReferenceLine y={0} stroke="currentColor" strokeOpacity={0.25} />

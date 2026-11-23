@@ -141,8 +141,10 @@ export function AccountAvatar({
           alt=""
           className={cn("h-full w-full", kind === "bleed" ? "object-cover" : "object-contain", (kind === "light" || kind === "dark") && "p-0.5")}
           onLoad={(e) => {
-            if (tileCache.has(src)) return;
-            const t = readTile(e.currentTarget);
+            // Another avatar showing the same logo may have read it already;
+            // take its answer rather than skipping (that left this one framed
+            // with the white tile).
+            const t = tileCache.get(src) ?? readTile(e.currentTarget);
             tileCache.set(src, t);
             setTile(t);
           }}
