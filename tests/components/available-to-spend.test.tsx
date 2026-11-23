@@ -55,19 +55,23 @@ describe("AvailableToSpend card", () => {
   beforeEach(() => window.localStorage.clear());
   afterEach(cleanup);
 
+  const shown = () => screen.getByTestId("spend-month-shown").textContent;
+
   it("defaults to last month, worded as a closed month", () => {
     render(<AvailableToSpend last={october} current={november} currency="USD" />);
     expect(screen.getByText(`Left over in ${getMonthLabel("2026-10")}`)).toBeTruthy();
     expect(screen.getByText("Spent")).toBeTruthy();
     expect(screen.getByText("Left over")).toBeTruthy();
     expect(screen.queryByText("Spent so far")).toBeNull();
-    expect(screen.getByRole("button", { name: "Last month" }).getAttribute("aria-pressed")).toBe("true");
+    expect(shown()).toBe("Last month");
+    expect(screen.getByRole("button", { name: "Show this month" })).toBeTruthy();
     expect(screen.getAllByText("$800.00")).toHaveLength(2);
   });
 
-  it("This month shows the current month so far and is remembered", () => {
+  it("the icon switches to this month, the text says so, and it is remembered", () => {
     render(<AvailableToSpend last={october} current={november} currency="USD" />);
-    fireEvent.click(screen.getByRole("button", { name: "This month" }));
+    fireEvent.click(screen.getByRole("button", { name: "Show this month" }));
+    expect(shown()).toBe("This month");
     expect(screen.getByText(`${getMonthLabel("2026-11")} so far`)).toBeTruthy();
     expect(screen.getByText("Spent so far")).toBeTruthy();
     expect(screen.getByText("Remaining")).toBeTruthy();
@@ -76,19 +80,29 @@ describe("AvailableToSpend card", () => {
 
     cleanup();
     render(<AvailableToSpend last={october} current={november} currency="USD" />);
+    expect(shown()).toBe("This month");
     expect(screen.getByText(`${getMonthLabel("2026-11")} so far`)).toBeTruthy();
-    expect(screen.getByRole("button", { name: "This month" }).getAttribute("aria-pressed")).toBe("true");
+
+    // ...and back again.
+    fireEvent.click(screen.getByRole("button", { name: "Show last month" }));
+    expect(shown()).toBe("Last month");
+    expect(window.localStorage.getItem(SPEND_MONTH_STORAGE_KEY)).toBe("last");
   });
 
-  it("the header wraps so the switch fits a narrow card", () => {
+  it("the switch is a small icon button with the month shown next to it; the header wraps on a narrow card", () => {
     render(<AvailableToSpend last={october} current={november} currency="USD" />);
-    const header = screen.getByRole("group", { name: "Month shown" }).parentElement!;
-    expect(header.className).toContain("flex-wrap");
+    const button = screen.getByRole("button", { name: "Show this month" });
+    expect(button.className.split(/\s+/)).toContain("size-6");
+    expect(button.textContent).toBe("");
+    expect(button.querySelector("svg")).toBeTruthy();
+    expect(button.nextElementSibling?.textContent).toBe("Last month");
+    expect(button.parentElement!.parentElement!.className).toContain("flex-wrap");
   });
 
   it("with no complete month yet, shows the current month and no switch", () => {
     render(<AvailableToSpend last={null} current={november} currency="USD" />);
     expect(screen.getByText(`${getMonthLabel("2026-11")} so far`)).toBeTruthy();
-    expect(screen.queryByRole("button", { name: "Last month" })).toBeNull();
+    expect(screen.queryByRole("button")).toBeNull();
+    expect(screen.queryByTestId("spend-month-shown")).toBeNull();
   });
 });

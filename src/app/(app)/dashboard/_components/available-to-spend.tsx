@@ -10,18 +10,13 @@ import {
   type SpendMonthFigures,
   type SpendMonthMode,
 } from "@/lib/dashboard/spend-month";
-import { Wallet } from "lucide-react";
+import { ArrowLeftRight, Wallet } from "lucide-react";
 import { motion } from "framer-motion";
 
 const itemVariants = {
   hidden: { opacity: 0, y: 16 },
   visible: { opacity: 1, y: 0, transition: { duration: 0.4, ease: "easeOut" as const } },
 };
-
-const MODE_OPTIONS: { key: SpendMonthMode; label: string }[] = [
-  { key: "last", label: "Last month" },
-  { key: "current", label: "This month" },
-];
 
 type Props = {
   /** Last complete month; null when there is none yet (then only the current month shows). */
@@ -65,14 +60,15 @@ export function AvailableToSpend({ last, current, currency = "USD" }: Props) {
   const subtitle = showingCurrent ? `${monthLabel} so far` : `Left over in ${monthLabel}`;
   const spentLabel = showingCurrent ? "Spent so far" : "Spent";
   const totalLabel = showingCurrent ? "Remaining" : "Left over";
+  const switchLabel = showingCurrent ? "Show last month" : "Show this month";
 
   return (
     <motion.div variants={itemVariants}>
       <Card className="h-full card-hover relative overflow-hidden">
         <div className="absolute -bottom-12 -right-12 w-32 h-32 rounded-full bg-cyan-500/5 blur-2xl pointer-events-none" />
         <CardContent className="relative pt-5 pb-5 px-5">
-          {/* flex-wrap: in the 3-column row at lg the card is ~225px, narrower
-              than title + switch, so the switch drops to its own line. */}
+          {/* flex-wrap: in the 3-column row at lg the card is ~225px, so the
+              switch drops to its own line when title + switch don't fit. */}
           <div className="flex flex-wrap items-start justify-between gap-2 mb-4">
             <div className="flex items-center gap-2.5">
               <div className="flex h-8 w-8 items-center justify-center rounded-xl bg-cyan-100 text-cyan-600 dark:bg-cyan-950/60 dark:text-cyan-400">
@@ -84,19 +80,20 @@ export function AvailableToSpend({ last, current, currency = "USD" }: Props) {
               </div>
             </div>
             {last && (
-              <div className="flex items-center gap-1" role="group" aria-label="Month shown">
-                {MODE_OPTIONS.map((o) => (
-                  <Button
-                    key={o.key}
-                    size="sm"
-                    variant={mode === o.key ? "default" : "outline"}
-                    className="h-6 px-2 text-[11px]"
-                    aria-pressed={mode === o.key}
-                    onClick={() => choose(o.key)}
-                  >
-                    {o.label}
-                  </Button>
-                ))}
+              <div className="flex items-center gap-1">
+                <Button
+                  size="icon-xs"
+                  variant="ghost"
+                  className="text-muted-foreground hover:text-foreground"
+                  aria-label={switchLabel}
+                  title={switchLabel}
+                  onClick={() => choose(showingCurrent ? "last" : "current")}
+                >
+                  <ArrowLeftRight />
+                </Button>
+                <span className="text-[11px] font-medium text-muted-foreground" data-testid="spend-month-shown">
+                  {showingCurrent ? "This month" : "Last month"}
+                </span>
               </div>
             )}
           </div>
