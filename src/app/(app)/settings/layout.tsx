@@ -29,6 +29,7 @@ import {
   Upload,
   Landmark,
   NotebookPen,
+  Tags,
 } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 
@@ -43,6 +44,8 @@ const NAV_ITEMS: NavItem[] = [
   // FINLYNQ-84 — rules moved out of /settings/categorization into their own
   // sub-page with a multi-condition + multi-action editor.
   { href: "/settings/rules", label: "Rules", icon: Zap },
+  // Merge / rename / remove payees and tags (2026-11-24).
+  { href: "/settings/payees-tags", label: "Payees & tags", icon: Tags },
   { href: "/settings/import", label: "Import", icon: Upload },
   // SimpleFIN bank feed — automated transaction pull (on-demand sync).
   { href: "/settings/bank-feeds", label: "Bank feeds", icon: Landmark },
