@@ -38,11 +38,97 @@ export type Release = {
 
 export const RELEASES: Release[] = [
   {
+    version: "3.7.0",
+    slug: "v3.7.0",
+    name: "Finlynq v3.7.0",
+    date: "2026-11-24",
+    current: true,
+    tagline:
+      "Finlynq v3.7.0 adds payee and tag suggestions with a cleanup page, saved reports and views, AI guidance notes, growth goals, account logos and Gemini support.",
+    summary: [
+      "Finlynq v3.7.0 collects everything shipped since v3.6.0. The headline is cleaner data: the app now suggests the payees and tags you already use as you type, and a new Payees & tags page merges the duplicates that built up over the years.",
+      "Finlynq is an open-source (AGPL v3) personal finance app with a first-party Model Context Protocol (MCP) server, so you can track your money in the app and analyze it from Claude, ChatGPT, Gemini, Cursor, or any MCP-compatible assistant.",
+    ],
+    sections: [
+      {
+        heading: "Payees, tags and notes",
+        items: [
+          "The Payee field suggests payees you have used before as you type, and picking one fills in the category you last used with it.",
+          "Tag fields suggest your existing tags with how often each is used, show finished tags as chips, and point out a new tag that is close to one you already have, such as Vacations next to Vacation.",
+          "New page, Settings > Payees & tags: every payee and tag with how many transactions use it, groups of likely duplicates, and Merge, Rename and Remove. A payee merge can also rename the old spelling on future imports.",
+          "Move to note: text that is not really a payee, such as Transfer to Savings, moves into the note in one step, and a note you already wrote is kept.",
+          "New transfers, swaps, opening balances and loan interest entries put their description in the note and leave the payee for who you actually paid.",
+          "These changes apply to your transactions only. What your bank sent is never changed.",
+        ],
+      },
+      {
+        heading: "Reports and dashboard",
+        items: [
+          "Save a report or a Transactions view under a name and open it again later, with date ranges like This year that move with the calendar. One Transactions view can open by default.",
+          "Reports can be filtered by tag.",
+          "The Cash Flow diagram and Year over Year report are available to everyone. Cash Flow pools your income first, then splits it into spending and surplus, with categories grouped.",
+          "The category view can group by year and show all of a category's history.",
+          "Split transactions count under each split's own category in every report.",
+          "The Net Worth line fills its card, scaled to your range so a month's change is visible, and shows each month's value on hover.",
+          "Monthly Income, Expenses, Budgets and Available to Spend each switch between last month and this month on their own.",
+          "Budgets show a Carried in column when money rolled over, and turning rollover off in one month leaves earlier months alone.",
+        ],
+      },
+      {
+        heading: "Accounts, goals and subscriptions",
+        items: [
+          "Give an account a logo, fetched from the bank's website or uploaded, instead of the letter.",
+          "Account groups show their subtotal on the Accounts page and the Balance Sheet, and a credit card you overpaid now lowers your liabilities instead of adding to them.",
+          "Growth goals: measure a goal by how much an account grows from a start date, not by its whole balance.",
+          "Mark a detected subscription as Not a subscription and it stops being suggested.",
+          "Duplicate a transaction to enter a similar one quickly.",
+        ],
+      },
+      {
+        heading: "Imports and bank feeds",
+        items: [
+          "Import opens on an overview of every account with something waiting, and Auto-pilot and Approve-each accounts can be worked through in one list.",
+          "Pending card charges from a SimpleFIN bank feed show on the account's page. They never count in a balance until the bank posts them.",
+          "Bank feeds sync when you open the app, and the false 90-day warning on every sync is gone.",
+          "A statement line is no longer skipped as already imported just because you typed a transaction of the same amount by hand.",
+          "A statement's closing balance is kept even when its transactions were already loaded.",
+        ],
+      },
+      {
+        heading: "AI assistants (MCP)",
+        items: [
+          "AI guidance: Finlynq's guides plus your own notes about your money, which an assistant reads before it starts. Edit them in Settings > AI guidance or on your phone.",
+          "Gemini can connect to Finlynq from the Gemini web app, and the connection guide has a Gemini tab.",
+          "An assistant can record income received as shares, create a cash sleeve, bring in prices for securities Finlynq cannot price, and open your saved reports and views.",
+          "Transactions an assistant records from another system can carry that system's id, so the same charge is never recorded twice.",
+          "58 tools.",
+        ],
+      },
+      {
+        heading: "Mobile apps",
+        items: [
+          "Android 1.0.34, on Google Play: a redesigned Budgets screen, budget rules, editing a payment on a loan schedule, and your AI guidance notes.",
+          "Payee and tag suggestions and the Payees & tags screen are in version 1.0.35, in Google Play review and on its way to the App Store as of this release, together with everything above for iPhone.",
+        ],
+      },
+      {
+        heading: "Self-hosting and fixes",
+        items: [
+          "Self-hosters can turn off public sign-up, and Docker images are published for ARM servers (linux/arm64) as well.",
+          "Crypto prices are right for coins Yahoo lists under a different ticker, such as Arbitrum, Aptos, Sui, Uniswap and Polygon.",
+          "Small currencies like the Uzbek som keep their exact rate even early on a day with no closing price yet.",
+          "Opening a picker in the Edit transaction dialog no longer scrolls the page behind it.",
+        ],
+      },
+    ],
+    githubUrl: "https://github.com/finlynq/finlynq/releases/tag/v3.7.0",
+  },
+  {
     version: "3.6.0",
     slug: "v3.6.0",
     name: "Finlynq v3.6.0",
     date: "2026-11-10",
-    current: true,
+    current: false,
     tagline:
       "Finlynq v3.6.0 rebuilds Budgets as a cash-flow plan with rules that fill future months, adds phone widgets, and makes small-currency rates exact.",
     summary: [
