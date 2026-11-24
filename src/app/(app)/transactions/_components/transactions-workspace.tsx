@@ -1236,7 +1236,7 @@ export function TransactionsWorkspace({
               <Input className="h-7 text-xs w-44" placeholder="New note" value={bulkNote} onChange={(e) => setBulkNote(e.target.value)} />
             )}
             {bulkAction === "update_tags" && (
-              <TagInput className="h-7 text-xs w-44" placeholder="New tags" value={bulkTags} onValueChange={setBulkTags} hideNearDuplicateNote />
+              <TagInput className="min-h-7 w-56 py-0.5 text-xs md:text-xs" placeholder="New tags" value={bulkTags} onValueChange={setBulkTags} hideNearDuplicateNote />
             )}
             <Button
               size="sm"

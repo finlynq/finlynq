@@ -467,7 +467,6 @@ export function StagedRowEditor({
               void save("tags", { tags: local.tags ?? "" });
             }
           }}
-          className="h-8"
           placeholder="comma-separated"
         />
       </div>

@@ -247,7 +247,7 @@ export function SplitDialog({
                 <TagInput
                   value={row.tags}
                   onValueChange={(v) => updateRow(i, "tags", v)}
-                  className="h-7 text-xs"
+                  className="min-h-7 py-0.5 text-xs md:text-xs"
                   placeholder="Tags"
                   hideNearDuplicateNote
                 />
