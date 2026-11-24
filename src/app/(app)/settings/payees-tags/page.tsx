@@ -377,7 +377,7 @@ function NamesPanel({ kind }: { kind: Kind }) {
           toNote ? (
             <span>
               Move {toNote.length === 1 ? <>&ldquo;{toNote[0].name}&rdquo;</> : plural(toNote.length, "payee", "payees")} into
-              the note of {plural(toNote.reduce((n, i) => n + i.count, 0), "transaction", "transactions")} and leave their
+              the note of {plural(toNote.reduce((n, i) => n + i.count, 0), "transaction", "transactions")}{" "}and leave their
               payee empty. A note they already have is kept after it. Use this for text that is not a payee, like
               &ldquo;Transfer to Savings&rdquo;. Bank statement rows are not changed.
             </span>
