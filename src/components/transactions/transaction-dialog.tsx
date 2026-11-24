@@ -40,6 +40,7 @@ import {
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { TagInput } from "@/components/ui/tag-input";
+import { PayeeInput } from "@/components/ui/payee-input";
 import { Label } from "@/components/ui/label";
 import {
   Select,
@@ -1378,7 +1379,22 @@ export function TransactionDialog({
             <div className="grid grid-cols-2 gap-4">
               <div className="space-y-1.5">
                 <Label>Payee</Label>
-                <Input value={form.payee} onChange={(e) => setForm({ ...form, payee: e.target.value })} />
+                <PayeeInput
+                  value={form.payee}
+                  onValueChange={(v) => setForm((f) => ({ ...f, payee: v }))}
+                  onPick={(p) =>
+                    // A picked payee brings the category last used with it,
+                    // but only into an EMPTY category the list still has.
+                    setForm((f) => ({
+                      ...f,
+                      payee: p.name,
+                      categoryId:
+                        !f.categoryId && p.categoryId != null && categories.some((c) => c.id === p.categoryId)
+                          ? String(p.categoryId)
+                          : f.categoryId,
+                    }))
+                  }
+                />
               </div>
               <div className="space-y-1.5">
                 <Label>Currency</Label>

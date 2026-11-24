@@ -30,6 +30,7 @@ import type { BudgetRole } from "../../src/lib/budgets/lines";
 import { getDisplayCurrency } from "../../src/lib/fx-service";
 import { splitMismatch, splitMismatchMessage } from "../../src/lib/transactions/split-balance";
 import { normalizeExternalId } from "../../src/lib/transactions/external-id";
+import { rememberPayee, rememberPayeeIfChanged } from "../../src/lib/payees/store";
 import {
   q,
   text,
@@ -891,6 +892,8 @@ export function registerTransactionsTools(server: McpServer, ctx: PgToolContext)
       );
 
       invalidateUserTxCache(userId);
+      // Keep the Payee field's suggestion list current (never fails the write).
+      await rememberPayee(userId, dek, payee, catId ?? null);
 
       // Portfolio lot tracking — open/close a lot for any row touching a
       // holding with non-zero quantity. Soft-fails internally; never
@@ -1451,6 +1454,7 @@ export function registerTransactionsTools(server: McpServer, ctx: PgToolContext)
             dek,
           );
           const newTxId = insRow?.id != null ? Number(insRow.id) : null;
+          await rememberPayee(userId, dek, t.payee, catId ?? null);
           if (newTxId != null) {
             committed.push({
               newTransactionId: newTxId,
@@ -1897,6 +1901,7 @@ export function registerTransactionsTools(server: McpServer, ctx: PgToolContext)
       }
       if (payee !== undefined) {
         const v = dek ? encryptField(dek, payee) : payee;
+        await rememberPayeeIfChanged(userId, dek, id, payee, catId ?? existingCategoryId);
         await db.execute(sql`UPDATE transactions SET payee = ${v}, updated_at = NOW() WHERE id = ${id} AND user_id = ${userId}`);
         fieldsUpdated.push("payee");
       }

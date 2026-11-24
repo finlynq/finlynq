@@ -725,6 +725,23 @@ export const subscriptionDismissals = pgTable("subscription_dismissals", {
   uniqueIndex("subscription_dismissals_user_lookup_uq").on(t.userId, t.payeeLookup),
 ]);
 
+// 2026-11-24: the payees a user typed or an assistant recorded, behind the
+// Payee field's suggestions (imports are left out). name_ct is DEK-encrypted;
+// name_lookup is the nameLookup HMAC of the normalized name. An index for
+// suggestions only: nothing totals from it. Store: lib/payees/store.ts.
+export const payees = pgTable("payees", {
+  id: serial("id").primaryKey(),
+  userId: text("user_id").notNull(),
+  nameCt: text("name_ct").notNull(),
+  nameLookup: text("name_lookup").notNull(),
+  useCount: integer("use_count").notNull().default(1),
+  lastCategoryId: integer("last_category_id").references(() => categories.id, { onDelete: "set null" }),
+  lastUsedAt: timestamp("last_used_at", { withTimezone: true }).notNull().defaultNow(),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+}, (t) => [
+  uniqueIndex("payees_user_lookup_uq").on(t.userId, t.nameLookup),
+]);
+
 // GH #427 (2026-11-21): saved reports and saved Transactions views. One row
 // per saved view; name AND config are encrypted with the user's DEK (the
 // config holds account ids, tag names and search text). name_lookup is the
