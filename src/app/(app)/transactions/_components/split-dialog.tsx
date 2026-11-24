@@ -11,6 +11,7 @@ import { useEffect, useState } from "react";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { TagInput } from "@/components/ui/tag-input";
 import { Combobox, type ComboboxItemShape } from "@/components/ui/combobox";
 import { useDropdownOrder } from "@/components/dropdown-order-provider";
 import { Badge } from "@/components/ui/badge";
@@ -243,11 +244,12 @@ export function SplitDialog({
                   className="h-7 text-xs"
                   placeholder="Note"
                 />
-                <Input
+                <TagInput
                   value={row.tags}
-                  onChange={(e) => updateRow(i, "tags", e.target.value)}
+                  onValueChange={(v) => updateRow(i, "tags", v)}
                   className="h-7 text-xs"
                   placeholder="Tags"
+                  hideNearDuplicateNote
                 />
                 <Button
                   variant="ghost"

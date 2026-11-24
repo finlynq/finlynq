@@ -23,6 +23,7 @@ import {
 } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { TagInput } from "@/components/ui/tag-input";
 import { Label } from "@/components/ui/label";
 import {
   Select,
@@ -527,9 +528,9 @@ export default function SellForm() {
               Tags{" "}
               <span className="text-muted-foreground text-xs">(optional)</span>
             </Label>
-            <Input
+            <TagInput
               value={tags}
-              onChange={(e) => setTags(e.target.value)}
+              onValueChange={setTags}
               placeholder="tag1, tag2"
             />
           </div>

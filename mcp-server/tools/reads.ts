@@ -216,10 +216,11 @@ export function registerReadsTools(server: McpServer, ctx: PgToolContext) {
       tags: z.string().optional().describe("Tag to search for (partial match)"),
       account_id: z.number().int().optional().describe("Filter to transactions in this accounts.id (FK fast-path; useful for dedup against blank-payee bank-imported transfers where text search misses)."),
       portfolio_holding_id: z.number().int().optional().describe("Filter to transactions bound to this portfolio_holdings.id (FK fast-path; cheaper than substring search)"),
+      external_id: z.string().optional().describe("Exact match on the id another system gave the charge (set through manage_transactions)."),
       limit: z.number().optional().describe("Max results (default 50)"),
       reportingCurrency: z.string().optional().describe("ISO code; if set, each row gets a reportingAmount converted to this currency. Defaults to user's display currency."),
     },
-    async ({ payee, min_amount, max_amount, start_date, end_date, category, tags, account_id, portfolio_holding_id, limit, reportingCurrency }) => {
+    async ({ payee, min_amount, max_amount, start_date, end_date, category, tags, account_id, portfolio_holding_id, external_id, limit, reportingCurrency }) => {
       const lim = limit ?? 50;
       // Push amount/date/category to SQL; payee/tags filter must happen in memory
       // after decryption when the data is encrypted. Fetch a larger window then
@@ -240,11 +241,12 @@ export function registerReadsTools(server: McpServer, ctx: PgToolContext) {
                c.name_ct AS category_ct, c.type AS category_type,
                t.currency, t.amount, t.entered_currency, t.entered_amount, t.entered_fx_rate,
                t.payee, t.note, t.tags, t.portfolio_holding_id, t.quantity,
-               t.created_at, t.updated_at, t.source
+               t.created_at, t.updated_at, t.source, t.external_id
         FROM transactions t
         LEFT JOIN accounts a ON t.account_id = a.id
         LEFT JOIN categories c ON t.category_id = c.id
         WHERE t.user_id = ${userId}
+          ${external_id ? sql`AND t.external_id = ${external_id.trim()}` : sql``}
           ${min_amount !== undefined ? sql`AND t.amount >= ${min_amount}` : sql``}
           ${max_amount !== undefined ? sql`AND t.amount <= ${max_amount}` : sql``}
           ${start_date ? sql`AND t.date >= ${start_date}` : sql``}

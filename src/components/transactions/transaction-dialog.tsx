@@ -39,6 +39,7 @@ import {
 } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { TagInput } from "@/components/ui/tag-input";
 import { Label } from "@/components/ui/label";
 import {
   Select,
@@ -130,6 +131,8 @@ export interface DialogTransaction {
   createdAt?: string | null;
   updatedAt?: string | null;
   source?: TransactionSource | null;
+  /** GH #450: the id another system gave this charge. Read-only here. */
+  externalId?: string | null;
 }
 
 export interface DialogLinkedSibling {
@@ -1399,7 +1402,7 @@ export function TransactionDialog({
             </div>
             <div className="space-y-1.5">
               <Label>Tags (comma-separated)</Label>
-              <Input value={form.tags} onChange={(e) => setForm({ ...form, tags: e.target.value })} />
+              <TagInput value={form.tags} onValueChange={(v) => setForm({ ...form, tags: v })} />
             </div>
 
             {(() => {
@@ -1687,7 +1690,8 @@ export function TransactionDialog({
               const created = editingTx.createdAt ? new Date(editingTx.createdAt).toLocaleString() : null;
               const updated = editingTx.updatedAt ? new Date(editingTx.updatedAt).toLocaleString() : null;
               const sourceLabel = editingTx.source ? labelForSource(editingTx.source) : null;
-              if (!created && !updated && !sourceLabel) return null;
+              const externalId = editingTx.externalId || null;
+              if (!created && !updated && !sourceLabel && !externalId) return null;
               return (
                 <div className="text-[11px] text-muted-foreground border-t pt-2 flex flex-wrap items-center gap-x-2 gap-y-1">
                   {created && <span>Created {created}</span>}
@@ -1696,6 +1700,11 @@ export function TransactionDialog({
                     <Badge variant="outline" className="text-[10px] py-0 px-1.5">
                       {sourceLabel}
                     </Badge>
+                  )}
+                  {externalId && (
+                    <span className="basis-full break-all" title="The id another system gave this transaction">
+                      External ID: <span className="font-mono">{externalId}</span>
+                    </span>
                   )}
                 </div>
               );
@@ -2212,9 +2221,9 @@ export function TransactionDialog({
             </div>
             <div className="space-y-1.5">
               <Label>Tags (comma-separated, applied to both legs)</Label>
-              <Input
+              <TagInput
                 value={transferForm.tags}
-                onChange={(e) => setTransferForm({ ...transferForm, tags: e.target.value })}
+                onValueChange={(v) => setTransferForm({ ...transferForm, tags: v })}
               />
             </div>
 

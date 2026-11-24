@@ -173,6 +173,11 @@ export const transactions = pgTable("transactions", {
   isBusiness: integer("is_business").default(0),
   importHash: text("import_hash"),
   fitId: text("fit_id"),
+  // GH #450 — the id another system gave this charge, set by a tool that
+  // records from that system (MCP manage_transactions) so a later run can
+  // tell it is already recorded. Plain text; at most one row per account
+  // carries a given id (uq_transactions_external_id).
+  externalId: text("external_id"),
   linkId: text("link_id"),
   // Issue #96 — multi-currency trade pair linker. Server-generated UUID
   // (NEVER accepted from client) that groups the cash leg + stock leg of a
@@ -229,6 +234,8 @@ export const transactions = pgTable("transactions", {
   index("idx_transactions_user_id").on(t.userId),
   index("idx_transactions_user_import_hash").on(t.userId, t.importHash)
     .where(sql`(import_hash IS NOT NULL)`),
+  uniqueIndex("uq_transactions_external_id").on(t.userId, t.accountId, t.externalId)
+    .where(sql`(external_id IS NOT NULL)`),
   uniqueIndex("transactions_one_opening_balance_per_account").on(t.userId, t.accountId)
     .where(sql`(kind = 'opening_balance'::text)`),
   index("transactions_related_holding_idx").on(t.relatedHoldingId)

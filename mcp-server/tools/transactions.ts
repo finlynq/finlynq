@@ -29,6 +29,7 @@ import type { BudgetRuleView, RuleIncrease } from "../../src/lib/budgets/rules";
 import type { BudgetRole } from "../../src/lib/budgets/lines";
 import { getDisplayCurrency } from "../../src/lib/fx-service";
 import { splitMismatch, splitMismatchMessage } from "../../src/lib/transactions/split-balance";
+import { normalizeExternalId } from "../../src/lib/transactions/external-id";
 import {
   q,
   text,
@@ -598,11 +599,25 @@ export function registerTransactionsTools(server: McpServer, ctx: PgToolContext)
     enteredCurrency?: string;
     tradeLinkId?: string;
     dryRun?: boolean;
+    external_id?: string;
   };
+  /** GH #450 — the transaction in this account carrying this external id, if any. */
+  async function findByExternalId(accountId: number, externalId: string): Promise<{ id: number; date: string; amount: number } | null> {
+    const rows = await q(db, sql`
+      SELECT id, date, amount FROM transactions
+       WHERE user_id = ${userId} AND account_id = ${accountId} AND external_id = ${externalId}
+       LIMIT 1
+    `);
+    if (!rows.length) return null;
+    return { id: Number(rows[0].id), date: String(rows[0].date), amount: Number(rows[0].amount) };
+  }
   async function opTxRecord(argsObj: RecordTxArgs): Promise<ToolResult> {
       const { amount, payee, date, account, account_id, category, category_id, note, tags, portfolioHoldingId, portfolioHolding, quantity, enteredAmount, enteredCurrency, tradeLinkId, dryRun } = argsObj;
       const today = new Date().toISOString().split("T")[0];
       const txDate = date ?? today;
+      // GH #450 — check the caller's external id before anything is resolved.
+      const extId = normalizeExternalId(argsObj.external_id);
+      if (!extId.ok) return err(extId.message);
 
       const rawAccounts = await q(db, sql`
         SELECT id, currency, name_ct, alias_ct FROM accounts WHERE user_id = ${userId}
@@ -778,6 +793,27 @@ export function registerTransactionsTools(server: McpServer, ctx: PgToolContext)
       const resolvedCategory = catId ? { id: catId, name: String(catName ?? "") } : null;
       const resolvedHolding = resolvedHoldingId != null ? { id: resolvedHoldingId } : null;
 
+      // GH #450 — this account already has a transaction with this external
+      // id: report it instead of recording the charge a second time.
+      if (extId.value) {
+        const already = await findByExternalId(Number(acct.id), extId.value);
+        if (already) {
+          return text({
+            success: true,
+            data: {
+              alreadyRecorded: true,
+              ...(dryRun ? { dryRun: true } : {}),
+              transactionId: already.id,
+              externalId: extId.value,
+              date: already.date,
+              amount: already.amount,
+              resolvedAccount: resolvedAccountInfo,
+              message: `Nothing recorded: transaction #${already.id} in ${acct.name} already has external_id "${extId.value}".`,
+            },
+          });
+        }
+      }
+
       if (dryRun) {
         // Validation + resolution complete; no DB write, no cache invalidation.
         // Shape mirrors the success path so callers can swap `dryRun: true`
@@ -848,6 +884,7 @@ export function registerTransactionsTools(server: McpServer, ctx: PgToolContext)
           portfolioHoldingId: resolvedHoldingId,
           quantity: quantity ?? null,
           tradeLinkId: tradeLinkId ?? null,
+          externalId: extId.value,
           source: "mcp_http",
         },
         dek,
@@ -893,6 +930,7 @@ export function registerTransactionsTools(server: McpServer, ctx: PgToolContext)
           updatedAt: created?.updatedAt,
           source: created?.source,
           tradeLinkId: created?.tradeLinkId ?? null,
+          ...(extId.value ? { externalId: extId.value } : {}),
           resolvedAccount: resolvedAccountInfo,
           resolvedCategory,
           resolvedHolding,
@@ -921,6 +959,7 @@ export function registerTransactionsTools(server: McpServer, ctx: PgToolContext)
       enteredAmount?: number;
       enteredCurrency?: string;
       tradeGroupKey?: string;
+      external_id?: string;
     }>;
     account_id?: number;
     dryRun?: boolean;
@@ -1086,7 +1125,12 @@ export function registerTransactionsTools(server: McpServer, ctx: PgToolContext)
         warnings?: string[];
         dryRun?: boolean;
         wouldBeId?: null;
+        alreadyRecorded?: boolean;
+        externalId?: string;
       }[] = [];
+      // GH #450 — external ids seen earlier in THIS batch, per account, so a
+      // dry run (which writes nothing) also reports a repeat inside the batch.
+      const batchExternalIds = new Set<string>();
       // Issue #90 — capture every committed row so the post-loop scan can
       // surface possible-duplicate hints. Plaintext payee here; the scan
       // helper compares decoded values, not ciphertexts.
@@ -1157,6 +1201,33 @@ export function registerTransactionsTools(server: McpServer, ctx: PgToolContext)
             continue;
           }
           const resolvedAccountInfo = { id: Number(acct.id), name: String(acct.name ?? "") };
+
+          // GH #450 — a row whose external id this account already has is
+          // reported (with the existing transaction's id), not recorded again.
+          const rowExt = normalizeExternalId(t.external_id);
+          if (!rowExt.ok) {
+            results.push({ index: i, success: false, message: rowExt.message, resolvedAccount: resolvedAccountInfo });
+            continue;
+          }
+          if (rowExt.value) {
+            const batchKey = `${Number(acct.id)}|${rowExt.value}`;
+            const already = await findByExternalId(Number(acct.id), rowExt.value);
+            if (already || batchExternalIds.has(batchKey)) {
+              results.push({
+                index: i,
+                success: true,
+                alreadyRecorded: true,
+                transactionId: already ? already.id : null,
+                externalId: rowExt.value,
+                message: already
+                  ? `Nothing recorded: transaction #${already.id} already has external_id "${rowExt.value}".`
+                  : `Nothing recorded: an earlier row in this batch has external_id "${rowExt.value}".`,
+                resolvedAccount: resolvedAccountInfo,
+              });
+              continue;
+            }
+            batchExternalIds.add(batchKey);
+          }
 
           // Investment accounts are off-limits to bulk_record_transactions
           // (mirror of record_transaction): all investment activity must flow
@@ -1374,6 +1445,7 @@ export function registerTransactionsTools(server: McpServer, ctx: PgToolContext)
               portfolioHoldingId: rowHoldingId,
               quantity: t.quantity ?? null,
               tradeLinkId: rowTradeLinkId,
+              externalId: rowExt.value,
               source: "mcp_http",
             },
             dek,
@@ -1402,6 +1474,7 @@ export function registerTransactionsTools(server: McpServer, ctx: PgToolContext)
             resolvedCategory: rowCategory,
             resolvedHolding: rowHolding,
             ...(rowTradeLinkId ? { tradeLinkId: rowTradeLinkId } : {}),
+            ...(rowExt.value ? { externalId: rowExt.value } : {}),
             ...(rowWarnings.length ? { warnings: rowWarnings } : {}),
           });
         } catch (e) {
@@ -1409,7 +1482,10 @@ export function registerTransactionsTools(server: McpServer, ctx: PgToolContext)
         }
       }
 
-      const ok = results.filter(r => r.success).length;
+      // GH #450 — rows skipped for an external id already recorded are
+      // successes (nothing went wrong) but not new rows.
+      const alreadyRecorded = results.filter(r => r.success && r.alreadyRecorded).length;
+      const ok = results.filter(r => r.success).length - alreadyRecorded;
       // Skip cache invalidation on dry-run — no rows touched.
       if (!dryRun && ok > 0) invalidateUserTxCache(userId);
 
@@ -1476,7 +1552,8 @@ export function registerTransactionsTools(server: McpServer, ctx: PgToolContext)
         data: {
           ...(dryRun ? { dryRun: true } : {}),
           imported: dryRun ? 0 : ok,
-          failed: results.length - ok,
+          failed: results.length - ok - alreadyRecorded,
+          ...(alreadyRecorded ? { alreadyRecorded } : {}),
           ...(dryRun ? { previewed: ok } : {}),
           results,
           possibleDuplicates,
@@ -1547,6 +1624,7 @@ export function registerTransactionsTools(server: McpServer, ctx: PgToolContext)
     quantity?: number | null;
     enteredAmount?: number;
     enteredCurrency?: string;
+    external_id?: string | null;
   };
   async function opTxUpdate(argsObj: UpdateTxArgs): Promise<ToolResult> {
       const { id, date, amount, payee, category, category_id, note, tags, portfolioHoldingId, portfolioHolding, quantity, enteredAmount, enteredCurrency } = argsObj;
@@ -1557,6 +1635,16 @@ export function registerTransactionsTools(server: McpServer, ctx: PgToolContext)
          WHERE t.user_id = ${userId} AND t.id = ${id}
       `);
       if (!existing.length) return err(`Transaction #${id} not found`);
+      // GH #450 — refuse an external id another transaction in this account
+      // already has, before anything is written. null or "" clears it.
+      const extPatch = argsObj.external_id === undefined ? undefined : normalizeExternalId(argsObj.external_id);
+      if (extPatch && !extPatch.ok) return err(extPatch.message);
+      if (extPatch?.ok && extPatch.value && existing[0].account_id != null) {
+        const other = await findByExternalId(Number(existing[0].account_id), extPatch.value);
+        if (other && other.id !== id) {
+          return err(`external_id "${extPatch.value}" is already on transaction #${other.id} in the same account. Nothing was changed.`);
+        }
+      }
       // MCP-M1 — stamp the PRE-edit position now, before any UPDATE moves the
       // row's date or account. The post-edit stamp happens after the writes;
       // `LEAST` coalescing in both marker tables makes the pair idempotent.
@@ -1830,6 +1918,10 @@ export function registerTransactionsTools(server: McpServer, ctx: PgToolContext)
         await db.execute(sql`UPDATE transactions SET quantity = ${quantity}, updated_at = NOW() WHERE id = ${id} AND user_id = ${userId}`);
         fieldsUpdated.push("quantity");
       }
+      if (extPatch?.ok) {
+        await db.execute(sql`UPDATE transactions SET external_id = ${extPatch.value}, updated_at = NOW() WHERE id = ${id} AND user_id = ${userId}`);
+        fieldsUpdated.push("external_id");
+      }
 
       if (!fieldsUpdated.length) return err("No fields to update");
 
@@ -1940,6 +2032,7 @@ export function registerTransactionsTools(server: McpServer, ctx: PgToolContext)
         enteredCurrency: z.string().optional().describe("ISO code of enteredAmount. Defaults to account currency."),
         tradeLinkId: z.string().optional().describe("Multi-currency trade-pair linker (issue #96). UUID from a previous record call. Single-record incremental binding only."),
         dryRun: z.boolean().optional().describe("Validate + resolve (account/holding/FX/category) WITHOUT writing. Response carries dryRun:true, wouldBeId:null, resolved* fields."),
+        external_id: z.string().max(200).optional().describe("The id another system gave this charge (e.g. a data provider's transaction id). If the account already has a transaction with it, nothing is recorded and that transaction's id comes back with alreadyRecorded:true. Single record."),
         // Bulk fields (used when `transactions[]` is present):
         transactions: z.array(z.object({
           amount: z.number(),
@@ -1957,6 +2050,7 @@ export function registerTransactionsTools(server: McpServer, ctx: PgToolContext)
           enteredAmount: z.number().optional().describe("User-typed amount in enteredCurrency."),
           enteredCurrency: z.string().optional().describe("ISO code of enteredAmount; defaults to account currency."),
           tradeGroupKey: z.string().optional().describe("Multi-currency trade-pair grouping hint (issue #96). Two rows sharing a key get one minted trade_link_id."),
+          external_id: z.string().max(200).optional().describe("The id another system gave this charge. A row whose account already has it is skipped and reported with alreadyRecorded:true."),
         })).optional().describe("Bulk record — an array of rows (partial-commit; a bad row fails without unwinding the rest)."),
         idempotencyKey: z.string().uuid().optional().describe("Bulk only — UUID v4 minted once per batch; a retry within 72h replays the stored response verbatim."),
       }),
@@ -1975,6 +2069,7 @@ export function registerTransactionsTools(server: McpServer, ctx: PgToolContext)
         quantity: z.number().nullable().optional().describe("Share count. Positive=acquired, negative=sold, null=clear."),
         enteredAmount: z.number().optional().describe("Update the user-typed amount; server re-derives account-side amount via FX at the row's date."),
         enteredCurrency: z.string().optional().describe("Update the entered currency. Requires enteredAmount."),
+        external_id: z.string().max(200).nullable().optional().describe("Set the id another system gave this charge, or null to clear it. Refused when another transaction in the same account has it."),
       }),
       z.object({
         op: z.literal("delete"),
@@ -2004,6 +2099,8 @@ export function registerTransactionsTools(server: McpServer, ctx: PgToolContext)
             account: input.account,
             account_id: input.account_id,
             category: input.category,
+            category_id: input.category_id,
+            external_id: input.external_id,
             note: input.note,
             tags: input.tags,
             portfolioHoldingId: input.portfolioHoldingId,

@@ -340,6 +340,8 @@ export async function getTransactions(userId: string, filters?: TxSortFilter) {
       note: transactions.note,
       payee: transactions.payee,
       tags: transactions.tags,
+      // GH #450: shown read-only in the edit dialog.
+      externalId: transactions.externalId,
       linkId: transactions.linkId,
       // Audit-trio (issue #28). Surface for the edit dialog footer + the
       // future "recently modified" sort. Pre-migration rows backfill to
@@ -439,6 +441,8 @@ export async function createTransaction(userId: string, data: {
   isBusiness?: number;
   splitPerson?: string;
   splitRatio?: number;
+  // GH #450 — the id another system gave this charge (MCP record only).
+  externalId?: string | null;
   // Issue #96 multi-currency trade-pair linker. Server-generated UUID stamped
   // into `trade_link_id`. REST never passes it (the column defaults NULL);
   // FINLYNQ-108 routes MCP HTTP record_transaction/bulk_record_transactions

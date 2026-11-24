@@ -27,6 +27,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Input } from "@/components/ui/input";
+import { TagInput } from "@/components/ui/tag-input";
 import { Label } from "@/components/ui/label";
 import { Badge } from "@/components/ui/badge";
 import { formatCurrency } from "@/lib/currency";
@@ -458,9 +459,9 @@ export function StagedRowEditor({
         <Label className="text-[10px] uppercase tracking-wide text-muted-foreground">
           Tags <Spinner shown={savingField === "tags"} />
         </Label>
-        <Input
+        <TagInput
           value={local.tags ?? ""}
-          onChange={(e) => setLocal({ ...local, tags: e.target.value })}
+          onValueChange={(v) => setLocal({ ...local, tags: v })}
           onBlur={() => {
             if (local.tags !== row.tags) {
               void save("tags", { tags: local.tags ?? "" });
