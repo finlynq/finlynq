@@ -31,7 +31,7 @@ import { ErrorState } from "@/components/error-state";
 import { parseSaveError } from "@/lib/save-error";
 import { clearPayeeOptionsCache } from "@/lib/hooks/usePayeeOptions";
 import { clearTagOptionsCache } from "@/lib/hooks/useTagOptions";
-import { Merge, Pencil, Search, Trash2, X } from "lucide-react";
+import { Merge, Pencil, Search, StickyNote, Trash2, X } from "lucide-react";
 
 type Kind = "payees" | "tags";
 
@@ -91,8 +91,9 @@ export default function PayeesTagsPage() {
       <div>
         <h2 className="text-lg font-semibold">Payees &amp; tags</h2>
         <p className="text-sm text-muted-foreground">
-          Merge names that mean the same thing, rename them, or remove them. Changes apply to your
-          transactions. What your bank sent (bank statement rows) is never changed.
+          Merge names that mean the same thing, rename them, move text that is not a payee into the
+          note, or remove them. Changes apply to your transactions. What your bank sent (bank
+          statement rows) is never changed.
         </p>
       </div>
       <Tabs defaultValue="payees">
@@ -121,6 +122,7 @@ function NamesPanel({ kind }: { kind: Kind }) {
   const [merge, setMerge] = useState<{ keys: string[]; title: string } | null>(null);
   const [rename, setRename] = useState<Item | null>(null);
   const [remove, setRemove] = useState<Item | null>(null);
+  const [toNote, setToNote] = useState<Item[] | null>(null);
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
 
@@ -263,6 +265,17 @@ function NamesPanel({ kind }: { kind: Kind }) {
             >
               <Merge className="mr-1 h-3.5 w-3.5" /> Merge selected{selected.size ? ` (${selected.size})` : ""}
             </Button>
+            {kind === "payees" && (
+              <Button
+                size="sm"
+                variant="outline"
+                disabled={selected.size < 1}
+                onClick={() => setToNote([...selected].map((k) => byKey.get(k)).filter((x): x is Item => !!x))}
+                title="For text that is not a payee, like transfer details"
+              >
+                <StickyNote className="mr-1 h-3.5 w-3.5" /> Move to note
+              </Button>
+            )}
           </div>
           <div className="overflow-x-auto rounded-md border">
             <table className="w-full text-sm">
@@ -301,6 +314,17 @@ function NamesPanel({ kind }: { kind: Kind }) {
                       <Button size="icon-sm" variant="ghost" aria-label={`Rename ${i.name}`} onClick={() => setRename(i)}>
                         <Pencil className="h-3.5 w-3.5" />
                       </Button>
+                      {kind === "payees" && i.count > 0 && (
+                        <Button
+                          size="icon-sm"
+                          variant="ghost"
+                          aria-label={`Move ${i.name} to note`}
+                          title="Move to note"
+                          onClick={() => setToNote([i])}
+                        >
+                          <StickyNote className="h-3.5 w-3.5" />
+                        </Button>
+                      )}
                       {(kind === "tags" || i.suggestionId != null) && (
                         <Button size="icon-sm" variant="ghost" aria-label={`Remove ${i.name}`} onClick={() => setRemove(i)}>
                           <Trash2 className="h-3.5 w-3.5" />
@@ -345,6 +369,45 @@ function NamesPanel({ kind }: { kind: Kind }) {
           onDone={afterChange}
         />
       )}
+      <ConfirmDialog
+        open={!!toNote}
+        onOpenChange={(o) => !o && setToNote(null)}
+        title="Move to note"
+        description={
+          toNote ? (
+            <span>
+              Move {toNote.length === 1 ? <>&ldquo;{toNote[0].name}&rdquo;</> : plural(toNote.length, "payee", "payees")} into
+              the note of {plural(toNote.reduce((n, i) => n + i.count, 0), "transaction", "transactions")} and leave their
+              payee empty. A note they already have is kept after it. Use this for text that is not a payee, like
+              &ldquo;Transfer to Savings&rdquo;. Bank statement rows are not changed.
+            </span>
+          ) : (
+            ""
+          )
+        }
+        confirmLabel="Move to note"
+        busy={busy}
+        busyLabel="Moving…"
+        onConfirm={async () => {
+          if (!toNote) return;
+          setBusy(true);
+          try {
+            const res = await fetch(cfg.url, {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ action: "to_note", sources: toNote.map((i) => i.key) }),
+            });
+            if (!res.ok) throw new Error(await parseSaveError(res, "Could not move it."));
+            const d = (await res.json()).data as { updated: number };
+            setToNote(null);
+            await afterChange(`Moved the payee into the note on ${plural(d.updated, "transaction", "transactions")}.`);
+          } catch (e) {
+            setNotice(e instanceof Error ? e.message : "Could not move it.");
+          } finally {
+            setBusy(false);
+          }
+        }}
+      />
       <ConfirmDialog
         open={!!remove}
         onOpenChange={(o) => !o && setRemove(null)}
@@ -431,7 +494,7 @@ function MergeDialog({
     try {
       const body =
         kind === "payees"
-          ? { sources: chosen.map((i) => i.key), target: trimmed, addImportRules: addRules }
+          ? { action: "merge", sources: chosen.map((i) => i.key), target: trimmed, addImportRules: addRules }
           : { sources: chosen.map((i) => i.key), target: trimmed };
       const res = await fetch(cfg.url, {
         method: "POST",

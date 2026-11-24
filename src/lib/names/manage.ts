@@ -24,6 +24,7 @@ import { invalidateUser } from "@/lib/mcp/user-tx-cache";
 import { cleanPayeeName } from "@/lib/payees/suggest";
 import { splitTags } from "@/lib/transactions/tag-list";
 import { findLikelyDuplicates } from "./likely-duplicates";
+import { noteWithPayee } from "@/lib/transactions/auto-description";
 
 export const MAX_MERGE_SOURCES = 50;
 const UPDATE_CHUNK = 500;
@@ -42,7 +43,7 @@ const rowsOf = <T,>(r: unknown): T[] => (r as { rows?: T[] }).rows ?? (r as T[])
 /** Write new ciphertext onto many rows of one table in chunks. */
 async function writeColumn(
   table: "transactions" | "transaction_splits",
-  column: "payee" | "tags",
+  column: "payee" | "tags" | "note",
   updates: Array<{ id: number; value: string | null }>,
   userScope: SQL,
 ): Promise<void> {
@@ -225,6 +226,48 @@ export async function mergePayees(
       }
     }
     return { updated: updates.length, rulesAdded };
+  });
+  invalidateUser(userId);
+  return result;
+}
+
+/**
+ * Move the payee text of every transaction whose payee is one of
+ * `sourceKeys` into its note (`noteWithPayee`) and leave the payee empty.
+ * For text that is not a payee: "Transfer to Savings", "Buy VTI +10 shares".
+ * The payees leave the suggestion list.
+ */
+export async function movePayeesToNote(
+  userId: string,
+  dek: Buffer,
+  sourceKeys: string[],
+): Promise<{ updated: number }> {
+  const sources = new Set(sourceKeys.filter((k) => typeof k === "string" && k));
+  if (sources.size === 0) throw new NameCleanupError("Pick at least one payee.");
+  if (sources.size > MAX_MERGE_SOURCES) {
+    throw new NameCleanupError(`At most ${MAX_MERGE_SOURCES} payees can be moved at once.`);
+  }
+  const result = await withDbTransaction(async () => {
+    const res = await db.execute(sql`
+      SELECT id, payee, note FROM transactions
+       WHERE user_id = ${userId} AND payee IS NOT NULL AND payee <> ''
+    `);
+    const payeeUpdates: Array<{ id: number; value: string | null }> = [];
+    const noteUpdates: Array<{ id: number; value: string | null }> = [];
+    for (const r of rowsOf<{ id: number; payee: string; note: string | null }>(res)) {
+      const name = cleanPayeeName(tryDecryptField(dek, r.payee, "transactions.payee") ?? "");
+      if (!name || !sources.has(nameLookup(dek, name))) continue;
+      const oldNote = r.note ? tryDecryptField(dek, r.note, "transactions.note") : "";
+      if (r.note && oldNote == null) continue; // a note this key cannot read: leave the row
+      payeeUpdates.push({ id: Number(r.id), value: "" });
+      noteUpdates.push({ id: Number(r.id), value: encryptField(dek, noteWithPayee(name, oldNote)) });
+    }
+    await writeColumn("transactions", "note", noteUpdates, sql`t.user_id = ${userId}`);
+    await writeColumn("transactions", "payee", payeeUpdates, sql`t.user_id = ${userId}`);
+    await db
+      .delete(schema.payees)
+      .where(and(eq(schema.payees.userId, userId), inArray(schema.payees.nameLookup, [...sources])));
+    return { updated: payeeUpdates.length };
   });
   invalidateUser(userId);
   return result;

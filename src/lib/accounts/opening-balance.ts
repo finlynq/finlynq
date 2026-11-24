@@ -32,7 +32,6 @@ import { todayISO } from "@/lib/utils/date";
 const { transactions, categories } = schema;
 
 export const OPENING_BALANCE_KIND = "opening_balance";
-const OPENING_BALANCE_PAYEE = "Opening Balance";
 const OPENING_BALANCE_NOTE = "Opening account balance";
 /** Neutral category name (type 'R') — kept out of income/expense reports. */
 const OPENING_BALANCE_CATEGORY = "Opening Balance";
@@ -177,7 +176,8 @@ export async function setOpeningBalance(
       categoryId,
       currency: account.currency,
       amount,
-      payee: encryptField(dek, OPENING_BALANCE_PAYEE),
+      // 2026-11-24: no payee; the note says what this is.
+      payee: "",
       note: encryptField(dek, OPENING_BALANCE_NOTE),
       kind: OPENING_BALANCE_KIND,
       source: "manual",

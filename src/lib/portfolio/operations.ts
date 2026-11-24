@@ -558,8 +558,9 @@ async function recordSwapImpl(
     qty: input.sourceQty,
     totalProceeds: input.sourceProceeds,
     date: input.date,
-    payee: input.payee ?? "Swap (sell)",
-    note: input.note,
+    // 2026-11-24: the app's description goes in the note, not the payee.
+    payee: input.payee ?? "",
+    note: input.note || "Swap (sell)",
     source: input.source,
   });
   const buy = await recordBuy({
@@ -570,8 +571,8 @@ async function recordSwapImpl(
     qty: input.destQty,
     totalCost: input.destCost,
     date: input.date,
-    payee: input.payee ?? "Swap (buy)",
-    note: input.note,
+    payee: input.payee ?? "",
+    note: input.note || "Swap (buy)",
     source: input.source,
   });
   // Phase 4 — stamp a swap_link_id on all 4 rows so the load endpoint
