@@ -20,6 +20,7 @@ import FeedbackThreadsScreen from "../screens/FeedbackThreadsScreen";
 import FeedbackThreadScreen from "../screens/FeedbackThreadScreen";
 import GuidanceScreen from "../screens/GuidanceScreen";
 import GuidanceNoteScreen from "../screens/GuidanceNoteScreen";
+import PayeesTagsScreen from "../screens/PayeesTagsScreen";
 import GuideScreen from "../screens/GuideScreen";
 import ReportsScreen from "../screens/ReportsScreen";
 import IncomeStatementScreen from "../screens/IncomeStatementScreen";
@@ -105,6 +106,8 @@ export type MoreStackParamList = {
   Guidance: undefined;
   GuidanceNote: { id?: number } | undefined;
   Guide: { title: string; markdown: string };
+  // Payees & tags cleanup (2026-11-24): merge / rename / move to note / remove.
+  PayeesTags: undefined;
   Reports: undefined;
   IncomeStatement: ReportRangeRouteParams;
   BalanceSheet: { endDate: string; displayCurrency: string };
@@ -182,6 +185,7 @@ export default function MoreStack() {
       <Stack.Screen name="Guidance" component={GuidanceScreen} />
       <Stack.Screen name="GuidanceNote" component={GuidanceNoteScreen} />
       <Stack.Screen name="Guide" component={GuideScreen} />
+      <Stack.Screen name="PayeesTags" component={PayeesTagsScreen} />
       <Stack.Screen name="Reports" component={ReportsScreen} />
       <Stack.Screen name="IncomeStatement" component={IncomeStatementScreen} />
       <Stack.Screen name="BalanceSheet" component={BalanceSheetScreen} />

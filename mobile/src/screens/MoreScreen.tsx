@@ -141,6 +141,7 @@ export default function MoreScreen() {
         { icon: "mail", label: "Email imports", onPress: () => navigation.navigate("EmailImports") },
         { icon: "bank", label: "Bank feed", onPress: () => navigation.navigate("BankFeed") },
         { icon: "categories", label: "Categories", onPress: () => navigation.navigate("Categories") },
+        { icon: "tags", label: "Payees & tags", onPress: () => navigation.navigate("PayeesTags") },
         { icon: "import", label: "Import", onPress: () => navigation.navigate("Import") },
         { icon: "guidance", label: "AI guidance", onPress: () => navigation.navigate("Guidance") },
       ],

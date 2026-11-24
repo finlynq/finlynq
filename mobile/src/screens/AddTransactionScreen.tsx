@@ -27,6 +27,9 @@ import {
 import { Icon } from "../components/icon";
 import { PickerSheet, type PickerOption } from "../components/picker-sheet";
 import { DateField } from "../components/DateField";
+import { TagInput } from "../components/TagInput";
+import { PayeeInput } from "../components/PayeeInput";
+import { clearNameOptionsCache } from "../hooks/useNameOptions";
 import type { Account, Category } from "../../../shared/types";
 import type { TransferEditSeed } from "../lib/transfer-pair";
 
@@ -344,6 +347,7 @@ export default function AddTransactionScreen() {
         tags: tags || undefined,
       });
       if (res.success) {
+        clearNameOptionsCache();
         logger.info("add-tx", "transaction created", { mode });
         navigation.goBack();
       } else {
@@ -407,6 +411,7 @@ export default function AddTransactionScreen() {
             ...(received != null ? { receivedAmount: received } : {}),
           });
       if (res.success) {
+        clearNameOptionsCache();
         logger.info("add-tx", editSeed ? "transfer updated" : "transfer created", {
           crossCurrency: isCrossCurrency,
         });
@@ -623,7 +628,7 @@ export default function AddTransactionScreen() {
           </TouchableOpacity>
         </View>
 
-        <ScrollView contentContainerStyle={styles.scroll}>
+        <ScrollView contentContainerStyle={styles.scroll} keyboardShouldPersistTaps="handled">
           {/* Segmented control: Expense / Income / Transfer. An edited
               transfer stays a transfer, so it has none. */}
           {!editSeed && (
@@ -700,12 +705,18 @@ export default function AddTransactionScreen() {
                 {/* Payee */}
                 <View style={fieldStyles.container}>
                   <Text style={[fieldStyles.label, { color: colors.mutedForeground }]}>PAYEE</Text>
-                  <TextInput
+                  <PayeeInput
                     style={[fieldStyles.input, { color: colors.foreground, backgroundColor: colors.secondary, borderColor: colors.border }]}
                     value={payee}
-                    onChangeText={setPayee}
-                    placeholder="Merchant or payee name"
-                    placeholderTextColor={colors.mutedForeground}
+                    onValueChange={setPayee}
+                    onPick={(p) => {
+                      setPayee(p.name);
+                      // The category last used with this payee, only into an
+                      // empty category that still exists.
+                      if (!selectedCategoryId && p.categoryId != null && categories.some((c) => c.id === p.categoryId)) {
+                        setSelectedCategoryId(p.categoryId);
+                      }
+                    }}
                   />
                 </View>
 
@@ -728,13 +739,7 @@ export default function AddTransactionScreen() {
                 {/* Tags */}
                 <View style={fieldStyles.container}>
                   <Text style={[fieldStyles.label, { color: colors.mutedForeground }]}>TAGS</Text>
-                  <TextInput
-                    style={[fieldStyles.input, { color: colors.foreground, backgroundColor: colors.secondary, borderColor: colors.border }]}
-                    value={tags}
-                    onChangeText={setTags}
-                    placeholder="Comma-separated tags"
-                    placeholderTextColor={colors.mutedForeground}
-                  />
+                  <TagInput value={tags} onValueChange={setTags} />
                 </View>
               </>
             )}

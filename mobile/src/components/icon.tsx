@@ -35,6 +35,7 @@ import {
   RefreshCw,
   Building2,
   Tag,
+  Tags,
   Sparkles,
   Megaphone,
   MessageCircle,
@@ -117,6 +118,7 @@ export const Icons = {
   mail: Mail,
   paperclip: Paperclip,
   guidance: BookOpen,
+  tags: Tags,
 } satisfies Record<string, LucideIcon>;
 
 export type IconName = keyof typeof Icons;

@@ -342,6 +342,9 @@ export const api = {
 
 // Typed endpoint helpers
 import type { GuideModule, NoteFull, NoteRevision, NoteSummary } from "../lib/guidance";
+import type { TagOption } from "../lib/tag-suggest";
+import type { PayeeOption } from "../lib/payee-suggest";
+import type { NameUsage } from "../lib/names-cleanup";
 import type {
   BudgetFillRequest,
   BudgetFillResult,
@@ -943,6 +946,29 @@ export const endpoints = {
     api.post<{ note: NoteFull }>("/api/guidance/notes", note),
   retireGuidanceNote: (id: number, expectedVersion: number) =>
     api.delete<{ retired: boolean; id: number }>(`/api/guidance/notes/${id}`, { expectedVersion }),
+
+  // Tag + payee suggestions and the Payees & tags cleanup (2026-11-24), the
+  // same routes as the web. All enveloped ({success,data}).
+  getTagOptions: () => api.get<{ tags: TagOption[]; locked: boolean }>("/api/transactions/tags"),
+  getPayeeOptions: () => api.get<{ payees: PayeeOption[]; locked: boolean }>("/api/payees"),
+  forgetPayee: (id: number) => api.delete<{ removed: number }>("/api/payees", { id }),
+  getPayeeUsage: () =>
+    api.get<{ payees: NameUsage[]; groups: string[][]; locked: boolean }>("/api/payees/manage"),
+  // A rename is a merge of one. Changes transactions only, never bank rows.
+  mergePayees: (sources: string[], target: string, addImportRules = false) =>
+    api.post<{ updated: number; rulesAdded: number }>("/api/payees/manage", {
+      action: "merge",
+      sources,
+      target,
+      addImportRules,
+    }),
+  movePayeesToNote: (sources: string[]) =>
+    api.post<{ updated: number }>("/api/payees/manage", { action: "to_note", sources }),
+  getTagUsage: () =>
+    api.get<{ tags: NameUsage[]; groups: string[][]; locked: boolean }>("/api/transactions/tags/manage"),
+  // target null removes the tags from every transaction.
+  replaceTags: (sources: string[], target: string | null) =>
+    api.post<{ updated: number }>("/api/transactions/tags/manage", { sources, target }),
 
   // ─── Reconcile inbox (account-anchored Approve-each / Auto-pilot cards) ───
   // Account list WITH the per-account reconciliation `mode` + investment flag +

@@ -18,6 +18,7 @@ import { endpoints } from "../api/client";
 import { logger } from "../lib/logger";
 import { formatCurrency, safeName } from "../lib/format";
 import { Icon } from "../components/icon";
+import { TagInput } from "../components/TagInput";
 import { PickerSheet, type PickerOption } from "../components/picker-sheet";
 import {
   emptySplitDraft,
@@ -311,15 +312,10 @@ export default function SplitsEditorScreen({ route, navigation }: Props) {
 
               <View style={[fieldStyles.container, { marginBottom: 0 }]}>
                 <Text style={[fieldStyles.label, { color: colors.mutedForeground }]}>TAGS</Text>
-                <TextInput
-                  style={[
-                    fieldStyles.input,
-                    { color: colors.foreground, backgroundColor: colors.secondary, borderColor: colors.border },
-                  ]}
+                <TagInput
                   value={row.tags}
-                  onChangeText={(v) => setRow(i, { tags: v })}
-                  placeholder="Comma-separated tags"
-                  placeholderTextColor={colors.mutedForeground}
+                  onValueChange={(v) => setRow(i, { tags: v })}
+                  accessibilityLabel={`Tags for split ${i + 1}`}
                 />
               </View>
             </View>

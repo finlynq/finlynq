@@ -21,6 +21,9 @@ import { resolveTransferPair, type TransferEditSeed } from "../lib/transfer-pair
 import { isMobileEditableOp, isPortfolioRow as isPortfolioOpRow } from "../lib/portfolio/edit-routing";
 import type { Transaction, Account, Category } from "../../../shared/types";
 import { DateField } from "../components/DateField";
+import { TagInput } from "../components/TagInput";
+import { PayeeInput } from "../components/PayeeInput";
+import { clearNameOptionsCache } from "../hooks/useNameOptions";
 import type { NativeStackScreenProps } from "@react-navigation/native-stack";
 import type { TransactionsStackParamList } from "../navigation/TransactionsStack";
 
@@ -33,6 +36,9 @@ function formatCurrency(amount: number, currency = "USD"): string {
 export default function TransactionDetailScreen({ route, navigation }: Props) {
   const theme = useTheme();
   const { transaction } = route.params;
+  // GH #450: the id another system gave this charge (set through MCP). The
+  // list route returns it; the shared Transaction type does not name it yet.
+  const externalId = (transaction as Transaction & { externalId?: string | null }).externalId ?? null;
   const colors = theme.colors;
 
   const [editing, setEditing] = useState(false);
@@ -168,6 +174,7 @@ export default function TransactionDetailScreen({ route, navigation }: Props) {
       });
       if (res.success) {
         logger.info("tx-detail", "transaction updated", { id: transaction.id });
+        clearNameOptionsCache();
         setEditing(false);
         navigation.goBack();
       } else if (res.code === "transfer_leg_edit_refused") {
@@ -394,7 +401,7 @@ export default function TransactionDetailScreen({ route, navigation }: Props) {
           </View>
         </View>
 
-        <ScrollView contentContainerStyle={styles.scroll}>
+        <ScrollView contentContainerStyle={styles.scroll} keyboardShouldPersistTaps="handled">
           {/* Amount hero */}
           <View style={[styles.amountCard, { backgroundColor: colors.card, borderColor: colors.border }]}>
             {editing ? (
@@ -453,7 +460,18 @@ export default function TransactionDetailScreen({ route, navigation }: Props) {
             ) : (
               renderField("Date", date, setDate)
             )}
-            {renderField("Payee", payee, setPayee)}
+            {editing ? (
+              <View style={fieldStyles.container}>
+                <Text style={[fieldStyles.label, { color: colors.mutedForeground }]}>Payee</Text>
+                <PayeeInput
+                  style={[fieldStyles.input, { color: colors.foreground, backgroundColor: colors.secondary, borderColor: colors.border }]}
+                  value={payee}
+                  onValueChange={setPayee}
+                />
+              </View>
+            ) : (
+              renderField("Payee", payee, setPayee)
+            )}
             {renderPickerField("Account", accountName, accounts, selectedAccountId, setSelectedAccountId)}
             {renderPickerField(
               "Category",
@@ -463,13 +481,30 @@ export default function TransactionDetailScreen({ route, navigation }: Props) {
               setSelectedCategoryId
             )}
             {renderField("Note", note, setNote, { multiline: true })}
-            {renderField("Tags", tags, setTags)}
+            {editing ? (
+              <View style={fieldStyles.container}>
+                <Text style={[fieldStyles.label, { color: colors.mutedForeground }]}>Tags</Text>
+                <TagInput value={tags} onValueChange={setTags} />
+              </View>
+            ) : (
+              renderField("Tags", tags, setTags)
+            )}
+            {!editing && externalId ? (
+              <View style={fieldStyles.container}>
+                <Text style={[fieldStyles.label, { color: colors.mutedForeground }]}>External ID</Text>
+                <Text selectable style={[fieldStyles.value, { color: colors.mutedForeground, fontFamily: monoFont }]}>
+                  {externalId}
+                </Text>
+              </View>
+            ) : null}
           </View>
         </ScrollView>
       </KeyboardAvoidingView>
     </SafeAreaView>
   );
 }
+
+const monoFont = Platform.OS === "ios" ? "Menlo" : "monospace";
 
 const styles = StyleSheet.create({
   safe: { flex: 1 },
