@@ -7,7 +7,9 @@
  * dropped):
  *   - the cores are equal ("Corner Cafe" / "SQ *CORNER CAFE #1234");
  *   - one core starts the other on a word boundary ("Braces Haven" /
- *     "BRACES HAVEN NEPEAN"), the shorter at least 4 letters;
+ *     "BRACES HAVEN NEPEAN"), the shorter at least 4 letters; a ONE-word
+ *     name only when the other adds exactly one word ("Costco" / "COSTCO
+ *     WHOLESALE", but not "Transfer" / "Transfer to TFSA");
  *   - they differ only by a plural ("Vacation" / "Vacations");
  *   - they are one typo apart, both at least 6 letters and neither holding a
  *     number ("Costco" / "Cotsco" is 2 edits and stays apart).
@@ -36,9 +38,10 @@ export function nameCore(name: string): string {
     .split(" ")
     .filter(Boolean);
   const kept = tokens.filter((t, i) => {
-    // A store or terminal number: 3+ characters, mostly digits.
+    // A store or terminal number: 4+ characters, mostly digits. Shorter
+    // numbers stay ("+36 shares", "verify-450"): they usually mean something.
     const digits = (t.match(/\p{N}/gu) ?? []).length;
-    if (t.length >= 3 && digits / t.length >= 0.5) return false;
+    if (t.length >= 4 && digits / t.length >= 0.5) return false;
     // A processor prefix, only at the very start.
     if (i === 0 && NOISE_TOKENS.has(t) && tokens.length > 1) return false;
     return true;
@@ -68,7 +71,14 @@ export function likelySame(aName: string, bName: string): boolean {
   if (!a || !b) return false;
   if (a === b) return true;
   const [short, long] = a.length <= b.length ? [a, b] : [b, a];
-  if (short.replace(/ /g, "").length >= 4 && long.startsWith(short + " ")) return true;
+  if (short.replace(/ /g, "").length >= 4 && long.startsWith(short + " ")) {
+    // A one-word name only matches one more word ("Costco" / "COSTCO
+    // WHOLESALE"), so a generic word like "Transfer" does not pull in every
+    // "Transfer to …". Two or more words may be followed by anything
+    // ("Braces Haven" / "BRACES HAVEN NEPEAN ON").
+    const extra = long.slice(short.length + 1).split(" ").length;
+    if (short.includes(" ") || extra === 1) return true;
+  }
   if (stem(a) === stem(b)) return true;
   const hasNumber = /\p{N}/u.test(aName) || /\p{N}/u.test(bName);
   if (!hasNumber && a.length >= 6 && b.length >= 6 && oneEditApart(a, b)) return true;

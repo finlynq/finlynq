@@ -25,6 +25,7 @@ import { decryptRuleFields } from "@/lib/rules/crypto";
 describe("nameCore", () => {
   it("drops processor prefixes, store numbers and punctuation", () => {
     expect(nameCore("SQ *CORNER CAFE #1234")).toBe("corner cafe");
+    expect(nameCore("Store 123")).toBe("store 123");
     expect(nameCore("Tim Hortons #0457")).toBe("tim hortons");
     expect(nameCore("Buy MNT +36 shares")).toBe("buy mnt 36 shares");
     expect(nameCore("A&W")).toBe("a and w");
@@ -39,6 +40,16 @@ describe("likelySame", () => {
   it("links one name that starts the other on a word boundary", () => {
     expect(likelySame("Braces Haven", "BRACES HAVEN NEPEAN")).toBe(true);
     expect(likelySame("Bar", "Barrhaven Endodocs")).toBe(false);
+  });
+  it("a one-word name matches only one extra word", () => {
+    expect(likelySame("Transfer", "Transfer in")).toBe(true);
+    expect(likelySame("Transfer", "Transfer to TFSA")).toBe(false);
+    expect(likelySame("Transfer to Chequing", "Transfer to TFSA")).toBe(false);
+    expect(likelySame("Braces Haven", "Braces Haven Nepean ON")).toBe(true);
+  });
+  it("keeps short numbers, drops long store numbers", () => {
+    expect(likelySame("verify-450", "verify-427 eating out")).toBe(false);
+    expect(likelySame("Tim Hortons", "TIM HORTONS #0457")).toBe(true);
   });
   it("links plurals and one typo in longer names", () => {
     expect(likelySame("Vacation", "Vacations")).toBe(true);
