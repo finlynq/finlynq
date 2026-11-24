@@ -6,6 +6,7 @@ import { encryptTxWrite, decryptTxRows, nameLookup, decryptName } from "@/lib/cr
 import { findMatchingTransactionIds, getTransactionsByIds } from "@/lib/transactions/search-scan";
 import { holdingDisplayName } from "@/lib/transactions/search-match";
 import { invalidateUser as invalidateUserTxCache } from "@/lib/mcp/user-tx-cache";
+import { rememberPayee, rememberPayeeIfChanged } from "@/lib/payees/store";
 import { buildHoldingResolver } from "@/lib/external-import/portfolio-holding-resolver";
 import { convertToAccountCurrency } from "@/lib/currency-conversion";
 import { todayISO } from "@/lib/utils/date";
@@ -610,6 +611,8 @@ export async function POST(request: NextRequest) {
     // path that forgets to set it — every entry point is grep-discoverable.
     const tx = await createTransaction(auth.userId, { ...encrypted, source: "manual" }, auth.dek);
     invalidateUserTxCache(auth.userId);
+    // Keep the Payee field's suggestion list current (never fails the save).
+    await rememberPayee(auth.userId, auth.dek, data.payee, data.categoryId ?? null);
     // Portfolio lot tracking — open/close a lot when the row touches a
     // portfolio holding. Soft-fails internally; never blocks the REST
     // response on lot-side errors.
@@ -850,6 +853,8 @@ export async function PUT(request: NextRequest) {
     } catch {
       /* best-effort — never block the edit */
     }
+    // A CHANGED payee joins the suggestion list; read before the row changes.
+    await rememberPayeeIfChanged(auth.userId, auth.dek, id, data.payee, data.categoryId ?? null);
     const encrypted = encryptTxWrite(auth.dek, data);
     const tx = await updateTransaction(id, auth.userId, encrypted, auth.dek);
     invalidateUserTxCache(auth.userId);

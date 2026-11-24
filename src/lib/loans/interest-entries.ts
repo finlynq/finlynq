@@ -33,8 +33,6 @@ import {
 } from "./interest-plan";
 import { loadInterestTransactions, scheduleRowsFor, type LoanRow } from "./interest-check";
 
-export const LOAN_INTEREST_PAYEE = "Loan interest";
-
 export type CreatedInterestEntry = {
   periodDate: string;
   transactionId: number;
@@ -245,7 +243,8 @@ export async function postLoanInterest(
           categoryId,
           currency: account.currency,
           amount: p.amount,
-          payee: encryptField(dek, LOAN_INTEREST_PAYEE),
+          // 2026-11-24: no payee; the note says what this is.
+          payee: "",
           note: encryptField(dek, note),
           source,
           ...(p.reporting ?? {}),

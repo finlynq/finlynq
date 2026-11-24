@@ -173,6 +173,11 @@ export const transactions = pgTable("transactions", {
   isBusiness: integer("is_business").default(0),
   importHash: text("import_hash"),
   fitId: text("fit_id"),
+  // GH #450 — the id another system gave this charge, set by a tool that
+  // records from that system (MCP manage_transactions) so a later run can
+  // tell it is already recorded. Plain text; at most one row per account
+  // carries a given id (uq_transactions_external_id).
+  externalId: text("external_id"),
   linkId: text("link_id"),
   // Issue #96 — multi-currency trade pair linker. Server-generated UUID
   // (NEVER accepted from client) that groups the cash leg + stock leg of a
@@ -229,6 +234,8 @@ export const transactions = pgTable("transactions", {
   index("idx_transactions_user_id").on(t.userId),
   index("idx_transactions_user_import_hash").on(t.userId, t.importHash)
     .where(sql`(import_hash IS NOT NULL)`),
+  uniqueIndex("uq_transactions_external_id").on(t.userId, t.accountId, t.externalId)
+    .where(sql`(external_id IS NOT NULL)`),
   uniqueIndex("transactions_one_opening_balance_per_account").on(t.userId, t.accountId)
     .where(sql`(kind = 'opening_balance'::text)`),
   index("transactions_related_holding_idx").on(t.relatedHoldingId)
@@ -716,6 +723,23 @@ export const subscriptionDismissals = pgTable("subscription_dismissals", {
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 }, (t) => [
   uniqueIndex("subscription_dismissals_user_lookup_uq").on(t.userId, t.payeeLookup),
+]);
+
+// 2026-11-24: the payees a user typed or an assistant recorded, behind the
+// Payee field's suggestions (imports are left out). name_ct is DEK-encrypted;
+// name_lookup is the nameLookup HMAC of the normalized name. An index for
+// suggestions only: nothing totals from it. Store: lib/payees/store.ts.
+export const payees = pgTable("payees", {
+  id: serial("id").primaryKey(),
+  userId: text("user_id").notNull(),
+  nameCt: text("name_ct").notNull(),
+  nameLookup: text("name_lookup").notNull(),
+  useCount: integer("use_count").notNull().default(1),
+  lastCategoryId: integer("last_category_id").references(() => categories.id, { onDelete: "set null" }),
+  lastUsedAt: timestamp("last_used_at", { withTimezone: true }).notNull().defaultNow(),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+}, (t) => [
+  uniqueIndex("payees_user_lookup_uq").on(t.userId, t.nameLookup),
 ]);
 
 // GH #427 (2026-11-21): saved reports and saved Transactions views. One row

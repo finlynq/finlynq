@@ -50,6 +50,7 @@ import { transferLotHook } from "@/lib/portfolio/lots/write-hooks";
 import type { TxRowForLots } from "@/lib/portfolio/lots/types";
 import type { FormatTag, TransactionSource } from "@/lib/tx-source";
 import { isFormatTag } from "@/lib/tx-source";
+import { transferLegNotes } from "@/lib/transactions/auto-description";
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 
@@ -356,10 +357,9 @@ async function resolveTransferCategoryId(
   return created.id as number;
 }
 
-function defaultPayee(direction: "out" | "in", otherAccountName: string | null): string {
-  const other = otherAccountName ?? "another account";
-  return direction === "out" ? `Transfer to ${other}` : `Transfer from ${other}`;
-}
+// 2026-11-24: the "Transfer to X" / "Transfer from Y" description goes in each
+// leg's NOTE (when the person wrote none), and the payee stays empty. Rules in
+// lib/transactions/auto-description.ts.
 
 /**
  * Merge a `source:<format>` tag into a user-supplied tags string (issue #62).
@@ -666,9 +666,7 @@ export async function createTransferPair(
   }
 
   const linkId = randomUUID();
-  const sourcePayee = defaultPayee("out", toAcct.name);
-  const destPayee = defaultPayee("in", fromAcct.name);
-  const note = opts.note ?? "";
+  const legNotes = transferLegNotes(opts.note, fromAcct.name, toAcct.name);
   const tags = applySourceTag(opts.tags ?? "", opts.source);
 
   // Investment-account constraint (strict — issue #22): when a leg lands on
@@ -714,13 +712,13 @@ export async function createTransferPair(
       const categoryId = await resolveTransferCategoryId(tx, userId, dek);
 
       const sourceRow = encryptTxWrite(dek, {
-        payee: sourcePayee,
-        note,
+        payee: "",
+        note: legNotes.source,
         tags,
       });
       const destRow = encryptTxWrite(dek, {
-        payee: destPayee,
-        note,
+        payee: "",
+        note: legNotes.dest,
         tags,
       });
 
@@ -1207,9 +1205,11 @@ export async function loadTransferPair(
  *   - If `enteredAmount` and currencies are unchanged AND `receivedAmount`
  *     is supplied, only the destination leg's `amount` + `enteredFxRate`
  *     are rewritten — preserves the user's manual override.
- *   - `date`, `note`, `tags` are written to both legs verbatim.
- *   - The `payee` is rebuilt from the (possibly new) account names — keeps
- *     "Transfer to X" / "Transfer from X" in sync if accounts were swapped.
+ *   - `date` and `tags` are written to both legs verbatim; the note follows
+ *     `transferLegNotes` (a note still holding the old automatic text is
+ *     rewritten for the new accounts).
+ *   - The payee is left empty (2026-11-24: the transfer description lives
+ *     in the note).
  */
 export async function updateTransferPair(opts: UpdateTransferOpts): Promise<TransferPairResult> {
   const { userId, dek } = opts;
@@ -1337,10 +1337,12 @@ export async function updateTransferPair(opts: UpdateTransferOpts): Promise<Tran
     enteredFxRate = conv.enteredFxRate;
   }
 
-  const note = opts.note ?? pair.source.note ?? "";
   const tags = opts.tags ?? pair.source.tags ?? "";
-  const sourcePayee = defaultPayee("out", toAcct.name);
-  const destPayee = defaultPayee("in", fromAcct.name);
+  // A note still holding the old automatic text follows the (new) accounts.
+  const legNotes = transferLegNotes(opts.note ?? pair.source.note, fromAcct.name, toAcct.name, {
+    fromName: pair.source.accountName,
+    toName: pair.destination.accountName,
+  });
 
   // Resolve the in-kind side. Tri-state semantics:
   //   - holdingName / quantity OMITTED → keep current holding binding
@@ -1508,13 +1510,13 @@ export async function updateTransferPair(opts: UpdateTransferOpts): Promise<Tran
   try {
     await db.transaction(async (tx) => {
       const sourceUpdate = encryptTxWrite(dek, {
-        payee: sourcePayee,
-        note,
+        payee: "",
+        note: legNotes.source,
         tags,
       });
       const destUpdate = encryptTxWrite(dek, {
-        payee: destPayee,
-        note,
+        payee: "",
+        note: legNotes.dest,
         tags,
       });
 
@@ -2118,9 +2120,7 @@ export async function createTransferPairViaSql(
   }
 
   const linkId = randomUUID();
-  const sourcePayee = defaultPayee("out", toAcct.name);
-  const destPayee = defaultPayee("in", fromAcct.name);
-  const note = opts.note ?? "";
+  const legNotes = transferLegNotes(opts.note, fromAcct.name, toAcct.name);
   const tags = applySourceTag(opts.tags ?? "", opts.source);
   const enc = (v: string) => (dek ? encryptField(dek, v) : v);
 
@@ -2196,7 +2196,7 @@ export async function createTransferPairViaSql(
           userId, date, fromAcct.id, categoryId,
           fromCurrency, -sentAmount,
           fromCurrency, -sentAmount, 1,
-          enc(sourcePayee), enc(note), enc(tags), linkId,
+          enc(""), enc(legNotes.source), enc(tags), linkId,
           fromHoldingId,
           sourceQty,
           txSource,
@@ -2228,7 +2228,7 @@ export async function createTransferPairViaSql(
           userId, date, toAcct.id, categoryId,
           toCurrency, receivedAmount,
           fromCurrency, sentAmount, enteredFxRate,
-          enc(destPayee), enc(note), enc(tags), linkId,
+          enc(""), enc(legNotes.dest), enc(tags), linkId,
           toHoldingId,
           // destQuantity may differ from source quantity (split / merger).
           destQty,
@@ -2506,10 +2506,12 @@ export async function updateTransferPairViaSql(
     enteredFxRate = conv.enteredFxRate;
   }
 
-  const note = opts.note ?? pair.source.note ?? "";
   const tags = opts.tags ?? pair.source.tags ?? "";
-  const sourcePayee = defaultPayee("out", toAcct.name);
-  const destPayee = defaultPayee("in", fromAcct.name);
+  // A note still holding the old automatic text follows the (new) accounts.
+  const legNotes = transferLegNotes(opts.note ?? pair.source.note, fromAcct.name, toAcct.name, {
+    fromName: pair.source.accountName,
+    toName: pair.destination.accountName,
+  });
   const enc = (v: string) => (dek ? encryptField(dek, v) : v);
 
   try {
@@ -2526,7 +2528,7 @@ export async function updateTransferPairViaSql(
         [
           date, fromAcct.id, fromCurrency, -sentAmount,
           fromCurrency, -sentAmount, 1,
-          enc(sourcePayee), enc(note), enc(tags),
+          enc(""), enc(legNotes.source), enc(tags),
           pair.source.id, userId,
         ],
       );
@@ -2540,7 +2542,7 @@ export async function updateTransferPairViaSql(
         [
           date, toAcct.id, toCurrency, receivedAmount,
           fromCurrency, sentAmount, enteredFxRate,
-          enc(destPayee), enc(note), enc(tags),
+          enc(""), enc(legNotes.dest), enc(tags),
           pair.destination.id, userId,
         ],
       );
