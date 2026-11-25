@@ -64,6 +64,14 @@ describe("history layer", () => {
     expect(a["c:5"]).toEqual([100, 100]); // 600 in one of 6 months
   });
 
+  it("never plans below zero from months where refunds beat spending", () => {
+    const i = inputs({ history: { "c:4": { "2026-10": -80, "2026-11": 20 } } });
+    const a = amountsOf(cfg([layer({ id: "h", kind: "history", label: "H", op: "set", params: { lookbackMonths: 2 } })]), i);
+    expect(a["c:4"]).toEqual([0, 0]);
+    const steps = traceCell(i, cfg([layer({ id: "h", kind: "history", label: "H", op: "set", params: { lookbackMonths: 2 } })]), "c:4", "2027-01");
+    expect(steps[0].detail).toContain("below zero so counted as 0");
+  });
+
   it("median and seasonal options", () => {
     const median = amountsOf(cfg([layer({ id: "h", kind: "history", label: "H", op: "set", params: { lookbackMonths: 12, method: "median" } })]));
     expect(median["c:5"]).toEqual([0, 0]); // 600 once in 12 months: median 0

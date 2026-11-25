@@ -110,6 +110,9 @@ export function historyValue(
   } else {
     v = vals.reduce((t, x) => t + x, 0) / vals.length;
   }
+  // A few months where refunds beat spending (or money was returned) must not
+  // plan negative spending or income forever: history never goes below zero.
+  if (v < 0) return { value: 0, detail: `${how}, below zero so counted as 0` };
   return { value: v, detail: how };
 }
 
