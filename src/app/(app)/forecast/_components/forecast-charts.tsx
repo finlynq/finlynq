@@ -2,7 +2,8 @@
 
 /**
  * Forecast charts: balances over time (value-over-time → prepareTimeSeries,
- * off-zero domain) and monthly/yearly cash flow (bars, 0-anchored).
+ * off-zero domain) and monthly/yearly cash flow (bars, 0-anchored: income
+ * beside money out, which stacks spending and debt payments).
  *
  * The balances chart can mark events on the timeline (a dashed line at the
  * event's point with its name) and draw the net worth of the scenario you
@@ -97,8 +98,9 @@ export function CashFlowChart({ points, currency, height = 300 }: { points: Flow
         <Tooltip formatter={(v) => formatCurrency(Number(v), currency)} />
         <Legend wrapperStyle={{ fontSize: 12 }} />
         <Bar dataKey="income" name="Income" fill={C[2]} />
-        <Bar dataKey="spending" name="Spending" fill={C[3]} />
-        <Bar dataKey="debt" name="Debt payments" fill={C[1]} />
+        {/* Money out as one bar: spending with debt payments stacked on top. */}
+        <Bar dataKey="spending" name="Spending" stackId="out" fill={C[3]} />
+        <Bar dataKey="debt" name="Debt payments" stackId="out" fill={C[1]} />
       </BarChart>
     </ResponsiveContainer>
   );
