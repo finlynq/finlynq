@@ -105,7 +105,7 @@ export function LayerPanel({
   return (
     <div className="space-y-2">
       <div className="flex items-center justify-between">
-        <p className="text-xs font-medium text-muted-foreground uppercase tracking-wide">Layers, applied top to bottom</p>
+        <div><h3 className="text-sm font-semibold">Where amounts come from</h3><p className="text-xs text-muted-foreground">Applied top to bottom: later ones change earlier ones.</p></div>
         <DropdownMenu>
           <DropdownMenuTrigger render={<Button variant="outline" size="sm" className="h-7 text-xs"><Plus className="h-3.5 w-3.5 mr-1" /> Add layer</Button>} />
           <DropdownMenuContent align="end" className="min-w-56">

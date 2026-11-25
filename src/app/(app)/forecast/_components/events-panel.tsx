@@ -10,13 +10,14 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
-import {
-  DropdownMenu, DropdownMenuContent, DropdownMenuGroup, DropdownMenuItem, DropdownMenuTrigger,
-} from "@/components/ui/dropdown-menu";
+import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { eventSchema, type EventKind, type ForecastEvent } from "@/lib/forecast/config";
 import type { ForecastLineDef } from "@/lib/forecast/types";
-import { Bot, Pencil, Plus, Trash2 } from "lucide-react";
+import { cn } from "@/lib/utils";
+import {
+  ArrowUpDown, BarChart3, Bot, Car, Clock, Home, ListOrdered, Pencil, Plus, RefreshCw, Repeat, Trash2, TrendingUp,
+  type LucideIcon,
+} from "lucide-react";
 
 export const EVENT_LABEL: Record<EventKind, string> = {
   one_off: "One-off amount",
@@ -43,6 +44,34 @@ const EVENT_HELP: Record<EventKind, string> = {
   debt_strategy: "An extra amount every month at your loans, snowball or avalanche.",
   retire: "Income stops, spending changes, pensions start, and investments pay for the rest.",
 };
+
+/** The Add event picker: event kinds in three groups, with a short line each. */
+const PICKER_GROUPS: Array<{ title: string; items: Array<{ kind: EventKind; title: string; hint: string; icon: LucideIcon }> }> = [
+  {
+    title: "Money in or out",
+    items: [
+      { kind: "one_off", title: "One-off amount", hint: "A bonus, a gift, a big purchase", icon: ArrowUpDown },
+      { kind: "recurring_item", title: "New monthly cost or income", hint: "Daycare, a side job", icon: Repeat },
+      { kind: "income_change", title: "Pay change", hint: "A raise, a new job, part time", icon: TrendingUp },
+    ],
+  },
+  {
+    title: "Debt",
+    items: [
+      { kind: "extra_debt_payment", title: "Extra loan payment", hint: "Monthly or one time", icon: Plus },
+      { kind: "refinance", title: "Refinance", hint: "A new rate or term", icon: RefreshCw },
+      { kind: "debt_strategy", title: "Debt payoff plan", hint: "Snowball or avalanche", icon: ListOrdered },
+    ],
+  },
+  {
+    title: "Big moves",
+    items: [
+      { kind: "buy_home", title: "Buy a home", hint: "Down payment and mortgage", icon: Home },
+      { kind: "new_loan", title: "New loan", hint: "A car, a line of credit", icon: Car },
+      { kind: "move_money", title: "Save into investments", hint: "Move cash every month", icon: BarChart3 },
+    ],
+  },
+];
 
 export type LoanOption = { key: string; label: string };
 
@@ -109,6 +138,7 @@ export function EventsPanel({
 }) {
   const [editing, setEditing] = useState<ForecastEvent | null>(null);
   const [isNew, setIsNew] = useState(false);
+  const [pickerOpen, setPickerOpen] = useState(false);
   // Loans this scenario creates can take extra payments / be refinanced too.
   const allLoans: LoanOption[] = [
     ...loans,
@@ -118,55 +148,56 @@ export function EventsPanel({
   const loanName = (k: string) => allLoans.find((l) => l.key === k)?.label ?? "a loan";
   const sorted = [...events].sort((a, b) => a.month.localeCompare(b.month));
 
+  const startNew = (k: EventKind) => {
+    setPickerOpen(false);
+    setEditing(newEvent(k, undefined, allLoans));
+    setIsNew(true);
+  };
+
   return (
     <div className="space-y-2">
       <div className="flex items-center justify-between">
-        <p className="text-xs font-medium text-muted-foreground uppercase tracking-wide">Events, by month</p>
-        <DropdownMenu>
-          <DropdownMenuTrigger render={<Button variant="outline" size="sm" className="h-7 text-xs"><Plus className="h-3.5 w-3.5 mr-1" /> Add event</Button>} />
-          <DropdownMenuContent align="end" className="min-w-64">
-            <DropdownMenuGroup>
-              {(Object.keys(EVENT_LABEL) as EventKind[]).map((k) => (
-                <DropdownMenuItem
-                  key={k}
-                  disabled={(k === "extra_debt_payment" || k === "refinance") && allLoans.length === 0}
-                  onClick={() => { setEditing(newEvent(k, undefined, allLoans)); setIsNew(true); }}
-                >
-                  <div>
-                    <div className="text-sm">{EVENT_LABEL[k]}</div>
-                    <div className="text-xs text-muted-foreground">{EVENT_HELP[k]}</div>
-                  </div>
-                </DropdownMenuItem>
-              ))}
-            </DropdownMenuGroup>
-          </DropdownMenuContent>
-        </DropdownMenu>
+        <h3 className="text-sm font-semibold">Events</h3>
+        <Button variant="ghost" size="sm" className="h-7 px-2 text-xs text-primary" onClick={() => setPickerOpen(true)}>
+          <Plus className="h-3.5 w-3.5 mr-1" /> Add event
+        </Button>
       </div>
-      {sorted.length === 0 && <p className="text-sm text-muted-foreground">No events. Add one to see how a change plays out.</p>}
-      <ol className="space-y-1.5">
-        {sorted.map((e) => (
-          <li key={e.id} className={`flex items-start gap-2 rounded-md border px-2.5 py-2 ${e.enabled ? "" : "opacity-60"}`}>
-            <input
-              type="checkbox"
-              className="mt-1"
-              aria-label={`Use ${e.label || EVENT_LABEL[e.kind]}`}
-              checked={e.enabled}
-              onChange={(ev) => onChange(events.map((x) => (x.id === e.id ? { ...x, enabled: ev.target.checked } : x)))}
-            />
-            <div className="min-w-0 flex-1">
-              <p className="text-sm font-medium flex items-center gap-1.5">
-                {e.label || EVENT_LABEL[e.kind]}
-                {e.updatedBy === "assistant" && <Bot className="h-3.5 w-3.5 text-muted-foreground" aria-label="Changed by your assistant" />}
-              </p>
-              <p className="text-xs text-muted-foreground">{EVENT_LABEL[e.kind]}: {summary(e, loanName)}</p>
-            </div>
-            <div className="flex shrink-0">
-              <Button variant="ghost" size="icon" className="h-7 w-7" aria-label="Edit event" onClick={() => { setEditing(e); setIsNew(false); }}><Pencil className="h-3.5 w-3.5" /></Button>
-              <Button variant="ghost" size="icon" className="h-7 w-7 text-destructive" aria-label="Remove event" onClick={() => onChange(events.filter((x) => x.id !== e.id))}><Trash2 className="h-3.5 w-3.5" /></Button>
-            </div>
-          </li>
-        ))}
-      </ol>
+      {sorted.length === 0 && <p className="text-sm text-muted-foreground">No events yet. Add one to see how a change plays out.</p>}
+      {sorted.length > 0 && (
+        <ol className="ml-1.5 border-l-2 border-border">
+          {sorted.map((e) => (
+            <li key={e.id} className={cn("relative flex items-start gap-2 py-1.5 pl-4", !e.enabled && "opacity-60")}>
+              <span
+                aria-hidden="true"
+                className={cn(
+                  "absolute -left-[7px] top-3 h-3 w-3 rounded-full border-2",
+                  e.enabled ? "border-primary bg-primary" : "border-dashed border-muted-foreground bg-card",
+                )}
+              />
+              <input
+                type="checkbox"
+                className="mt-1 shrink-0"
+                aria-label={`Use ${e.label || EVENT_LABEL[e.kind]}`}
+                checked={e.enabled}
+                onChange={(ev) => onChange(events.map((x) => (x.id === e.id ? { ...x, enabled: ev.target.checked } : x)))}
+              />
+              <div className="min-w-0 flex-1">
+                <p className="text-sm font-medium flex items-center gap-1.5">
+                  {e.label || EVENT_LABEL[e.kind]}
+                  {!e.enabled && <span className="text-xs font-normal text-muted-foreground">off</span>}
+                  {e.updatedBy === "assistant" && <Bot className="h-3.5 w-3.5 text-muted-foreground" aria-label="Changed by your assistant" />}
+                </p>
+                <p className="text-xs text-muted-foreground">{summary(e, loanName)}</p>
+              </div>
+              <div className="flex shrink-0">
+                <Button variant="ghost" size="icon" className="h-7 w-7" aria-label="Edit event" onClick={() => { setEditing(e); setIsNew(false); }}><Pencil className="h-3.5 w-3.5" /></Button>
+                <Button variant="ghost" size="icon" className="h-7 w-7 text-destructive" aria-label="Remove event" onClick={() => onChange(events.filter((x) => x.id !== e.id))}><Trash2 className="h-3.5 w-3.5" /></Button>
+              </div>
+            </li>
+          ))}
+        </ol>
+      )}
+      <EventPicker open={pickerOpen} onOpenChange={setPickerOpen} hasLoans={allLoans.length > 0} onPick={startNew} />
       {editing && (
         <EventDialog
           event={editing}
@@ -181,6 +212,65 @@ export function EventsPanel({
         />
       )}
     </div>
+  );
+}
+
+/** "What happens?": pick an event kind, then its dialog opens. */
+export function EventPicker({
+  open,
+  onOpenChange,
+  hasLoans,
+  onPick,
+}: {
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+  hasLoans: boolean;
+  onPick: (kind: EventKind) => void;
+}) {
+  const needsLoan = (k: EventKind) => (k === "extra_debt_payment" || k === "refinance") && !hasLoans;
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="sm:max-w-2xl">
+        <DialogHeader>
+          <DialogTitle>What happens?</DialogTitle>
+          <DialogDescription>Pick one. You set the month and amounts next.</DialogDescription>
+        </DialogHeader>
+        <div className="space-y-4">
+          {PICKER_GROUPS.map((g) => (
+            <div key={g.title} className="space-y-2">
+              <p className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">{g.title}</p>
+              <div className="grid grid-cols-1 gap-2 sm:grid-cols-3">
+                {g.items.map(({ kind, title, hint, icon: Icon }) => (
+                  <button
+                    key={kind}
+                    type="button"
+                    disabled={needsLoan(kind)}
+                    title={needsLoan(kind) ? "You have no loans to change." : undefined}
+                    onClick={() => onPick(kind)}
+                    className="flex flex-col items-start gap-1 rounded-lg border bg-muted/30 p-3 text-left transition-colors hover:border-primary/60 hover:bg-muted/60 disabled:cursor-not-allowed disabled:opacity-50"
+                  >
+                    <Icon className="h-4 w-4 text-primary" aria-hidden="true" />
+                    <span className="text-sm font-medium">{title}</span>
+                    <span className="text-xs text-muted-foreground">{hint}</span>
+                  </button>
+                ))}
+              </div>
+            </div>
+          ))}
+          <button
+            type="button"
+            onClick={() => onPick("retire")}
+            className="flex w-full items-center gap-3 rounded-lg border border-primary/50 bg-primary/10 p-3 text-left transition-colors hover:bg-primary/15"
+          >
+            <Clock className="h-5 w-5 shrink-0 text-primary" aria-hidden="true" />
+            <span className="flex-1">
+              <span className="block text-sm font-medium">Retire</span>
+              <span className="block text-xs text-muted-foreground">Pay stops, pensions start, investments pay the rest. Shows how long your money lasts.</span>
+            </span>
+          </button>
+        </div>
+      </DialogContent>
+    </Dialog>
   );
 }
 
