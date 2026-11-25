@@ -407,7 +407,7 @@ export default function ForecastPage() {
   const presetBtn = "flex w-full items-center gap-2.5 rounded-lg border bg-muted/30 px-3 py-2.5 text-left text-sm transition-colors hover:border-primary/60 hover:bg-muted/60 disabled:cursor-not-allowed disabled:opacity-50";
 
   return (
-    <div className="space-y-5 max-w-7xl">
+    <div className="space-y-5">
       {/* Header */}
       <div className="min-w-0">
         <h1 className="text-2xl font-bold tracking-tight">Forecast</h1>
