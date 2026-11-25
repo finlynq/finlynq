@@ -24,7 +24,8 @@
  */
 
 import { NextRequest, NextResponse } from "next/server";
-import { z } from "zod";
+import { z } from "zod";
+import { isoDateSchema } from "@/lib/schemas/iso-date";
 import { requireAuth } from "@/lib/auth/require-auth";
 import { requireEncryption } from "@/lib/auth/require-encryption";
 import { encryptField } from "@/lib/crypto/envelope";
@@ -60,7 +61,7 @@ const bulkSchema = z.discriminatedUnion("action", [
   z.object({
     action: z.literal("update_date"),
     ids: z.array(z.number()).min(1),
-    date: z.string(),
+    date: isoDateSchema,
   }),
   z.object({
     action: z.literal("update_note"),

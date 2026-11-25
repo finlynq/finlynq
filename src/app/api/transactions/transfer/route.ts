@@ -15,7 +15,8 @@
  */
 
 import { NextRequest, NextResponse } from "next/server";
-import { z } from "zod";
+import { z } from "zod";
+import { isoDateSchema } from "@/lib/schemas/iso-date";
 import { requireEncryption } from "@/lib/auth/require-encryption";
 import {
   createTransferPair,
@@ -33,7 +34,7 @@ const postSchema = z.object({
   toAccountId: z.number().int().positive(),
   // 0 is allowed for pure in-kind transfers (holdingName + quantity supplied).
   enteredAmount: z.number().nonnegative(),
-  date: z.string().optional(),
+  date: isoDateSchema.optional(),
   receivedAmount: z.number().nonnegative().optional(),
   // In-kind side. Both must be set together; partial → invalid-holding-spec.
   // destHoldingName + destQuantity are optional — default server-side to
@@ -61,7 +62,7 @@ const putSchema = z
     fromAccountId: z.number().int().positive().optional(),
     toAccountId: z.number().int().positive().optional(),
     enteredAmount: z.number().nonnegative().optional(),
-    date: z.string().optional(),
+    date: isoDateSchema.optional(),
     receivedAmount: z.number().nonnegative().optional(),
     // Pass holdingName + quantity to (re)bind the in-kind side; both null
     // to clear it; omit both to leave untouched. destHoldingName binds the

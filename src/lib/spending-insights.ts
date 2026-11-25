@@ -134,6 +134,9 @@ export function spendingByDayOfWeek(
   for (const t of transactions) {
     if (t.amount >= 0) continue; // only expenses
     const dow = new Date(t.date + "T00:00:00").getDay();
+    // A malformed stored date ("2026-09-4") has no weekday; skip it rather
+    // than fail the whole insights request.
+    if (!Number.isInteger(dow)) continue;
     data[dow].total += Math.abs(t.amount);
     data[dow].count++;
   }

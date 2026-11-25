@@ -26,6 +26,7 @@ import { and, eq, ne, or } from "drizzle-orm";
 import { markSnapshotsDirty } from "@/lib/portfolio/snapshots/dirty";
 import { markCashSnapshotsDirty } from "@/lib/portfolio/snapshots/cash-dirty";
 import { z } from "zod";
+import { isoDateSchema } from "@/lib/schemas/iso-date";
 import { validateBody, safeErrorMessage, logApiError } from "@/lib/validate";
 import { isSortableColumnId } from "@/lib/transactions/columns";
 import { deleteTransactionsCascade } from "@/lib/transactions/delete-cascade";
@@ -35,7 +36,7 @@ import { securitiesReadEnabledForUser } from "@/lib/securities/flag";
 import { transferLegChanges } from "@/lib/transactions/transfer-leg-guard";
 
 const postSchema = z.object({
-  date: z.string(),
+  date: isoDateSchema,
   amount: z.number().optional(),       // account-currency amount; computed by server when entered* is provided
   accountId: z.number().int().positive({ message: "Please pick an account" }),
   // Reject 0 (the UI's "no selection" sentinel) up front — letting it through
@@ -64,7 +65,7 @@ const postSchema = z.object({
 
 const putSchema = z.object({
   id: z.number(),
-  date: z.string().optional(),
+  date: isoDateSchema.optional(),
   amount: z.number().optional(),
   accountId: z.number().int().positive({ message: "Please pick an account" }).optional(),
   categoryId: z.number().int().positive({ message: "Please pick a category" }).optional(),
