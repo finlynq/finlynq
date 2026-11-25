@@ -23,6 +23,7 @@ import { QuickImport } from "./_components/quick-import";
 import { IncomeExpenseChart } from "./_components/income-expense-chart";
 import { SpendingCategoryChart } from "./_components/spending-category-chart";
 import { NetWorthHistoryChart } from "@/components/net-worth-history-chart";
+import { monthOverMonth, type MonthEndNetWorthPoint } from "@/lib/net-worth-month-end";
 import { AvailableToSpend } from "./_components/available-to-spend";
 import { useSpendMonthMode } from "./_components/month-switch";
 import { InsightsSection } from "./_components/insights-section";
@@ -121,6 +122,7 @@ export default function DashboardPage() {
   const { displayCurrency, isLoading: currencyLoading } = useDisplayCurrency();
   const [data, setData] = useState<DashboardData | null>(null);
   const [health, setHealth] = useState<HealthData | null>(null);
+  const [nwPoints, setNwPoints] = useState<MonthEndNetWorthPoint[]>([]);
   const [showOnboarding, setShowOnboarding] = useState(false);
   const [userInfo, setUserInfo] = useState<{ email: string; displayName?: string } | null>(null);
   // GH #447: each card switches between last month and this month on its own.
@@ -133,6 +135,14 @@ export default function DashboardPage() {
     fetch(`/api/dashboard?currency=${encodeURIComponent(displayCurrency)}`)
       .then((r) => { if (r.ok) return r.json(); })
       .then((d) => { if (d) setData(d); });
+
+    // The hero card's line + "vs last month": month-end points of the accurate
+    // net-worth history (investments at market, today live), so the line ends
+    // on the hero number. A failure just leaves the card without a line.
+    fetch(`/api/net-worth-history?period=1y&resolution=month&currency=${encodeURIComponent(displayCurrency)}`)
+      .then((r) => (r.ok ? r.json() : null))
+      .then((d) => { if (d && Array.isArray(d.series)) setNwPoints(d.series); })
+      .catch(() => {});
 
     // Financial-health payload feeds both the Health Score card and the
     // KeyMetrics strip (savings rate + DTI) — fetched once here and passed down
@@ -214,33 +224,11 @@ export default function DashboardPage() {
   const incomeSparkline = incExpLast6.map((d) => d.income);
   const expenseSparkline = incExpLast6.map((d) => d.expenses);
 
-  // Net worth over time — API returns rows already converted to display
-  // currency (route.ts collapses currencies via getRateMap + convertWithRateMap
-  // before returning).
-  const nwMap = new Map<string, number>();
-  let runningTotal = 0;
-  (data.netWorthOverTime ?? [])
-    .forEach((p) => {
-      runningTotal += p.cumulative;
-      nwMap.set(p.month, runningTotal);
-    });
-  const netWorthData = Array.from(nwMap.entries())
-    .map(([month, value]) => ({ month, value }))
-    .slice(-24);
-  // Net Worth sparkline shows the last twelve months (the hero card's line).
-  const nwSparkPoints = netWorthData.slice(-12);
-  const nwSparkline = nwSparkPoints.map((d) => d.value);
-  const nwSparkLabels = nwSparkPoints.map((d) => d.month);
-
-  // Month-over-month change
-  let momChange = 0;
-  let momPct = 0;
-  if (netWorthData.length >= 2) {
-    const current = netWorthData[netWorthData.length - 1].value;
-    const prev = netWorthData[netWorthData.length - 2].value;
-    momChange = current - prev;
-    momPct = prev !== 0 ? (momChange / Math.abs(prev)) * 100 : 0;
-  }
+  // Total Net Worth line: last day of each month from the accurate history
+  // (the same series as the Net Worth chart), ending on today's live value.
+  const nwSparkline = nwPoints.map((d) => d.value);
+  const nwSparkLabels = nwPoints.map((d) => d.month);
+  const nwChange = monthOverMonth(nwPoints);
 
   // FINLYNQ-291 (C1) + GH #447 — the Monthly Income / Expenses / Budgets tiles
   // and the Available to Spend card each summarize one month: the last complete
@@ -414,22 +402,24 @@ export default function DashboardPage() {
                     </p>
 
                     {/* Change pill */}
+                    {nwChange && (
                     <div className="flex items-center gap-2.5 mt-1">
-                      {momChange >= 0 ? (
+                      {nwChange.change >= 0 ? (
                         <span className="inline-flex items-center gap-1 text-[12px] font-semibold text-emerald-600 bg-emerald-100/80 dark:bg-emerald-950/60 dark:text-emerald-400 px-2.5 py-0.5 rounded-full">
                           <ArrowUpRight className="h-3 w-3" />
-                          +{momPct.toFixed(1)}%
+                          {nwChange.pct != null && `+${nwChange.pct.toFixed(1)}%`}
                         </span>
                       ) : (
                         <span className="inline-flex items-center gap-1 text-[12px] font-semibold text-rose-600 bg-rose-100/80 dark:bg-rose-950/60 dark:text-rose-400 px-2.5 py-0.5 rounded-full">
                           <ArrowDownRight className="h-3 w-3" />
-                          {momPct.toFixed(1)}%
+                          {nwChange.pct != null && `${nwChange.pct.toFixed(1)}%`}
                         </span>
                       )}
                       <span className="text-[11px] text-muted-foreground">
-                        {momChange >= 0 ? "+" : ""}{formatCurrency(momChange, apiDisplayCurrency)} vs last month
+                        {nwChange.change >= 0 ? "+" : ""}{formatCurrency(nwChange.change, apiDisplayCurrency)} vs last month
                       </span>
                     </div>
+                    )}
                   </div>
 
                 </div>

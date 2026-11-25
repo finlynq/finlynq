@@ -1,5 +1,5 @@
 /**
- * GET /api/net-worth-history?period=6m|1y|all&accountId=<optional int>
+ * GET /api/net-worth-history?period=6m|1y|all&accountId=<optional int>&resolution=month
  *
  * Accurate "Net Worth Over Time" (and per-account "Balance Over Time") daily
  * series. Cash/liability accounts are computed live from `transactions`;
@@ -61,6 +61,7 @@ import {
   type CashDirtyRow,
 } from "@/lib/portfolio/snapshots/cash-dirty";
 import { withOp } from "@/lib/diagnostics/op-context";
+import { monthEndPoints } from "@/lib/net-worth-month-end";
 
 /**
  * DEK-bearing self-heal. Background jobs have no DEK (Stream D encrypts holding
@@ -264,6 +265,10 @@ async function handleGet(request: NextRequest) {
     ? parseInt(params.get("accountId")!, 10)
     : null;
   const basis = parseBasis(params.get("basis"), accountId);
+  // `resolution=month` (the dashboard hero line): one point per calendar
+  // month (its last day, today for the current month), with no per-account
+  // breakdown, so the payload stays small. Anything else is the daily series.
+  const monthly = params.get("resolution") === "month";
 
   try {
     const today = new Date().toISOString().slice(0, 10);
@@ -380,19 +385,21 @@ async function handleGet(request: NextRequest) {
       const alias = decryptName((b as { aliasCt?: string | null }).aliasCt, dek, null);
       accountNameById.set(b.accountId, safeAccountName({ id: b.accountId, name, alias }));
     }
-    const series = rawSeries.map((p) => {
-      const named = p.breakdown.map((e) => ({
-        id: e.accountId,
-        name: accountNameById.get(e.accountId) ?? `Account #${e.accountId}`,
-        value: e.value,
-      }));
-      const { rows, other } = rankBreakdown(named, { maxMembers: 10 });
-      const breakdown = other ? [...rows, other] : rows;
-      // FINLYNQ-129 — the stacked "By account" view needs the FULL per-account
-      // members (with stable account ids) so the client can re-rank + stack on
-      // toggle. `breakdown` stays the pre-ranked top-10 + "Other" tooltip rows.
-      return { date: p.date, value: p.value, breakdown, members: named };
-    });
+    const series = monthly
+      ? monthEndPoints(rawSeries)
+      : rawSeries.map((p) => {
+          const named = p.breakdown.map((e) => ({
+            id: e.accountId,
+            name: accountNameById.get(e.accountId) ?? `Account #${e.accountId}`,
+            value: e.value,
+          }));
+          const { rows, other } = rankBreakdown(named, { maxMembers: 10 });
+          const breakdown = other ? [...rows, other] : rows;
+          // FINLYNQ-129 — the stacked "By account" view needs the FULL per-account
+          // members (with stable account ids) so the client can re-rank + stack on
+          // toggle. `breakdown` stays the pre-ranked top-10 + "Other" tooltip rows.
+          return { date: p.date, value: p.value, breakdown, members: named };
+        });
 
     // Auto-rebuild stale investment history with the request DEK (a cron can't
     // — see kickSelfHeal). Only when we actually have a DEK to price correctly.
