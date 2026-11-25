@@ -454,7 +454,7 @@ export default function ForecastPage() {
 
       <div className="flex flex-wrap items-start gap-5">
         {/* Content */}
-        <div className="min-w-0 flex-[999_1_620px] space-y-5">
+        <div className="min-w-0 flex-[999_1_600px] space-y-5">
           <Card>
             <CardHeader className="pb-1">
               <div className="flex flex-wrap items-center justify-between gap-2">
@@ -557,7 +557,7 @@ export default function ForecastPage() {
         </div>
 
         {/* Your plan */}
-        <aside aria-label="Your plan" className="min-w-0 flex-[1_1_320px] lg:max-w-[400px]">
+        <aside aria-label="Your plan" className="min-w-0 flex-[1_1_360px] lg:max-w-[420px]">
           <Card key={editorKey}>
             <CardHeader className="pb-2">
               <CardTitle className="text-base">Your plan</CardTitle>
@@ -598,7 +598,7 @@ export default function ForecastPage() {
 
               <div className="border-t pt-4 space-y-3">
                 <h3 className="text-sm font-semibold">Assumptions</h3>
-                <div className="grid grid-cols-2 gap-3">
+                <div className="grid grid-cols-2 items-end gap-3">
                   <div className="space-y-1">
                     <Label className="text-xs" htmlFor="fc-infl">Inflation, % a year</Label>
                     <Input id="fc-infl" type="number" step="0.1" className="h-8" defaultValue={config.assumptions.inflationPct} onBlur={(e) => setAssumption("inflationPct", e.target.value)} />

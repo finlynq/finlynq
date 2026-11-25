@@ -38,7 +38,9 @@ function AnswerCard({ label, children, tone }: { label: string; children: React.
   );
 }
 
-const big = "text-lg sm:text-2xl font-semibold tracking-tight tabular-nums leading-tight";
+const big = "text-lg sm:text-2xl font-semibold tracking-tight leading-tight";
+/** Amounts only: the number font is for figures, not words. */
+const num = "tabular-nums";
 const sub = "text-xs text-muted-foreground";
 
 export function AnswerCards({
@@ -69,7 +71,7 @@ export function AnswerCards({
   return (
     <section aria-label="Key results" className="grid grid-cols-2 lg:grid-cols-4 gap-3">
       <AnswerCard label={`Net worth in ${monthLong(result.months[last])}`}>
-        <p className={big}>{money(endNW)}</p>
+        <p className={cn(big, num)}>{money(endNW)}</p>
         <p className={cn(sub, change >= 0 ? "text-emerald-600 dark:text-emerald-400" : "text-rose-600 dark:text-rose-400")}>
           {change >= 0 ? "+" : "−"}{money(Math.abs(change))} from today{real ? ", today's money" : ""}
         </p>
@@ -77,7 +79,7 @@ export function AnswerCards({
       </AnswerCard>
 
       <AnswerCard label="Lowest cash" tone={cashNeg ? "bad" : cash[minCashIdx] < 1000 ? "warn" : undefined}>
-        <p className={cn(big, cashNeg && "text-rose-600 dark:text-rose-400")}>{money(cash[minCashIdx])}</p>
+        <p className={cn(big, num, cashNeg && "text-rose-600 dark:text-rose-400")}>{money(cash[minCashIdx])}</p>
         <p className={sub}>
           {cashNeg ? `Below zero from ${monthLong(cashNeg.month)}` : `in ${monthLong(result.months[minCashIdx])}`}
         </p>
@@ -91,7 +93,7 @@ export function AnswerCards({
           <><p className={big}>Free {monthLong(debtFree.month)}</p>
             <p className={sub}>{money(result.loans.reduce((s, l) => s + l.interestTotal, 0))} interest until then</p></>
         ) : (
-          <><p className={big}>{money(at(result.balances.loans, last))}</p>
+          <><p className={cn(big, num)}>{money(at(result.balances.loans, last))}</p>
             <p className={sub}>still owed at the end</p></>
         )}
       </AnswerCard>
