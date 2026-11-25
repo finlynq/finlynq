@@ -458,12 +458,22 @@ export default function ForecastPage() {
           <Card>
             <CardHeader className="pb-1">
               <div className="flex flex-wrap items-center justify-between gap-2">
-                <Segmented
-                  label="Chart"
-                  value={chart}
-                  options={[{ value: "balances", label: "Balances" }, { value: "flows", label: "Cash flow" }]}
-                  onChange={setChart}
-                />
+                <div className="flex flex-wrap items-center gap-2">
+                  <Segmented
+                    label="Chart"
+                    value={chart}
+                    options={[{ value: "balances", label: "Balances" }, { value: "flows", label: "Cash flow" }]}
+                    onChange={setChart}
+                  />
+                  {/* Same setting as the table's switch: chart and table always show the same periods. */}
+                  <Segmented
+                    label="Chart period"
+                    size="sm"
+                    value={view}
+                    options={[{ value: "yearly", label: "Years" }, { value: "monthly", label: "Months" }]}
+                    onChange={(v) => setView(v)}
+                  />
+                </div>
                 <p className="text-xs text-muted-foreground">
                   {chart === "balances"
                     ? `Net worth, investments, cash and loans owed${real ? ", in today's money" : ""}${compareSource ? `, with ${compareSource.label} dotted` : ""}`
