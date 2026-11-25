@@ -40,6 +40,12 @@ function readCollapsed(): Set<string> {
 export default function BudgetsPage() {
   const { displayCurrency } = useDisplayCurrency();
   const [month, setMonth] = useState(getCurrentMonth());
+  // `?month=YYYY-MM` (the dashboard's Budgets card links here with its month)
+  // is read once on mount; the steppers own the month from then on.
+  useEffect(() => {
+    const m = new URLSearchParams(window.location.search).get("month");
+    if (m && /^\d{4}-(0[1-9]|1[0-2])$/.test(m)) setMonth(m);
+  }, []);
   const [data, setData] = useState<BudgetMonth | null>(null);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState(false);

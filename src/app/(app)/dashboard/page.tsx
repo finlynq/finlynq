@@ -24,6 +24,7 @@ import { IncomeExpenseChart } from "./_components/income-expense-chart";
 import { SpendingCategoryChart } from "./_components/spending-category-chart";
 import { NetWorthHistoryChart } from "@/components/net-worth-history-chart";
 import { monthOverMonth, type MonthEndNetWorthPoint } from "@/lib/net-worth-month-end";
+import { budgetCardMonth, budgetCardView, type BudgetCardSummary } from "@/lib/dashboard/budget-card";
 import { AvailableToSpend } from "./_components/available-to-spend";
 import { useSpendMonthMode } from "./_components/month-switch";
 import { InsightsSection } from "./_components/insights-section";
@@ -129,6 +130,11 @@ export default function DashboardPage() {
   const [incomeMode, toggleIncomeMode] = useSpendMonthMode(DASHBOARD_MONTH_KEYS.income);
   const [expensesMode, toggleExpensesMode] = useSpendMonthMode(DASHBOARD_MONTH_KEYS.expenses);
   const [budgetsMode, toggleBudgetsMode] = useSpendMonthMode(DASHBOARD_MONTH_KEYS.budgets);
+  // The Budgets card reads the budget month model (planned spending − spent),
+  // the same figures as the Budgets page, for its own calendar month. Kept per
+  // month so switching back and forth doesn't refetch; null = failed.
+  const budgetMonthKey = budgetCardMonth(getCurrentMonth(), budgetsMode);
+  const [budgetSummaries, setBudgetSummaries] = useState<Record<string, BudgetCardSummary | null>>({});
 
   useEffect(() => {
     if (currencyLoading) return; // wait until provider has read settings
@@ -168,6 +174,25 @@ export default function DashboardPage() {
       .catch(() => {});
   }, [displayCurrency, currencyLoading]);
 
+  useEffect(() => {
+    if (currencyLoading) return;
+    let cancelled = false;
+    fetch(`/api/budgets/month?month=${budgetMonthKey}`)
+      .then((r) => (r.ok ? r.json() : null))
+      .then((body) => {
+        const s = body?.data?.summary ?? body?.summary;
+        const summary: BudgetCardSummary | null =
+          s && typeof s.plannedSpending === "number" && typeof s.spent === "number"
+            ? { plannedSpending: s.plannedSpending, spent: s.spent }
+            : null;
+        if (!cancelled) setBudgetSummaries((prev) => ({ ...prev, [budgetMonthKey]: summary }));
+      })
+      .catch(() => {
+        if (!cancelled) setBudgetSummaries((prev) => ({ ...prev, [budgetMonthKey]: null }));
+      });
+    return () => { cancelled = true; };
+  }, [budgetMonthKey, displayCurrency, currencyLoading]);
+
   const handleMouseMove = useCallback((e: React.MouseEvent<HTMLDivElement>) => {
     const rect = e.currentTarget.getBoundingClientRect();
     e.currentTarget.style.setProperty("--mouse-x", `${e.clientX - rect.left}px`);
@@ -204,7 +229,11 @@ export default function DashboardPage() {
   (data.incomeVsExpenses ?? []).forEach((row) => {
     const entry = monthMap.get(row.month) ?? { month: row.month, income: 0, expenses: 0 };
     if (row.type === "I") entry.income = row.total;
-    if (row.type === "E") entry.expenses = Math.abs(row.total);
+    // Spending is the negated expense total, NOT its absolute value: a month
+    // whose refunds outweigh its purchases nets POSITIVE, and Math.abs turned
+    // that inflow into spending (dev demo, Nov 2026: +1,560.70 of refunds read
+    // as 1,560.70 spent, and the Budgets card said "Over budget").
+    if (row.type === "E") entry.expenses = -row.total;
     monthMap.set(row.month, entry);
   });
   // FINLYNQ-128 — attach the per-category tooltip breakdown (keyed by the same
@@ -262,12 +291,14 @@ export default function DashboardPage() {
   };
   const incomeCard = cardMonth(incomeMode, toggleIncomeMode);
   const expensesCard = cardMonth(expensesMode, toggleExpensesMode);
-  const budgetsCard = cardMonth(budgetsMode, toggleBudgetsMode);
-  const budgetLeft = budgetsCard.figures.income - budgetsCard.figures.expenses;
-  const expensePct = expensesCard.figures.income > 0
+  const budgetsView = budgetCardView(
+    budgetSummaries[budgetMonthKey],
+    budgetsMode === "current",
+    (n) => formatCurrency(n, apiDisplayCurrency),
+  );
+  const expensePct = expensesCard.figures.income > 0 && expensesCard.figures.expenses > 0
     ? ` · ${Math.round((expensesCard.figures.expenses / expensesCard.figures.income) * 100)}% of income`
     : "";
-  const budgetSparkline = incExpLast6.map((d) => d.income - d.expenses);
 
   // Dev-mode: spending by category for charts
   const spendingData = (data.spendingByCategory ?? [])
@@ -304,17 +335,16 @@ export default function DashboardPage() {
     },
     {
       label: "Budgets",
-      value: budgetLeft,
-      sub: budgetsCard.showingCurrent
-        ? (budgetLeft >= 0 ? "Available to spend" : "Over budget")
-        : (budgetLeft >= 0 ? "Left over" : "Overspent"),
+      value: budgetsView.value,
+      sub: budgetsView.sub,
       icon: Target,
       iconBg: "bg-amber-100 text-amber-600 dark:bg-amber-950/60 dark:text-amber-400",
       sparkColor: "#f59e0b",
-      sparkData: budgetSparkline,
-      sparkLabels: incExpSparkLabels,
-      href: "/budgets",
-      monthSwitch: budgetsCard.monthSwitch,
+      // No line: each month's budget is its own request, and a line of
+      // income minus spending is what made this card misleading.
+      sparkData: [],
+      href: `/budgets?month=${budgetMonthKey}`,
+      monthSwitch: { showingCurrent: budgetsMode === "current", onToggle: toggleBudgetsMode },
     },
   ];
 
