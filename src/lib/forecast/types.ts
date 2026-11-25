@@ -38,6 +38,14 @@ export type LoanInput = {
   months: Record<string, { payment: number; interest: number; principal: number; balance: number }>;
   /** Fixed monthly payment for a debt account with no loan schedule (no interest modelled). */
   fixedPayment: number | null;
+  /**
+   * What the engine needs to re-amortize the loan from any month (extra
+   * payments, refinancing, a debt strategy): yearly rate and the monthly
+   * equivalent of its payment, in the display currency. `reamortizable` is
+   * false for a hand-typed schedule, a flat/total interest method, or an
+   * account with several loans: those keep their schedule rows.
+   */
+  terms: { annualRatePct: number; monthlyPayment: number; residual: number; reamortizable: boolean } | null;
 };
 
 export type PoolAccount = {
@@ -128,11 +136,18 @@ export type ForecastResult = {
     net: number[];
     /** Sold from investments to cover cash (shortfall = draw_investments). */
     drawn: number[];
+    /** Moved from cash into investments by events (negative = taken out). */
+    toInvestments: number[];
+    /** Cash spent buying assets (a home's down payment). */
+    purchases: number[];
+    /** Loan money received in cash (a new loan with cashIn). */
+    borrowed: number[];
   };
   /** Today's balances (the starting point). */
   opening: Record<keyof SeriesBlock, number>;
   balances: SeriesBlock;
-  loans: Array<{ accountId: number; label: string; openingBalance: number; payoffMonth: string | null; interestTotal: number }>;
+  loans: Array<{ key: string; accountId: number | null; label: string; openingBalance: number; payoffMonth: string | null; interestTotal: number; isNew: boolean }>;
+  events: Array<{ id: string; kind: string; label: string; month: string; enabled: boolean }>;
   milestones: Milestone[];
   warnings: ForecastWarning[];
   /** Divide a month's money by this to show it in today's money. */

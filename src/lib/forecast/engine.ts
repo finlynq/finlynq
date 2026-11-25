@@ -12,6 +12,7 @@ import {
 } from "./config";
 import { forecastMonths, planLines } from "./layers";
 import { simulate } from "./simulate";
+import { expandEvents } from "./events";
 import type { ForecastInputs, ForecastResult, ForecastWarning } from "./types";
 
 const round2 = (n: number) => Math.round(n * 100) / 100;
@@ -23,10 +24,20 @@ export function runForecast(
 ): ForecastResult {
   const horizon = Math.max(1, Math.min(config.horizonMonths, inputs.maxHorizonMonths, MAX_HORIZON_MONTHS));
   const months = forecastMonths(inputs.startMonth, horizon);
-  const planned = planLines(inputs, config, months);
-  const sim = simulate(inputs, config, months, planned);
+  const loanKeys = new Set(inputs.loans.map((l) => `debt:${l.accountId}`));
+  const expanded = expandEvents(config, months, loanKeys);
+  // Events' generated layers (income changes, lines a home purchase stops)
+  // run after the scenario's own layers.
+  const planConfig = expanded.layers.length ? { ...config, layers: [...config.layers, ...expanded.layers] } : config;
+  const planned = planLines(inputs, planConfig, months);
+  for (const [key, amounts] of expanded.amounts) planned.set(key, amounts);
+  const typeOf = new Map<string, string>([...inputs.lines, ...expanded.lines].map((l) => [l.key, l.type]));
+  const sim = simulate(inputs, config, months, planned, typeOf, expanded);
 
-  const lines = inputs.lines.map((l) => {
+  const debtDefs = inputs.lines.filter((l) => l.type === "debt");
+  const newLoanDefs = sim.debtLines.map((d) => ({ key: d.key, label: d.label, type: "debt" as const, group: "Debt payments" }));
+  const lineDefs = [...inputs.lines.filter((l) => l.type !== "debt"), ...expanded.lines, ...debtDefs, ...newLoanDefs];
+  const lines = lineDefs.map((l) => {
     const amounts: Array<number | null> =
       l.type === "debt" ? sim.debtLineAmounts.get(l.key) ?? months.map(() => 0) : planned.get(l.key) ?? months.map(() => null);
     const total = round2(amounts.reduce<number>((s, v) => s + (v ?? 0), 0));
@@ -34,10 +45,10 @@ export function runForecast(
   });
 
   const blankLines = lines
-    .filter((l) => l.type !== "debt" && l.amounts.every((v) => v == null))
+    .filter((l) => l.type !== "debt" && !l.key.startsWith("ev:") && l.amounts.every((v) => v == null))
     .map((l) => ({ key: l.key, label: l.label, type: l.type }));
 
-  const warnings: ForecastWarning[] = inputs.notes.map((message) => ({ code: "note", message }));
+  const warnings: ForecastWarning[] = [...inputs.notes.map((message) => ({ code: "note", message })), ...sim.warnings];
   const budgetLayerOn = config.layers.some((l) => l.kind === "budget" && l.enabled);
   const valued = lines.filter((l) => l.type !== "debt" && l.amounts.some((v) => v != null));
   if (budgetLayerOn && valued.length === 0) {
@@ -67,6 +78,7 @@ export function runForecast(
     opening: sim.opening,
     balances: sim.balances,
     loans: sim.loans,
+    events: (config.events ?? []).map((e) => ({ id: e.id, kind: e.kind, label: e.label, month: e.month, enabled: e.enabled })),
     milestones: sim.milestones,
     warnings,
     deflator,
@@ -78,7 +90,7 @@ export type YearlyView = {
   years: string[];
   /** Per line: the year's total (null when every month of that year is blank). */
   lines: Array<{ key: string; label: string; type: string; group: string; amounts: Array<number | null>; total: number }>;
-  totals: { income: number[]; expense: number[]; debtPayment: number[]; interest: number[]; net: number[] };
+  totals: { income: number[]; expense: number[]; debtPayment: number[]; interest: number[]; net: number[]; toInvestments: number[]; purchases: number[]; borrowed: number[] };
   /** Balances at the end of each year (or of the last forecast month in it). */
   balances: Record<keyof ForecastResult["balances"], number[]>;
   /** Deflator at each year's last month. */
@@ -108,6 +120,9 @@ export function yearlyView(result: ForecastResult): YearlyView {
       debtPayment: years.map((y) => sumOf(t.debtPayment, yearIdx.get(y)!)),
       interest: years.map((y) => sumOf(t.interest, yearIdx.get(y)!)),
       net: years.map((y) => sumOf(t.net, yearIdx.get(y)!)),
+      toInvestments: years.map((y) => sumOf(t.toInvestments, yearIdx.get(y)!)),
+      purchases: years.map((y) => sumOf(t.purchases, yearIdx.get(y)!)),
+      borrowed: years.map((y) => sumOf(t.borrowed, yearIdx.get(y)!)),
     },
     balances: {
       cash: years.map((y) => b.cash[last(yearIdx.get(y)!)]),

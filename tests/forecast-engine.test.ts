@@ -39,6 +39,7 @@ function inputs(over: Partial<ForecastInputs> = {}): ForecastInputs {
         openingBalance: 1000,
         balanceSource: "account",
         fixedPayment: null,
+        terms: { annualRatePct: 12, monthlyPayment: 510, residual: 0, reamortizable: true },
         months: {
           "2026-12": { payment: 510, interest: 10, principal: 500, balance: 500 },
           "2027-01": { payment: 505, interest: 5, principal: 500, balance: 0 },
@@ -190,7 +191,7 @@ describe("simulate stage: where the money goes", () => {
   });
 
   it("pays a debt account with no loan by its fixed amount, no interest", () => {
-    const i = inputs({ loans: [{ accountId: 9, label: "Family loan", openingBalance: 250, balanceSource: "fixed", fixedPayment: 100, months: {} }] });
+    const i = inputs({ loans: [{ accountId: 9, label: "Family loan", openingBalance: 250, balanceSource: "fixed", fixedPayment: 100, months: {}, terms: { annualRatePct: 0, monthlyPayment: 100, residual: 0, reamortizable: true } }] });
     const r = runForecast(i, cfg());
     expect(r.totals.debtPayment).toEqual([100, 100, 50]);
     expect(r.balances.loans).toEqual([150, 50, 0]);

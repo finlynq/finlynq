@@ -22,15 +22,21 @@ import { formatCurrency } from "@/lib/currency";
 import { runForecast, yearlyView } from "@/lib/forecast/engine";
 import { traceCell } from "@/lib/forecast/layers";
 import { HORIZON_CHOICES, scenarioConfigSchema, type ScenarioConfig } from "@/lib/forecast/config";
-import { compareResults } from "@/lib/forecast/compare";
+import { compareResults, planVsActual } from "@/lib/forecast/compare";
 import type { ForecastInputs, ForecastResult } from "@/lib/forecast/types";
 import { BalancesChart, CashFlowChart, type BalancePoint, type FlowPoint } from "./_components/forecast-charts";
 import { ForecastTable, type TableModel } from "./_components/forecast-table";
 import { LayerPanel } from "./_components/layer-panel";
 import { ScenarioBar } from "./_components/scenario-bar";
-import { ComparePanel } from "./_components/compare-panel";
+import { ComparePanel, PlanVsActualCard } from "./_components/compare-panel";
+import { EventsPanel, newEvent } from "./_components/events-panel";
+import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import {
+  DropdownMenu, DropdownMenuContent, DropdownMenuGroup, DropdownMenuItem, DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
+import { layerSchema } from "@/lib/forecast/config";
 import { useForecastScenarios } from "./_components/use-forecast-scenarios";
-import { AlertTriangle, Info, RefreshCw } from "lucide-react";
+import { AlertTriangle, ChevronDown, Info, RefreshCw, Sparkles } from "lucide-react";
 
 type RunResponse = { inputs: ForecastInputs; scenario: ScenarioConfig; result: ForecastResult };
 
@@ -56,6 +62,11 @@ export default function ForecastPage() {
     { label: string; config: ScenarioConfig | null; result: ForecastResult | null; note?: string } | null
   >(null);
   const sc = useForecastScenarios(data?.scenario ?? null);
+  // The settings as they were before a preset was applied, to compare against.
+  const [beforePreset, setBeforePreset] = useState<{ label: string; config: ScenarioConfig } | null>(null);
+  const [debtPresetOpen, setDebtPresetOpen] = useState(false);
+  const [debtExtra, setDebtExtra] = useState("300");
+  const [debtMethod, setDebtMethod] = useState<"avalanche" | "snowball">("avalanche");
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -97,6 +108,10 @@ export default function ForecastPage() {
         setCompareSource(null);
         return;
       }
+      if (compareWith === "before") {
+        setCompareSource(beforePreset ? { label: beforePreset.label, config: beforePreset.config, result: null } : null);
+        return;
+      }
       if (compareWith.startsWith("snapshot:")) {
         const id = Number(compareWith.slice(9));
         const snap = sc.snapshots.find((x) => x.id === id);
@@ -121,13 +136,47 @@ export default function ForecastPage() {
     };
     // config.horizonMonths only matters for the built-in Baseline's length.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [compareWith, sc.snapshots, sc.scenarios]);
+  }, [compareWith, sc.snapshots, sc.scenarios, beforePreset]);
 
   const comparison = useMemo(() => {
     if (!compareSource || !data || !result) return null;
     const other = compareSource.result ?? (compareSource.config ? runForecast(data.inputs, compareSource.config) : null);
     return other ? compareResults(result, other) : null;
   }, [compareSource, data, result]);
+
+  const planActual = useMemo(() => {
+    if (!compareWith.startsWith("snapshot:") || !compareSource?.result || !data) return null;
+    return planVsActual(compareSource.result, data.inputs);
+  }, [compareWith, compareSource, data]);
+
+  const applyDebtPreset = () => {
+    if (!config || !data) return;
+    const extra = Number(debtExtra);
+    if (!Number.isFinite(extra) || extra < 0) return;
+    const ev = newEvent("debt_strategy", data.inputs.startMonth);
+    const strategy = { ...ev, label: `${debtMethod === "avalanche" ? "Avalanche" : "Snowball"}: ${extra} extra a month`, params: { method: debtMethod, extraPerMonth: extra } } as typeof ev;
+    setBeforePreset({ label: "before the debt plan", config });
+    setConfig({ ...config, events: [...config.events.filter((e) => e.kind !== "debt_strategy"), strategy] });
+    setCompareWith("before");
+    setDebtPresetOpen(false);
+  };
+
+  const applyThreeMonthPreset = () => {
+    if (!config) return;
+    setBeforePreset({ label: "before the 3-month view", config });
+    setConfig(
+      scenarioConfigSchema.parse({
+        ...config,
+        horizonMonths: 3,
+        layers: [
+          layerSchema.parse({ id: "budget", kind: "budget", label: "Budget", op: "fill" }),
+          layerSchema.parse({ id: "history-3m", kind: "history", label: "Your history", op: "fill", params: { lookbackMonths: 6, method: "average", seasonal: false } }),
+          layerSchema.parse({ id: "scheduled-3m", kind: "scheduled", label: "Scheduled payments", op: "floor" }),
+        ],
+      }),
+    );
+    setView("monthly");
+  };
 
   const update = (patch: Partial<ScenarioConfig>) => {
     if (!config) return;
@@ -153,7 +202,10 @@ export default function ForecastPage() {
           columns: y.years,
           columnLabels: y.years,
           lines: y.lines.map((l) => ({ ...l, amounts: adjN(l.amounts, d) })),
-          totals: { income: adj(y.totals.income, d), expense: adj(y.totals.expense, d), debtPayment: adj(y.totals.debtPayment, d), net: adj(y.totals.net, d) },
+          totals: {
+            income: adj(y.totals.income, d), expense: adj(y.totals.expense, d), debtPayment: adj(y.totals.debtPayment, d), net: adj(y.totals.net, d),
+            toInvestments: adj(y.totals.toInvestments, d), purchases: adj(y.totals.purchases, d), borrowed: adj(y.totals.borrowed, d),
+          },
           balances: { cash: adj(y.balances.cash, d), investments: adj(y.balances.investments, d), loans: adj(y.balances.loans, d), netWorth: adj(y.balances.netWorth, d) },
         },
         balances: y.years.map((yr, i) => ({
@@ -173,7 +225,10 @@ export default function ForecastPage() {
         columns: result.months,
         columnLabels: result.months.map(monthLabel),
         lines: result.lines.map((l) => ({ ...l, amounts: adjN(l.amounts, d) })),
-        totals: { income: adj(result.totals.income, d), expense: adj(result.totals.expense, d), debtPayment: adj(result.totals.debtPayment, d), net: adj(result.totals.net, d) },
+        totals: {
+          income: adj(result.totals.income, d), expense: adj(result.totals.expense, d), debtPayment: adj(result.totals.debtPayment, d), net: adj(result.totals.net, d),
+          toInvestments: adj(result.totals.toInvestments, d), purchases: adj(result.totals.purchases, d), borrowed: adj(result.totals.borrowed, d),
+        },
         balances: { cash: adj(b.cash, d), investments: adj(b.investments, d), loans: adj(b.loans, d), netWorth: adj(b.netWorth, d) },
       },
       balances: result.months.map((m, i) => ({
@@ -253,6 +308,7 @@ export default function ForecastPage() {
         onOpened={onOpened}
         compareWith={compareWith}
         onCompareWith={setCompareWith}
+        extraCompare={beforePreset ? { value: "before", label: `This scenario ${beforePreset.label}` } : null}
       />
 
       {/* Milestones */}
@@ -296,8 +352,25 @@ export default function ForecastPage() {
       {/* Settings */}
       <Card key={editorKey}>
         <CardHeader className="pb-2">
-          <CardTitle className="text-base">Layers and assumptions</CardTitle>
-          <CardDescription>Changes recalculate straight away. Save them as a scenario to keep them.</CardDescription>
+          <div className="flex flex-wrap items-start justify-between gap-2">
+            <div>
+              <CardTitle className="text-base">Layers, events and assumptions</CardTitle>
+              <CardDescription>Changes recalculate straight away. Save them as a scenario to keep them.</CardDescription>
+            </div>
+            <DropdownMenu>
+              <DropdownMenuTrigger render={<Button variant="outline" size="sm" className="h-8"><Sparkles className="h-3.5 w-3.5 mr-1" /> Presets <ChevronDown className="h-3.5 w-3.5 ml-1" /></Button>} />
+              <DropdownMenuContent align="end" className="min-w-64">
+                <DropdownMenuGroup>
+                  <DropdownMenuItem disabled={result.loans.length === 0} onClick={() => setDebtPresetOpen(true)}>
+                    <div><div className="text-sm">Pay off my debt faster…</div><div className="text-xs text-muted-foreground">An extra amount each month at your loans, compared with now.</div></div>
+                  </DropdownMenuItem>
+                  <DropdownMenuItem onClick={applyThreeMonthPreset}>
+                    <div><div className="text-sm">Next 3 months by category</div><div className="text-xs text-muted-foreground">Budget, then your recent average, then scheduled payments, by month.</div></div>
+                  </DropdownMenuItem>
+                </DropdownMenuGroup>
+              </DropdownMenuContent>
+            </DropdownMenu>
+          </div>
         </CardHeader>
         <CardContent className="grid gap-4 md:grid-cols-2">
           <LayerPanel layers={config.layers} lines={data.inputs.lines} onChange={(layers) => update({ layers })} />
@@ -320,6 +393,14 @@ export default function ForecastPage() {
                 </SelectContent>
               </Select>
             </div>
+          </div>
+          <div className="md:col-span-2 border-t pt-4">
+            <EventsPanel
+              events={config.events}
+              lines={data.inputs.lines}
+              loans={data.inputs.loans.map((l) => ({ key: `debt:${l.accountId}`, label: l.label }))}
+              onChange={(events) => update({ events })}
+            />
           </div>
         </CardContent>
       </Card>
@@ -368,6 +449,9 @@ export default function ForecastPage() {
           note={compareSource.note}
         />
       )}
+      {planActual && compareSource && (
+        <PlanVsActualCard data={planActual} snapshotLabel={compareSource.label} currency={cur} />
+      )}
       {compareWith && compareSource && !comparison && (
         <p className="text-sm text-destructive">That comparison can&apos;t be read.</p>
       )}
@@ -405,6 +489,34 @@ export default function ForecastPage() {
           </CardContent>
         </Card>
       )}
+      <Dialog open={debtPresetOpen} onOpenChange={setDebtPresetOpen}>
+        <DialogContent className="sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle>Pay off my debt faster</DialogTitle>
+            <DialogDescription>Adds a debt strategy from {monthLong(result.startMonth)} and compares it with your forecast as it is now.</DialogDescription>
+          </DialogHeader>
+          <div className="space-y-3">
+            <div className="space-y-1">
+              <Label className="text-xs" htmlFor="dp-extra">Extra per month</Label>
+              <Input id="dp-extra" type="number" min={0} step="any" value={debtExtra} onChange={(e) => setDebtExtra(e.target.value)} />
+            </div>
+            <div className="space-y-1">
+              <Label className="text-xs">Order</Label>
+              <Select value={debtMethod} onValueChange={(v) => setDebtMethod(v === "snowball" ? "snowball" : "avalanche")}>
+                <SelectTrigger className="h-8 text-xs" aria-label="Order"><SelectValue /></SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="avalanche">Avalanche: highest rate first (least interest)</SelectItem>
+                  <SelectItem value="snowball">Snowball: smallest balance first (quick wins)</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setDebtPresetOpen(false)}>Cancel</Button>
+            <Button onClick={applyDebtPreset}>Show me</Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }

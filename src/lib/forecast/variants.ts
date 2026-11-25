@@ -27,8 +27,14 @@ export function applyPatch(parent: ScenarioConfig, patch: VariantPatch): Scenari
     const pos = new Map(patch.order.map((id, i) => [id, i]));
     layers = [...layers].sort((a, b) => (pos.get(a.id) ?? 1e6) - (pos.get(b.id) ?? 1e6));
   }
+  const removedEvents = new Set(patch.removedEventIds ?? []);
+  const events = [
+    ...(parent.events ?? []).filter((e) => !removedEvents.has(e.id)).map((e) => patch.eventOverrides?.[e.id] ?? e),
+    ...(patch.addedEvents ?? []),
+  ];
   return scenarioConfigSchema.parse({
     ...parent,
+    events,
     horizonMonths: patch.horizonMonths ?? parent.horizonMonths,
     shortfall: patch.shortfall ?? parent.shortfall,
     assumptions: { ...parent.assumptions, ...(patch.assumptions ?? {}) },
@@ -51,10 +57,23 @@ export function diffFromParent(parent: ScenarioConfig, edited: ScenarioConfig): 
   for (const k of Object.keys(edited.assumptions) as Array<keyof ScenarioConfig["assumptions"]>) {
     if (edited.assumptions[k] !== parent.assumptions[k]) assumptions[k] = edited.assumptions[k];
   }
+  const parentEvents = new Map((parent.events ?? []).map((e) => [e.id, e]));
+  const editedEventIds = new Set((edited.events ?? []).map((e) => e.id));
+  const eventOverrides: Record<string, ScenarioConfig["events"][number]> = {};
+  const addedEvents: ScenarioConfig["events"] = [];
+  for (const e of edited.events ?? []) {
+    const p = parentEvents.get(e.id);
+    if (!p) addedEvents.push(e);
+    else if (!same(p, e)) eventOverrides[e.id] = e;
+  }
+  const removedEventIds = (parent.events ?? []).filter((e) => !editedEventIds.has(e.id)).map((e) => e.id);
   const patch: VariantPatch = variantPatchSchema.parse({
     layerOverrides,
     removedLayerIds,
     addedLayers,
+    eventOverrides,
+    removedEventIds,
+    addedEvents,
     ...(edited.horizonMonths !== parent.horizonMonths ? { horizonMonths: edited.horizonMonths } : {}),
     ...(edited.shortfall !== parent.shortfall ? { shortfall: edited.shortfall } : {}),
     ...(Object.keys(assumptions).length ? { assumptions } : {}),
@@ -72,6 +91,9 @@ export function isEmptyPatch(p: VariantPatch): boolean {
     !Object.keys(p.layerOverrides).length &&
     !p.removedLayerIds.length &&
     !p.addedLayers.length &&
+    !Object.keys(p.eventOverrides ?? {}).length &&
+    !(p.removedEventIds ?? []).length &&
+    !(p.addedEvents ?? []).length &&
     p.horizonMonths == null &&
     p.shortfall == null &&
     !Object.keys(p.assumptions ?? {}).length &&

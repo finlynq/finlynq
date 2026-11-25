@@ -183,6 +183,7 @@ export async function loadForecastInputs(
     const monthsOut: LoanInput["months"] = {};
     let opening = 0;
     let source: LoanInput["balanceSource"] = "projection";
+    let terms: LoanInput["terms"] = null;
     if (linked.length > 1) notes.push(`${a.name} has ${linked.length} loans; they are projected from their own schedules, not the account balance.`);
     for (const loan of linked) {
       let summary;
@@ -208,6 +209,15 @@ export async function loadForecastInputs(
       const p = projectLoanFromToday(loan, summary, linked.length === 1 ? acct : undefined, ctx.today);
       const ccy = loan.currency ?? a.currency;
       const conv = (n: number) => convertWithRateMap(n, ccy, ctx.rateMap);
+      // Re-amortizing (extra payments, refinancing, a debt strategy) needs the
+      // rate and the monthly payment; only a single, calculated, rate-based loan
+      // can be re-amortized honestly.
+      terms = {
+        annualRatePct: loan.annualRate,
+        monthlyPayment: round2(conv(summary.monthlyEquivalentPayment + ((loan.extraPayment ?? 0) * summary.periodsPerYear) / 12)),
+        residual: round2(conv(loan.residualValue ?? 0)),
+        reamortizable: linked.length === 1 && summary.scheduleMode !== "manual" && summary.interestMethod === "rate",
+      };
       opening += conv(p.remainingBalance);
       if (p.balanceSource === "account") source = "account";
       for (const r of p.upcoming) {
@@ -240,6 +250,7 @@ export async function loadForecastInputs(
       opening = owed;
       source = "fixed";
       fixedPayment = a.paymentAmount != null && a.paymentAmount > 0 ? round2(convertWithRateMap(a.paymentAmount, a.currency, ctx.rateMap)) : null;
+      if (fixedPayment != null) terms = { annualRatePct: 0, monthlyPayment: fixedPayment, residual: 0, reamortizable: true };
       if (fixedPayment == null && owed > 0.005) notes.push(`${a.name} counts as a debt payment but has no loan or fixed payment, so it is not paid down in the forecast.`);
     }
     for (const m of Object.keys(monthsOut)) {
@@ -247,7 +258,8 @@ export async function loadForecastInputs(
       monthsOut[m] = { payment: round2(v.payment), interest: round2(v.interest), principal: round2(v.principal), balance: round2(v.balance) };
     }
     if (opening <= 0.005 && Object.keys(monthsOut).length === 0 && fixedPayment == null) continue;
-    loans.push({ accountId: a.id, label, openingBalance: round2(opening), balanceSource: source, months: monthsOut, fixedPayment });
+    if (terms && linked.length > 1) terms = { ...terms, reamortizable: false };
+    loans.push({ accountId: a.id, label, openingBalance: round2(opening), balanceSource: source, months: monthsOut, fixedPayment, terms });
     debtLines.push({ key: `debt:${a.id}`, label, type: "debt", group: "Debt payments" });
   }
 

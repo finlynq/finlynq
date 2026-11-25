@@ -11,7 +11,7 @@ import { formatCurrency } from "@/lib/currency";
 import { formatCompactNumber } from "@/lib/utils/number";
 import { prepareTimeSeries } from "@/lib/chart-series";
 import { CHART_COLORS } from "@/lib/chart-colors";
-import type { ForecastComparison } from "@/lib/forecast/compare";
+import type { ForecastComparison, PlanVsActual } from "@/lib/forecast/compare";
 
 const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
 const label = (ym: string | null) => (ym ? `${MONTHS[Number(ym.slice(5, 7)) - 1]} ${ym.slice(0, 4)}` : "–");
@@ -55,7 +55,7 @@ export function ComparePanel({
           </p>
         )}
         {note && <p className="text-xs text-muted-foreground">{note}</p>}
-        <div className="grid gap-3 sm:grid-cols-3">
+        <div className="grid gap-3 sm:grid-cols-4">
           <div><p className="text-xs text-muted-foreground">Net worth A, {label(end.month)}</p><p className="text-lg font-semibold tabular-nums">{fmt(end.a)}</p></div>
           <div><p className="text-xs text-muted-foreground">Net worth B, {label(end.month)}</p><p className="text-lg font-semibold tabular-nums">{fmt(end.b)}</p></div>
           <div>
@@ -63,6 +63,15 @@ export function ComparePanel({
             <p className={`text-lg font-semibold tabular-nums ${end.diff != null && end.diff < 0 ? "text-rose-600" : "text-emerald-600"}`}>
               {end.diff == null ? "–" : `${end.diff >= 0 ? "+" : ""}${fmt(end.diff)}`}
             </p>
+          </div>
+          <div>
+            <p className="text-xs text-muted-foreground">Loan interest, A → B</p>
+            <p className="text-lg font-semibold tabular-nums">{fmt(comparison.interest.a)} → {fmt(comparison.interest.b)}</p>
+            {Math.abs(comparison.interest.diff) >= 1 && (
+              <p className={`text-xs ${comparison.interest.diff < 0 ? "text-emerald-600" : "text-rose-600"}`}>
+                {comparison.interest.diff < 0 ? `${fmt(-comparison.interest.diff)} less interest` : `${fmt(comparison.interest.diff)} more interest`}
+              </p>
+            )}
           </div>
         </div>
         <ResponsiveContainer width="100%" height={220}>
@@ -115,6 +124,56 @@ export function ComparePanel({
             )}
           </div>
         </div>
+      </CardContent>
+    </Card>
+  );
+}
+
+/** What a frozen snapshot planned against what actually happened, for its finished months. */
+export function PlanVsActualCard({ data, snapshotLabel, currency }: { data: PlanVsActual; snapshotLabel: string; currency: string }) {
+  const fmt = (v: number | null) => (v == null ? "–" : formatCurrency(v, currency, { decimals: 0 }));
+  if (data.months.length === 0) {
+    return (
+      <Card>
+        <CardHeader className="pb-1"><CardTitle className="text-base">Plan vs actual</CardTitle></CardHeader>
+        <CardContent>
+          <p className="text-sm text-muted-foreground">
+            None of {snapshotLabel}&apos;s months have finished yet. Once they do, this shows what it planned against what actually happened.
+          </p>
+        </CardContent>
+      </Card>
+    );
+  }
+  const t = data.totals;
+  return (
+    <Card>
+      <CardHeader className="pb-1">
+        <CardTitle className="text-base">Plan vs actual</CardTitle>
+        <CardDescription>
+          {snapshotLabel} against what happened in {label(data.months[0])}{data.months.length > 1 ? ` – ${label(data.months[data.months.length - 1])}` : ""}.
+        </CardDescription>
+      </CardHeader>
+      <CardContent className="space-y-3">
+        <div className="grid gap-3 sm:grid-cols-2 text-sm">
+          <div>Income: planned {fmt(t.plannedIncome)}, actual <span className="font-semibold">{fmt(t.actualIncome)}</span> ({t.actualIncome - t.plannedIncome >= 0 ? "+" : ""}{fmt(t.actualIncome - t.plannedIncome)})</div>
+          <div>Spending: planned {fmt(t.plannedSpending)}, actual <span className="font-semibold">{fmt(t.actualSpending)}</span> ({t.actualSpending - t.plannedSpending >= 0 ? "+" : ""}{fmt(t.actualSpending - t.plannedSpending)})</div>
+        </div>
+        <table className="w-full text-sm">
+          <thead><tr className="text-xs text-muted-foreground"><th className="text-left font-normal">Line</th><th className="text-right font-normal">Planned</th><th className="text-right font-normal">Actual</th><th className="text-right font-normal">Difference</th></tr></thead>
+          <tbody>
+            {data.lines.slice(0, 15).map((l) => (
+              <tr key={l.key} className="border-t border-border/40">
+                <td className="py-1">{l.label}</td>
+                <td className="py-1 text-right tabular-nums">{fmt(l.plannedTotal)}</td>
+                <td className="py-1 text-right tabular-nums">{fmt(l.actualTotal)}</td>
+                <td className="py-1 text-right tabular-nums">{l.diff >= 0 ? "+" : ""}{fmt(l.diff)}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+        {data.skipped > 0 && (
+          <p className="text-xs text-muted-foreground">{data.skipped} planned line{data.skipped === 1 ? "" : "s"} (events, debt payments) have no actual to compare with here.</p>
+        )}
       </CardContent>
     </Card>
   );

@@ -30,6 +30,7 @@ export function ScenarioBar({
   onOpened,
   compareWith,
   onCompareWith,
+  extraCompare,
 }: {
   hook: Hook;
   working: ScenarioConfig;
@@ -38,6 +39,8 @@ export function ScenarioBar({
   onOpened: (config: ScenarioConfig) => void;
   compareWith: string;
   onCompareWith: (v: string) => void;
+  /** e.g. "This scenario before the debt plan", after a preset. */
+  extraCompare?: { value: string; label: string } | null;
 }) {
   const { open, scenarios, snapshots } = hook;
   const [message, setMessage] = useState<{ tone: "ok" | "error"; text: string } | null>(null);
@@ -136,6 +139,7 @@ export function ScenarioBar({
             <SelectTrigger className="h-8 w-56 text-xs" aria-label="Compare with"><SelectValue /></SelectTrigger>
             <SelectContent>
               <SelectItem value="none">Nothing</SelectItem>
+              {extraCompare && <SelectItem value={extraCompare.value}>{extraCompare.label}</SelectItem>}
               {isSaved && <SelectItem value="builtin">Baseline (built in)</SelectItem>}
               {scenarios.filter((s) => !s.unreadable && (!isSaved || s.id !== open.id)).map((s) => (
                 <SelectItem key={`s${s.id}`} value={`scenario:${s.id}`}>Scenario: {s.name}</SelectItem>

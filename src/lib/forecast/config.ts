@@ -129,6 +129,150 @@ export const LAYER_KINDS = ["budget", "history", "budget_realism", "scheduled", 
 export type LayerKind = (typeof LAYER_KINDS)[number];
 export type ForecastLayer = z.infer<typeof layerSchema>;
 
+// ── Events (Phase 3, plan section 6) ───────────────────────────────────────
+//
+// Named, dated changes. They are data: events.ts expands them into extra
+// lines, layers and simulate-stage changes at run time, so they stay readable
+// ("Buy a home, Jun 2028") instead of a pile of manual rows.
+
+const eventBase = {
+  id: z.string().min(1).max(40),
+  label: z.string().max(120).default(""),
+  enabled: z.boolean().default(true),
+  /** First month the event applies. */
+  month: monthStr,
+  note: z.string().max(500).optional(),
+  updatedBy: z.enum(["user", "assistant"]).default("user"),
+};
+const money = z.number().min(0).max(1e12);
+const lineKey = z.string().max(80);
+const debtKey = z.string().regex(/^(debt:\d+|newloan:[A-Za-z0-9_-]+)$/, "Pick a loan.");
+
+/** A single amount in or out of cash (inheritance, wedding, car bought cash). */
+export const oneOffEventSchema = z.object({
+  ...eventBase,
+  kind: z.literal("one_off"),
+  params: z.object({ direction: z.enum(["in", "out"]), amount: money }),
+});
+
+/** A new monthly income or expense line from `month` to `to` (side income, childcare, a car's running costs). */
+export const recurringItemEventSchema = z.object({
+  ...eventBase,
+  kind: z.literal("recurring_item"),
+  params: z.object({
+    type: z.enum(["income", "expense"]),
+    amount: money,
+    to: monthStr.optional(),
+    /** Yearly growth; null = the scenario's inflation; 0 = flat. */
+    growthPct: z.number().min(-50).max(100).nullable().default(0),
+  }),
+});
+
+/** A raise, pay cut or job loss on income lines (empty = all income), from `month` to `to`. */
+export const incomeChangeEventSchema = z.object({
+  ...eventBase,
+  kind: z.literal("income_change"),
+  params: z.object({
+    lineKeys: z.array(lineKey).max(200).default([]),
+    op: z.enum(["scale", "set"]),
+    /** Factor for scale (1.05 = +5%), amount per month for set (0 = no income). */
+    value: z.number().min(0).max(1e12),
+    to: monthStr.optional(),
+  }),
+});
+
+/** Move cash into investments (or back), once or every month. */
+export const moveMoneyEventSchema = z.object({
+  ...eventBase,
+  kind: z.literal("move_money"),
+  params: z.object({
+    direction: z.enum(["to_investments", "from_investments"]),
+    amount: money,
+    frequency: z.enum(["once", "monthly"]).default("monthly"),
+    to: monthStr.optional(),
+  }),
+});
+
+/** Pay more on one loan, once or every month. */
+export const extraDebtPaymentEventSchema = z.object({
+  ...eventBase,
+  kind: z.literal("extra_debt_payment"),
+  params: z.object({
+    loanKey: debtKey,
+    amount: money,
+    frequency: z.enum(["once", "monthly"]).default("monthly"),
+    to: monthStr.optional(),
+  }),
+});
+
+/** A new loan taken in the scenario (never touches your real loans). */
+export const newLoanEventSchema = z.object({
+  ...eventBase,
+  kind: z.literal("new_loan"),
+  params: z.object({
+    principal: money,
+    annualRatePct: z.number().min(0).max(100),
+    termMonths: z.number().int().min(1).max(600),
+    /** Whether the money lands in cash (a personal loan) or is spent at once (a car loan for a car). */
+    cashIn: z.boolean().default(true),
+  }),
+});
+
+/** New rate and term for one of your loans from `month` (a scenario copy; the real loan is unchanged). */
+export const refinanceEventSchema = z.object({
+  ...eventBase,
+  kind: z.literal("refinance"),
+  params: z.object({
+    loanKey: debtKey,
+    annualRatePct: z.number().min(0).max(100),
+    termMonths: z.number().int().min(1).max(600),
+  }),
+});
+
+/** Buy a home: down payment from cash, a mortgage, the home as an asset, yearly costs, rent lines stopping. */
+export const buyHomeEventSchema = z.object({
+  ...eventBase,
+  kind: z.literal("buy_home"),
+  params: z.object({
+    price: money,
+    downPayment: money,
+    mortgageRatePct: z.number().min(0).max(100),
+    mortgageTermMonths: z.number().int().min(1).max(600),
+    /** Property tax, insurance and upkeep, % of the price per year (grows with inflation). */
+    yearlyCostsPct: z.number().min(0).max(20).default(1.5),
+    /** Lines that stop from the purchase month (usually rent). */
+    stopLineKeys: z.array(lineKey).max(50).default([]),
+  }),
+});
+
+/** Throw an extra amount at debt every month, ordered snowball (smallest balance first) or avalanche (highest rate first); paid-off payments roll into it. */
+export const debtStrategyEventSchema = z.object({
+  ...eventBase,
+  kind: z.literal("debt_strategy"),
+  params: z.object({
+    method: z.enum(["snowball", "avalanche"]),
+    extraPerMonth: money,
+  }),
+});
+
+export const eventSchema = z.discriminatedUnion("kind", [
+  oneOffEventSchema,
+  recurringItemEventSchema,
+  incomeChangeEventSchema,
+  moveMoneyEventSchema,
+  extraDebtPaymentEventSchema,
+  newLoanEventSchema,
+  refinanceEventSchema,
+  buyHomeEventSchema,
+  debtStrategyEventSchema,
+]);
+export type ForecastEvent = z.infer<typeof eventSchema>;
+export const EVENT_KINDS = [
+  "one_off", "recurring_item", "income_change", "move_money", "extra_debt_payment",
+  "new_loan", "refinance", "buy_home", "debt_strategy",
+] as const;
+export type EventKind = (typeof EVENT_KINDS)[number];
+
 export const assumptionsSchema = z.object({
   inflationPct: z.number().min(-20).max(50).default(2.5),
   investmentReturnPct: z.number().min(-50).max(50).default(5),
@@ -143,6 +287,7 @@ export const scenarioConfigSchema = z.object({
   /** When cash would go below zero: let it (and warn), or sell investments to cover it. */
   shortfall: z.enum(["negative", "draw_investments"]).default("negative"),
   layers: z.array(layerSchema).max(50).default([]),
+  events: z.array(eventSchema).max(50).default([]),
 });
 export type ScenarioConfig = z.infer<typeof scenarioConfigSchema>;
 
@@ -197,6 +342,10 @@ export const variantPatchSchema = z.object({
   addedLayers: z.array(layerSchema).max(50).default([]),
   /** Final layer order by id, when it differs from parent order + added. */
   order: z.array(z.string()).max(100).optional(),
+  /** Events, the same way as layers (Phase 3). */
+  eventOverrides: z.record(z.string(), eventSchema).default({}),
+  removedEventIds: z.array(z.string()).max(50).default([]),
+  addedEvents: z.array(eventSchema).max(50).default([]),
 });
 export type VariantPatch = z.infer<typeof variantPatchSchema>;
 
