@@ -239,7 +239,7 @@ export function EventPicker({
           {PICKER_GROUPS.map((g) => (
             <div key={g.title} className="space-y-2">
               <p className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">{g.title}</p>
-              <div className="grid grid-cols-1 gap-2 sm:grid-cols-3">
+              <div className="grid grid-cols-2 gap-2 sm:grid-cols-3">
                 {g.items.map(({ kind, title, hint, icon: Icon }) => (
                   <button
                     key={kind}

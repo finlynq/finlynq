@@ -22,7 +22,7 @@ export function Segmented<T extends string>({
     <div
       role="group"
       aria-label={label}
-      className={cn("inline-flex max-w-full shrink-0 overflow-x-auto rounded-lg border bg-card p-0.5", className)}
+      className={cn("inline-flex max-w-full shrink-0 overflow-x-auto rounded-lg border bg-card p-0.5 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden", className)}
     >
       {options.map((o) => {
         const on = o.value === value;
