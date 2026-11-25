@@ -852,6 +852,12 @@ async function deleteAllUserDataTx(tx: TxClient, userId: string) {
   await tx.delete(s.userGuidanceNotes).where(eq(s.userGuidanceNotes.userId, userId));
   // GH #427 saved reports / Transactions views (no FK children or parents).
   await tx.delete(s.savedViews).where(eq(s.savedViews.userId, userId));
+  // Forecast (2026-11-25): snapshots and revisions before scenarios (they
+  // reference them); variants reference parents in the same table, which one
+  // statement deleting all of the user's rows satisfies.
+  await tx.delete(s.forecastSnapshots).where(eq(s.forecastSnapshots.userId, userId));
+  await tx.delete(s.forecastScenarioRevisions).where(eq(s.forecastScenarioRevisions.userId, userId));
+  await tx.delete(s.forecastScenarios).where(eq(s.forecastScenarios.userId, userId));
   await tx.delete(s.transactionRules).where(eq(s.transactionRules.userId, userId));
   await tx.delete(s.importTemplates).where(eq(s.importTemplates.userId, userId));
   await tx.delete(s.transactions).where(eq(s.transactions.userId, userId));

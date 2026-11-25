@@ -38,6 +38,7 @@ import {
   Activity,
   Server,
   ScrollText,
+  LineChart as LineChartIcon,
 } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 import { FinlynqLogo } from "@/components/FinlynqLogo";
@@ -89,6 +90,8 @@ const navGroups: { label: string; items: NavItem[] }[] = [
   {
     label: "Planning",
     items: [
+      // Forecast (plan/forecast-scenarios.md): budget + loans projected over years. Out of dev mode.
+      { href: "/forecast", label: "Forecast", icon: LineChartIcon, color: ACTIVE_ACCENT, mode: "prod" },
       { href: "/scenarios", label: "Scenarios", icon: GitBranch, color: ACTIVE_ACCENT, mode: "dev" },
       { href: "/fire", label: "FIRE Calculator", icon: FlameKindling, color: ACTIVE_ACCENT, mode: "dev" },
     ],
