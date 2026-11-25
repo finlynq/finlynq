@@ -255,6 +255,46 @@ export const debtStrategyEventSchema = z.object({
   }),
 });
 
+/**
+ * Retire (Phase 4): from `month`, the chosen income stops (none chosen = all
+ * income), spending is scaled, pensions/benefits start, contributions to
+ * investments stop, and a withdrawal strategy pays cash from investments.
+ */
+export const retireEventSchema = z.object({
+  ...eventBase,
+  kind: z.literal("retire"),
+  params: z.object({
+    stopIncomeLineKeys: z.array(lineKey).max(200).default([]),
+    /** Spending in retirement as a share of before (0.8 = 80%). */
+    spendingFactor: z.number().min(0).max(3).default(1),
+    pensions: z
+      .array(
+        z.object({
+          label: z.string().max(120).default("Pension"),
+          /** Per month, in today's money when growthPct is null (it then grows with inflation from today). */
+          amount: money,
+          /** When it starts; omitted = the retirement month. */
+          startMonth: monthStr.optional(),
+          /** Yearly growth; null = the scenario's inflation; 0 = flat. */
+          growthPct: z.number().min(-50).max(100).nullable().default(null),
+        }),
+      )
+      .max(10)
+      .default([]),
+    stopContributions: z.boolean().default(true),
+    withdrawal: z
+      .discriminatedUnion("method", [
+        /** Sell investments only when cash would go below zero. */
+        z.object({ method: z.literal("cover_shortfall") }),
+        /** A yearly % of investments at retirement (the "4% rule"), paid monthly, growing with inflation. */
+        z.object({ method: z.literal("fixed_pct"), pct: z.number().min(0).max(30), growWithInflation: z.boolean().default(true) }),
+        /** A fixed amount every month, optionally growing with inflation. */
+        z.object({ method: z.literal("fixed_amount"), amount: money, growWithInflation: z.boolean().default(true) }),
+      ])
+      .default({ method: "cover_shortfall" }),
+  }),
+});
+
 export const eventSchema = z.discriminatedUnion("kind", [
   oneOffEventSchema,
   recurringItemEventSchema,
@@ -265,11 +305,12 @@ export const eventSchema = z.discriminatedUnion("kind", [
   refinanceEventSchema,
   buyHomeEventSchema,
   debtStrategyEventSchema,
+  retireEventSchema,
 ]);
 export type ForecastEvent = z.infer<typeof eventSchema>;
 export const EVENT_KINDS = [
   "one_off", "recurring_item", "income_change", "move_money", "extra_debt_payment",
-  "new_loan", "refinance", "buy_home", "debt_strategy",
+  "new_loan", "refinance", "buy_home", "debt_strategy", "retire",
 ] as const;
 export type EventKind = (typeof EVENT_KINDS)[number];
 

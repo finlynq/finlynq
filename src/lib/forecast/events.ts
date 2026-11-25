@@ -11,6 +11,9 @@
  *  buy_home         → down payment (cash → asset), the home as an asset, a new
  *                     mortgage, a yearly-costs line, and the chosen lines (rent)
  *                     set to 0 from the purchase month
+ *  retire           → income stops (generated layer), spending scaled (layer),
+ *                     pension lines, contributions to investments stop, and a
+ *                     withdrawal strategy for simulate (only the first counts)
  * Lines an event adds are not touched by layers: their amounts are the event's.
  */
 import { layerSchema, type ForecastEvent, type ForecastLayer, type ScenarioConfig } from "./config";
@@ -34,6 +37,15 @@ export type LoanPlan = {
   strategy: { method: "snowball" | "avalanche"; extraPerMonth: number; startIdx: number; label: string } | null;
 };
 
+export type RetirementPlan = {
+  idx: number;
+  label: string;
+  withdrawal:
+    | { method: "cover_shortfall" }
+    | { method: "fixed_pct"; pct: number; growWithInflation: boolean }
+    | { method: "fixed_amount"; amount: number; growWithInflation: boolean };
+};
+
 export type ExpandedEvents = {
   lines: ForecastLineDef[];
   amounts: Map<string, Array<number | null>>;
@@ -42,6 +54,7 @@ export type ExpandedEvents = {
   purchases: number[];
   assetAdds: number[];
   loanPlan: LoanPlan;
+  retirement: RetirementPlan | null;
   warnings: Array<{ code: string; message: string; ref?: string }>;
 };
 
@@ -71,6 +84,7 @@ export function expandEvents(config: ScenarioConfig, months: readonly string[], 
     purchases: new Array(n).fill(0),
     assetAdds: new Array(n).fill(0),
     loanPlan: { extras: new Map(), refinances: new Map(), newLoans: [], strategy: null },
+    retirement: null,
     warnings: [],
   };
   const events = (config.events ?? []).filter((e) => e.enabled);
@@ -177,6 +191,36 @@ export function expandEvents(config: ScenarioConfig, months: readonly string[], 
         }
         break;
       }
+      case "retire": {
+        if (out.retirement) {
+          out.warnings.push({ code: "event_two_retirements", message: "Only the first retirement is used.", ref: e.id });
+          break;
+        }
+        const p = e.params;
+        const name = label(e, "Retire");
+        out.retirement = { idx: start, label: name, withdrawal: p.withdrawal };
+        out.layers.push(layerSchema.parse({
+          id: `event-${e.id}-income`, kind: "manual", label: `${name}: income stops`, op: "set", params: { amount: 0 },
+          scope: p.stopIncomeLineKeys.length ? { lineKeys: p.stopIncomeLineKeys } : { lineTypes: ["income"] },
+          from: months[start], updatedBy: e.updatedBy,
+        }));
+        if (p.spendingFactor !== 1) {
+          out.layers.push(layerSchema.parse({
+            id: `event-${e.id}-spending`, kind: "manual", label: `${name}: spending × ${p.spendingFactor}`, op: "scale",
+            params: { amount: p.spendingFactor }, scope: { lineTypes: ["expense"] }, from: months[start], updatedBy: e.updatedBy,
+          }));
+        }
+        p.pensions.forEach((pen, k) => {
+          const pStart = pen.startMonth ? idxOf(months, pen.startMonth) : start;
+          if (pStart < 0) return;
+          // growthPct null: the amount is in today's money and grows with inflation from today.
+          const rate = (pen.growthPct ?? config.assumptions.inflationPct) / 100;
+          const from = pen.growthPct == null ? -1 : pStart;
+          addLine(`ev:${e.id}:p${k}`, pen.label || "Pension", "income",
+            months.map((_, i) => (i >= pStart ? round2(pen.amount * Math.pow(1 + rate, (i - from) / 12)) : null)));
+        });
+        break;
+      }
       case "debt_strategy": {
         if (out.loanPlan.strategy) {
           out.warnings.push({ code: "event_two_strategies", message: "Only the first debt strategy is used.", ref: e.id });
@@ -186,6 +230,11 @@ export function expandEvents(config: ScenarioConfig, months: readonly string[], 
         break;
       }
     }
+  }
+  // Contributions to investments stop at retirement (when asked).
+  const ret = events.find((e) => e.kind === "retire");
+  if (out.retirement && ret?.kind === "retire" && ret.params.stopContributions) {
+    for (let i = out.retirement.idx; i < n; i++) if (out.toInvestments[i] > 0) out.toInvestments[i] = 0;
   }
   return out;
 }

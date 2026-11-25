@@ -27,6 +27,7 @@ import { runForecast } from "@/lib/forecast/engine";
 import { baselineScenario } from "@/lib/forecast/config";
 import { shiftMonth } from "@/lib/forecast/layers";
 import { todayISO } from "@/lib/utils/date";
+import { setBirthYear } from "@/lib/settings/birth-year";
 
 const DB_URL = process.env.DATABASE_URL || process.env.PF_DATABASE_URL || "";
 const HAS_TEST_DB = /\/[^/]*_test([?#]|$)/.test(DB_URL);
@@ -85,6 +86,9 @@ describeDb("forecast inputs", () => {
   it("budget numbers equal the budget page's; unbudgeted lines have no series", async () => {
     const inputs = await loadForecastInputs(userId, TEST_DEK, { horizonMonths: 24 });
     expect(inputs.startMonth).toBe(next);
+    expect(inputs.birthYear).toBeNull();
+    await setBirthYear(userId, 1980);
+    expect((await loadForecastInputs(userId, TEST_DEK, { horizonMonths: 12 })).birthYear).toBe(1980);
     const month = await loadBudgetMonth(userId, TEST_DEK, next);
     const page = month.spending.flatMap((g) => g.lines).find((l) => l.name === "Groceries")!;
     expect(inputs.budget[`c:${ids.groceries}`].months[next]).toBe(page.budgeted);

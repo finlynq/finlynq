@@ -40,7 +40,7 @@ describe("EventsPanel", () => {
   });
 
   it("new events are valid for every kind, and a new loan's key points at it", () => {
-    for (const k of ["one_off", "recurring_item", "income_change", "move_money", "extra_debt_payment", "new_loan", "refinance", "buy_home", "debt_strategy"] as const) {
+    for (const k of ["one_off", "recurring_item", "income_change", "move_money", "extra_debt_payment", "new_loan", "refinance", "buy_home", "debt_strategy", "retire"] as const) {
       const e = newEvent(k, "2027-01", [{ key: "debt:9", label: "Car" }]);
       expect(eventSchema.safeParse(e).success, k).toBe(true);
     }

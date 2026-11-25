@@ -15,7 +15,7 @@ export type TableModel = {
   columns: string[];
   columnLabels: string[];
   lines: TableLine[];
-  totals: { income: number[]; expense: number[]; debtPayment: number[]; net: number[]; toInvestments?: number[]; purchases?: number[]; borrowed?: number[] };
+  totals: { income: number[]; expense: number[]; debtPayment: number[]; net: number[]; toInvestments?: number[]; purchases?: number[]; borrowed?: number[]; withdrawn?: number[] };
   balances: { cash: number[]; investments: number[]; loans: number[]; netWorth: number[] };
 };
 
@@ -113,6 +113,7 @@ export function ForecastTable({
           {model.totals.borrowed?.some((v) => Math.abs(v) >= 0.5) && totalRow("Borrowed (into cash)", model.totals.borrowed)}
           {model.totals.purchases?.some((v) => Math.abs(v) >= 0.5) && totalRow("Down payments (cash into a home)", model.totals.purchases)}
           {model.totals.toInvestments?.some((v) => Math.abs(v) >= 0.5) && totalRow("Moved to investments", model.totals.toInvestments)}
+          {model.totals.withdrawn?.some((v) => Math.abs(v) >= 0.5) && totalRow("Paid from investments (retirement)", model.totals.withdrawn)}
           {totalRow("Cash at end", model.balances.cash)}
           {totalRow("Investments at end", model.balances.investments)}
           {totalRow("Loans owed at end", model.balances.loans)}

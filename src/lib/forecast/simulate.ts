@@ -11,7 +11,12 @@
  *  - moving money between cash and investments, a down payment (cash → the
  *    home), or borrowing changes balances, never income or spending;
  *  - when cash would go below zero: leave it negative (and warn) or sell
- *    investments to cover it (`shortfall`).
+ *    investments to cover it (`shortfall`);
+ *  - after a retire event, a withdrawal strategy moves money from investments
+ *    to cash (a transfer, never income): cover the shortfall only, a yearly %
+ *    of investments at retirement (the "4% rule", growing with inflation), or
+ *    a fixed monthly amount. Money "runs out" in the first month after
+ *    retiring when cash is below zero and nothing is left to sell.
  *
  * Loans: each loan follows its schedule rows (from the loan engine, re-anchored
  * like the Loans page) until the first month a scenario change touches it (an
@@ -47,6 +52,7 @@ export type SimulateOutput = {
   loans: ForecastResult["loans"];
   milestones: Milestone[];
   warnings: Array<{ code: string; message: string; ref?: string }>;
+  retirement: { idx: number; investmentsAtRetirement: number; netWorthAtRetirement: number; runsOutMonth: string | null } | null;
 };
 
 export function openingBalances(inputs: ForecastInputs): Record<keyof SeriesBlock, number> {
@@ -100,6 +106,7 @@ function emptyExpanded(n: number): ExpandedEvents {
     lines: [], amounts: new Map(), layers: [],
     toInvestments: new Array(n).fill(0), purchases: new Array(n).fill(0), assetAdds: new Array(n).fill(0),
     loanPlan: { extras: new Map(), refinances: new Map(), newLoans: [], strategy: null },
+    retirement: null,
     warnings: [],
   };
 }
@@ -117,7 +124,7 @@ export function simulate(
   const series = (): number[] => new Array(n).fill(0);
   const totals: ForecastResult["totals"] = {
     income: series(), expense: series(), debtPayment: series(), interest: series(), net: series(), drawn: series(),
-    toInvestments: series(), purchases: series(), borrowed: series(),
+    toInvestments: series(), purchases: series(), borrowed: series(), withdrawn: series(),
   };
   const balances: SeriesBlock = {
     cash: series(), investments: series(), otherAssets: series(), loans: series(), otherLiabilities: series(), netWorth: series(),
@@ -202,6 +209,11 @@ export function simulate(
   let debtFreeSeen = !loans.some((l) => l.balance > EPS) && plan.newLoans.length === 0;
   let freedPool = 0;
   let orderFixed = false;
+  const ret = expanded.retirement;
+  let retireState: SimulateOutput["retirement"] = null;
+  let fixedPctAnnual = 0;
+  let shortWarned = false;
+  const inflMonthly = Math.pow(1 + config.assumptions.inflationPct / 100, 1 / 12);
 
   for (let i = 0; i < n; i++) {
     const month = months[i];
@@ -297,6 +309,14 @@ export function simulate(
       }
     }
 
+    if (ret && i === ret.idx) {
+      // What there is on the day of retiring (end of the month before).
+      const inv0 = i === 0 ? opening.investments : balances.investments[i - 1];
+      const nw0 = i === 0 ? opening.netWorth : balances.netWorth[i - 1];
+      retireState = { idx: i, investmentsAtRetirement: round2(inv0), netWorthAtRetirement: round2(nw0), runsOutMonth: null };
+      if (ret.withdrawal.method === "fixed_pct") fixedPctAnnual = (inv0 * ret.withdrawal.pct) / 100;
+    }
+
     const toInv = expanded.toInvestments[i];
     const purchase = expanded.purchases[i];
     cash += income - expense - debtPay - purchase + borrowed;
@@ -306,6 +326,24 @@ export function simulate(
     if (moved < 0) moved = -Math.min(-moved, Math.max(0, investments)); // can't take out more than is there
     cash -= moved;
     investments += moved;
+
+    // Retirement withdrawals: investments → cash (a transfer, not income).
+    let withdrawn = 0;
+    if (ret && i >= ret.idx) {
+      const w = ret.withdrawal;
+      const grow = (on: boolean) => (on ? Math.pow(inflMonthly, i - ret.idx) : 1);
+      let want = 0;
+      if (w.method === "fixed_pct") want = (fixedPctAnnual / 12) * grow(w.growWithInflation);
+      else if (w.method === "fixed_amount") want = w.amount * grow(w.growWithInflation);
+      else if (cash < 0) want = -cash;
+      withdrawn = Math.max(0, Math.min(want, investments));
+      investments -= withdrawn;
+      cash += withdrawn;
+      if (w.method !== "cover_shortfall" && !shortWarned && cash < -EPS && investments > 1) {
+        shortWarned = true;
+        warnings.push({ code: "withdrawals_short", message: `From ${month}, the retirement withdrawals don't cover spending, so cash goes below zero while investments are left. Raise the withdrawal or choose "Sell only what's needed".` });
+      }
+    }
 
     let drawn = 0;
     if (cash < 0 && config.shortfall === "draw_investments" && investments > 0) {
@@ -330,6 +368,11 @@ export function simulate(
     totals.toInvestments[i] = round2(moved);
     totals.purchases[i] = round2(purchase);
     totals.borrowed[i] = round2(borrowed);
+    totals.withdrawn[i] = round2(withdrawn);
+    if (retireState && retireState.runsOutMonth == null && i >= retireState.idx && cash < -EPS && investments <= 1) {
+      retireState.runsOutMonth = month;
+      milestones.push({ kind: "money_runs_out", month, label: "Money runs out" });
+    }
 
     const anyOwed = loans.some((l) => l.active && l.balance > EPS);
     const futureNew = loans.some((l) => l.isNew && !l.active);
@@ -365,5 +408,6 @@ export function simulate(
     })),
     milestones,
     warnings,
+    retirement: retireState,
   };
 }

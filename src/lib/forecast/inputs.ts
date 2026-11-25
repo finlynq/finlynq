@@ -25,6 +25,7 @@ import { loadActualsByMonth, loadBudgetContext, loadBudgetsByMonth, loadSchedule
 import { categoryKey, groupKey, monthEndDate, monthStartDate } from "@/lib/budgets/lines";
 import { horizonEnd, loadRules, rulesByLine } from "@/lib/budgets/rule-store";
 import { forecastMonths, shiftMonth } from "./layers";
+import { getBirthYear } from "@/lib/settings/birth-year";
 import type { BudgetSeries, ForecastInputs, ForecastLineDef, LoanInput, PoolAccount } from "./types";
 
 const round2 = (n: number) => Math.round(n * 100) / 100;
@@ -263,10 +264,12 @@ export async function loadForecastInputs(
     debtLines.push({ key: `debt:${a.id}`, label, type: "debt", group: "Debt payments" });
   }
 
+  const birthYear = await getBirthYear(userId);
   return {
     inputsAsOf: new Date().toISOString(),
     today: ctx.today,
     startMonth,
+    birthYear,
     currency: ctx.currency,
     maxHorizonMonths,
     budgetHorizonEnd,

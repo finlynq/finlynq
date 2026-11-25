@@ -62,6 +62,27 @@ export function runForecast(
   const rate = config.assumptions.inflationPct / 100;
   const deflator = months.map((_, i) => Math.pow(1 + rate, (i + 1) / 12));
 
+  const birthYear = inputs.birthYear ?? null;
+  const ageAt = (m: string | null) => (m && birthYear ? Number(m.slice(0, 4)) - birthYear : null);
+  const milestones = [...sim.milestones];
+  let retirement: ForecastResult["retirement"] = null;
+  if (sim.retirement && expanded.retirement) {
+    const month = months[sim.retirement.idx];
+    milestones.push({ kind: "retired", month, label: birthYear ? `Retire at ${ageAt(month)}` : "Retire" });
+    milestones.sort((a, b) => a.month.localeCompare(b.month));
+    const end = months[months.length - 1];
+    retirement = {
+      month,
+      age: ageAt(month),
+      investmentsAtRetirement: sim.retirement.investmentsAtRetirement,
+      netWorthAtRetirement: sim.retirement.netWorthAtRetirement,
+      runsOutMonth: sim.retirement.runsOutMonth,
+      runsOutAge: ageAt(sim.retirement.runsOutMonth),
+      horizonEndMonth: end,
+      horizonEndAge: ageAt(end),
+    };
+  }
+
   return {
     resultSchemaVersion: FORECAST_RESULT_SCHEMA_VERSION,
     engineVersion: FORECAST_ENGINE_VERSION,
@@ -79,7 +100,9 @@ export function runForecast(
     balances: sim.balances,
     loans: sim.loans,
     events: (config.events ?? []).map((e) => ({ id: e.id, kind: e.kind, label: e.label, month: e.month, enabled: e.enabled })),
-    milestones: sim.milestones,
+    birthYear,
+    retirement,
+    milestones,
     warnings,
     deflator,
     blankLines,
@@ -90,7 +113,7 @@ export type YearlyView = {
   years: string[];
   /** Per line: the year's total (null when every month of that year is blank). */
   lines: Array<{ key: string; label: string; type: string; group: string; amounts: Array<number | null>; total: number }>;
-  totals: { income: number[]; expense: number[]; debtPayment: number[]; interest: number[]; net: number[]; toInvestments: number[]; purchases: number[]; borrowed: number[] };
+  totals: { income: number[]; expense: number[]; debtPayment: number[]; interest: number[]; net: number[]; toInvestments: number[]; purchases: number[]; borrowed: number[]; withdrawn: number[] };
   /** Balances at the end of each year (or of the last forecast month in it). */
   balances: Record<keyof ForecastResult["balances"], number[]>;
   /** Deflator at each year's last month. */
@@ -123,6 +146,7 @@ export function yearlyView(result: ForecastResult): YearlyView {
       toInvestments: years.map((y) => sumOf(t.toInvestments, yearIdx.get(y)!)),
       purchases: years.map((y) => sumOf(t.purchases, yearIdx.get(y)!)),
       borrowed: years.map((y) => sumOf(t.borrowed, yearIdx.get(y)!)),
+      withdrawn: years.map((y) => sumOf(t.withdrawn, yearIdx.get(y)!)),
     },
     balances: {
       cash: years.map((y) => b.cash[last(yearIdx.get(y)!)]),

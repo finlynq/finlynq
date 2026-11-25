@@ -28,6 +28,7 @@ export const EVENT_LABEL: Record<EventKind, string> = {
   refinance: "Refinance a loan",
   buy_home: "Buy a home",
   debt_strategy: "Debt payoff strategy",
+  retire: "Retire",
 };
 
 const EVENT_HELP: Record<EventKind, string> = {
@@ -40,6 +41,7 @@ const EVENT_HELP: Record<EventKind, string> = {
   refinance: "A new rate and term for one of your loans from a month.",
   buy_home: "Down payment, a mortgage, the home as an asset, yearly costs, rent stopping.",
   debt_strategy: "An extra amount every month at your loans, snowball or avalanche.",
+  retire: "Income stops, spending changes, pensions start, and investments pay for the rest.",
 };
 
 export type LoanOption = { key: string; label: string };
@@ -64,6 +66,7 @@ export function newEvent(kind: EventKind, month = nextMonth(), loans: LoanOption
     refinance: { loanKey: firstLoan, annualRatePct: 4, termMonths: 240 },
     buy_home: { price: 500000, downPayment: 100000, mortgageRatePct: 5, mortgageTermMonths: 300, yearlyCostsPct: 1.5, stopLineKeys: [] },
     debt_strategy: { method: "avalanche", extraPerMonth: 300 },
+    retire: { stopIncomeLineKeys: [], spendingFactor: 0.8, pensions: [], stopContributions: true, withdrawal: { method: "cover_shortfall" } },
   };
   return eventSchema.parse({ ...base, kind, params: params[kind] });
 }
@@ -84,6 +87,12 @@ function summary(e: ForecastEvent, loanName: (k: string) => string): string {
     case "refinance": return `${loanName(p.loanKey as string)} at ${p.annualRatePct}% over ${p.termMonths} months from ${monthLabel(e.month)}`;
     case "buy_home": return `${p.price} home, ${p.downPayment} down, ${p.mortgageRatePct}% over ${p.mortgageTermMonths} months, ${monthLabel(e.month)}`;
     case "debt_strategy": return `${p.method === "snowball" ? "Snowball" : "Avalanche"}, ${p.extraPerMonth} extra a month from ${monthLabel(e.month)}`;
+    case "retire": {
+      const w = p.withdrawal as { method: string; pct?: number; amount?: number };
+      const how = w.method === "fixed_pct" ? `${w.pct}% a year from investments` : w.method === "fixed_amount" ? `${w.amount}/month from investments` : "investments cover what's short";
+      const pens = (p.pensions as unknown[]).length;
+      return `${monthLabel(e.month)}, spending ${Math.round(Number(p.spendingFactor) * 100)}%, ${pens} pension${pens === 1 ? "" : "s"}, ${how}`;
+    }
   }
 }
 
@@ -324,6 +333,10 @@ function EventDialog({
               {numField("extraPerMonth", "Extra per month")}
             </>)}
           </div>
+          {kind === "retire" && (
+            <RetireFields params={p} set={set} />
+          )}
+          {kind === "retire" && lineChecks("stopIncomeLineKeys", "income", "Income that stops (none ticked = all income)")}
           {kind === "income_change" && lineChecks("lineKeys", "income", "Which income (none ticked = all income)")}
           {kind === "buy_home" && lineChecks("stopLineKeys", "expense", "Lines that stop when you move in (usually rent)")}
           {error && <p className="text-sm text-destructive">{error}</p>}
@@ -344,5 +357,78 @@ function EventDialog({
         </DialogFooter>
       </DialogContent>
     </Dialog>
+  );
+}
+
+type Pension = { label?: string; amount: number; startMonth?: string; growthPct?: number | null };
+
+/** Retire event fields: spending, pensions, contributions, withdrawals. */
+function RetireFields({ params, set }: { params: Record<string, unknown>; set: (k: string, v: unknown) => void }) {
+  const pensions = ((params.pensions as Pension[]) ?? []).slice();
+  const w = (params.withdrawal ?? { method: "cover_shortfall" }) as { method: string; pct?: number; amount?: number; growWithInflation?: boolean };
+  const setPension = (i: number, patch: Partial<Pension>) => {
+    const next = pensions.map((x, k) => (k === i ? { ...x, ...patch } : x));
+    set("pensions", next);
+  };
+  return (
+    <div className="space-y-3">
+      <div className="grid grid-cols-2 gap-3">
+        <div className="space-y-1">
+          <Label className="text-xs" htmlFor="ev-spend">Spending in retirement, % of now</Label>
+          <Input id="ev-spend" type="number" step="1" className="h-8" value={String(Math.round(Number(params.spendingFactor ?? 1) * 100))}
+            onChange={(e) => set("spendingFactor", Number(e.target.value) / 100)} />
+        </div>
+        <label className="flex items-end gap-2 text-sm pb-1.5">
+          <input type="checkbox" checked={params.stopContributions !== false} onChange={(e) => set("stopContributions", e.target.checked)} />
+          Stop saving into investments
+        </label>
+      </div>
+      <div className="space-y-1.5">
+        <div className="flex items-center justify-between">
+          <Label className="text-xs">Pensions and benefits (per month, in today&apos;s money)</Label>
+          <Button type="button" variant="ghost" size="sm" className="h-6 text-xs" disabled={pensions.length >= 10}
+            onClick={() => set("pensions", [...pensions, { label: "Pension", amount: 1000, growthPct: null }])}>+ Add</Button>
+        </div>
+        {pensions.length === 0 && <p className="text-xs text-muted-foreground">None. Add a workplace pension or a government benefit.</p>}
+        {pensions.map((pen, i) => (
+          <div key={i} className="grid grid-cols-[1fr_6rem_8rem_auto] gap-2 items-center">
+            <Input aria-label={`Pension ${i + 1} name`} className="h-8" value={pen.label ?? ""} onChange={(e) => setPension(i, { label: e.target.value })} />
+            <Input aria-label={`Pension ${i + 1} amount`} type="number" step="any" className="h-8" value={String(pen.amount ?? 0)} onChange={(e) => setPension(i, { amount: Number(e.target.value) })} />
+            <Input aria-label={`Pension ${i + 1} starts`} type="month" className="h-8" value={pen.startMonth ?? ""} onChange={(e) => setPension(i, { startMonth: e.target.value || undefined })} />
+            <Button type="button" variant="ghost" size="icon" className="h-7 w-7 text-destructive" aria-label={`Remove pension ${i + 1}`}
+              onClick={() => set("pensions", pensions.filter((_, k) => k !== i))}><Trash2 className="h-3.5 w-3.5" /></Button>
+          </div>
+        ))}
+        {pensions.length > 0 && <p className="text-xs text-muted-foreground">Start month blank = when you retire.</p>}
+      </div>
+      <div className="grid grid-cols-2 gap-3">
+        <div className="space-y-1 col-span-2">
+          <Label className="text-xs">Paying for retirement from investments</Label>
+          <Select value={w.method} onValueChange={(v) => set("withdrawal",
+            v === "fixed_pct" ? { method: "fixed_pct", pct: 4, growWithInflation: true }
+            : v === "fixed_amount" ? { method: "fixed_amount", amount: 2000, growWithInflation: true }
+            : { method: "cover_shortfall" })}>
+            <SelectTrigger className="h-8 text-xs" aria-label="Withdrawal"><SelectValue /></SelectTrigger>
+            <SelectContent>
+              <SelectItem value="cover_shortfall">Sell only what&apos;s needed to cover spending</SelectItem>
+              <SelectItem value="fixed_pct">A fixed % a year (the 4% rule), growing with inflation</SelectItem>
+              <SelectItem value="fixed_amount">A fixed amount every month</SelectItem>
+            </SelectContent>
+          </Select>
+        </div>
+        {w.method === "fixed_pct" && (
+          <div className="space-y-1">
+            <Label className="text-xs" htmlFor="ev-wpct">% of investments a year</Label>
+            <Input id="ev-wpct" type="number" step="0.1" className="h-8" value={String(w.pct ?? 4)} onChange={(e) => set("withdrawal", { ...w, pct: Number(e.target.value) })} />
+          </div>
+        )}
+        {w.method === "fixed_amount" && (
+          <div className="space-y-1">
+            <Label className="text-xs" htmlFor="ev-wamt">Amount per month</Label>
+            <Input id="ev-wamt" type="number" step="any" className="h-8" value={String(w.amount ?? 0)} onChange={(e) => set("withdrawal", { ...w, amount: Number(e.target.value) })} />
+          </div>
+        )}
+      </div>
+    </div>
   );
 }

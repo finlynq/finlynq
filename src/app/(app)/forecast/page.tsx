@@ -44,6 +44,13 @@ const MONTH_NAMES = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Se
 const monthLabel = (ym: string) => `${MONTH_NAMES[Number(ym.slice(5, 7)) - 1]} ${ym.slice(2, 4)}`;
 const monthLong = (ym: string) => `${MONTH_NAMES[Number(ym.slice(5, 7)) - 1]} ${ym.slice(0, 4)}`;
 
+/** Months from `startMonth` to the December of the year the user turns `age` (capped at 50 years). */
+function monthsToAge(startMonth: string, birthYear: number, age: number): number {
+  const [y, m] = startMonth.split("-").map(Number);
+  const end = (birthYear + age) * 12 + 11;
+  return Math.max(1, Math.min(600, end - (y * 12 + (m - 1)) + 1));
+}
+
 function horizonLabel(months: number) {
   return months % 12 === 0 ? `${months / 12} year${months === 12 ? "" : "s"}` : `${months} months`;
 }
@@ -67,6 +74,9 @@ export default function ForecastPage() {
   const [debtPresetOpen, setDebtPresetOpen] = useState(false);
   const [debtExtra, setDebtExtra] = useState("300");
   const [debtMethod, setDebtMethod] = useState<"avalanche" | "snowball">("avalanche");
+  const [retirePresetOpen, setRetirePresetOpen] = useState(false);
+  const [retireForm, setRetireForm] = useState({ birthYear: "", age: "65", spending: "80", pension: "", pensionAge: "65", method: "cover_shortfall" as "cover_shortfall" | "fixed_pct" });
+  const [retireError, setRetireError] = useState("");
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -161,6 +171,54 @@ export default function ForecastPage() {
     setDebtPresetOpen(false);
   };
 
+  const openRetirePreset = () => {
+    setRetireForm((f) => ({ ...f, birthYear: data?.inputs.birthYear ? String(data.inputs.birthYear) : f.birthYear }));
+    setRetireError("");
+    setRetirePresetOpen(true);
+  };
+
+  const applyRetirePreset = async () => {
+    if (!config || !data) return;
+    const by = Number(retireForm.birthYear);
+    const age = Number(retireForm.age);
+    const thisYear = new Date().getUTCFullYear();
+    if (!Number.isInteger(by) || by < 1900 || by > thisYear) return setRetireError(`Birth year: a year from 1900 to ${thisYear}.`);
+    if (!Number.isInteger(age) || age < 30 || age > 90) return setRetireError("Retirement age: from 30 to 90.");
+    const retireMonth = `${by + age}-01`;
+    if (retireMonth < data.inputs.startMonth) return setRetireError("That age has already passed.");
+    // Save the birth year (plaintext year only) when it is new.
+    if (data.inputs.birthYear !== by) {
+      const res = await fetch("/api/settings/birth-year", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ birthYear: by }) });
+      if (!res.ok) return setRetireError("Couldn't save your birth year. Try again.");
+      setData({ ...data, inputs: { ...data.inputs, birthYear: by } });
+    }
+    const pension = Number(retireForm.pension);
+    const pensions = Number.isFinite(pension) && pension > 0
+      ? [{ label: "Pension / benefit", amount: pension, startMonth: `${by + Number(retireForm.pensionAge || age)}-01`, growthPct: null }]
+      : [];
+    const ev = newEvent("retire", retireMonth);
+    const retire = {
+      ...ev,
+      label: `Retire at ${age}`,
+      params: {
+        ...(ev.params as object),
+        spendingFactor: Number(retireForm.spending) / 100,
+        pensions,
+        withdrawal: retireForm.method === "fixed_pct" ? { method: "fixed_pct", pct: 4, growWithInflation: true } : { method: "cover_shortfall" },
+      },
+    } as typeof ev;
+    setBeforePreset({ label: "before retiring", config });
+    setConfig(scenarioConfigSchema.parse({
+      ...config,
+      horizonMonths: monthsToAge(data.inputs.startMonth, by, 100),
+      events: [...config.events.filter((e) => e.kind !== "retire"), retire],
+    }));
+    setReal(true);
+    setView("yearly");
+    setCompareWith("before");
+    setRetirePresetOpen(false);
+  };
+
   const applyThreeMonthPreset = () => {
     if (!config) return;
     setBeforePreset({ label: "before the 3-month view", config });
@@ -200,11 +258,11 @@ export default function ForecastPage() {
       return {
         table: {
           columns: y.years,
-          columnLabels: y.years,
+          columnLabels: y.years.map((yr) => (result.birthYear ? `${yr} (${Number(yr) - result.birthYear})` : yr)),
           lines: y.lines.map((l) => ({ ...l, amounts: adjN(l.amounts, d) })),
           totals: {
             income: adj(y.totals.income, d), expense: adj(y.totals.expense, d), debtPayment: adj(y.totals.debtPayment, d), net: adj(y.totals.net, d),
-            toInvestments: adj(y.totals.toInvestments, d), purchases: adj(y.totals.purchases, d), borrowed: adj(y.totals.borrowed, d),
+            toInvestments: adj(y.totals.toInvestments, d), purchases: adj(y.totals.purchases, d), borrowed: adj(y.totals.borrowed, d), withdrawn: adj(y.totals.withdrawn, d),
           },
           balances: { cash: adj(y.balances.cash, d), investments: adj(y.balances.investments, d), loans: adj(y.balances.loans, d), netWorth: adj(y.balances.netWorth, d) },
         },
@@ -227,7 +285,7 @@ export default function ForecastPage() {
         lines: result.lines.map((l) => ({ ...l, amounts: adjN(l.amounts, d) })),
         totals: {
           income: adj(result.totals.income, d), expense: adj(result.totals.expense, d), debtPayment: adj(result.totals.debtPayment, d), net: adj(result.totals.net, d),
-          toInvestments: adj(result.totals.toInvestments, d), purchases: adj(result.totals.purchases, d), borrowed: adj(result.totals.borrowed, d),
+          toInvestments: adj(result.totals.toInvestments, d), purchases: adj(result.totals.purchases, d), borrowed: adj(result.totals.borrowed, d), withdrawn: adj(result.totals.withdrawn, d),
         },
         balances: { cash: adj(b.cash, d), investments: adj(b.investments, d), loans: adj(b.loans, d), netWorth: adj(b.netWorth, d) },
       },
@@ -278,6 +336,13 @@ export default function ForecastPage() {
               {HORIZON_CHOICES.filter((h) => h <= data.inputs.maxHorizonMonths).map((h) => (
                 <SelectItem key={h} value={String(h)}>{horizonLabel(h)}</SelectItem>
               ))}
+              {data.inputs.birthYear && !(HORIZON_CHOICES as readonly number[]).includes(monthsToAge(data.inputs.startMonth, data.inputs.birthYear, 100)) && (
+                <SelectItem value={String(monthsToAge(data.inputs.startMonth, data.inputs.birthYear, 100))}>To age 100</SelectItem>
+              )}
+              {!(HORIZON_CHOICES as readonly number[]).includes(config.horizonMonths) &&
+                !(data.inputs.birthYear && config.horizonMonths === monthsToAge(data.inputs.startMonth, data.inputs.birthYear, 100)) && (
+                <SelectItem value={String(config.horizonMonths)}>{horizonLabel(config.horizonMonths)}</SelectItem>
+              )}
             </SelectContent>
           </Select>
           <Select value={view} onValueChange={(v) => setView(v === "monthly" ? "monthly" : "yearly")}>
@@ -310,6 +375,37 @@ export default function ForecastPage() {
         onCompareWith={setCompareWith}
         extraCompare={beforePreset ? { value: "before", label: `This scenario ${beforePreset.label}` } : null}
       />
+
+      {result.retirement && (
+        <Card className="border-primary/40">
+          <CardContent className="py-4 grid gap-3 sm:grid-cols-3">
+            <div>
+              <p className="text-xs text-muted-foreground">Retire</p>
+              <p className="text-lg font-semibold">{monthLong(result.retirement.month)}{result.retirement.age != null ? `, at ${result.retirement.age}` : ""}</p>
+              <p className="text-xs text-muted-foreground">Investments then: {formatCurrency(real ? result.retirement.investmentsAtRetirement / (result.deflator[Math.max(0, result.months.indexOf(result.retirement.month) - 1)] ?? 1) : result.retirement.investmentsAtRetirement, cur, { decimals: 0 })}{real ? " in today's money" : ""}</p>
+            </div>
+            <div>
+              <p className="text-xs text-muted-foreground">Money lasts</p>
+              {result.retirement.runsOutMonth ? (
+                <p className="text-lg font-semibold text-rose-600">
+                  Until {result.retirement.runsOutAge != null ? `age ${result.retirement.runsOutAge}` : monthLong(result.retirement.runsOutMonth)}
+                </p>
+              ) : (
+                <p className="text-lg font-semibold text-emerald-600">
+                  Past {result.retirement.horizonEndAge != null ? `age ${result.retirement.horizonEndAge}` : monthLong(result.retirement.horizonEndMonth)}
+                </p>
+              )}
+              <p className="text-xs text-muted-foreground">
+                {result.retirement.runsOutMonth ? `Runs out in ${monthLong(result.retirement.runsOutMonth)}.` : "Still money left at the end of the forecast."}
+              </p>
+            </div>
+            <div className="text-xs text-muted-foreground self-center">
+              Taxes aren&apos;t modelled: enter income and pensions as take-home amounts. Returns are an average; real markets go up and down.
+              {!result.birthYear && " Add your birth year (Presets → Can I retire at…) to see ages."}
+            </div>
+          </CardContent>
+        </Card>
+      )}
 
       {/* Milestones */}
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
@@ -363,6 +459,9 @@ export default function ForecastPage() {
                 <DropdownMenuGroup>
                   <DropdownMenuItem disabled={result.loans.length === 0} onClick={() => setDebtPresetOpen(true)}>
                     <div><div className="text-sm">Pay off my debt faster…</div><div className="text-xs text-muted-foreground">An extra amount each month at your loans, compared with now.</div></div>
+                  </DropdownMenuItem>
+                  <DropdownMenuItem onClick={openRetirePreset}>
+                    <div><div className="text-sm">Can I retire at…</div><div className="text-xs text-muted-foreground">Retire at an age, with pensions and investments paying the rest, to age 100.</div></div>
                   </DropdownMenuItem>
                   <DropdownMenuItem onClick={applyThreeMonthPreset}>
                     <div><div className="text-sm">Next 3 months by category</div><div className="text-xs text-muted-foreground">Budget, then your recent average, then scheduled payments, by month.</div></div>
@@ -489,6 +588,53 @@ export default function ForecastPage() {
           </CardContent>
         </Card>
       )}
+      <Dialog open={retirePresetOpen} onOpenChange={setRetirePresetOpen}>
+        <DialogContent className="sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle>Can I retire at…</DialogTitle>
+            <DialogDescription>Adds a retirement to this forecast, runs it to age 100 in today&apos;s money, and compares it with not retiring.</DialogDescription>
+          </DialogHeader>
+          <div className="grid grid-cols-2 gap-3">
+            <div className="space-y-1">
+              <Label className="text-xs" htmlFor="rp-by">Birth year</Label>
+              <Input id="rp-by" type="number" value={retireForm.birthYear} onChange={(e) => setRetireForm({ ...retireForm, birthYear: e.target.value })} />
+            </div>
+            <div className="space-y-1">
+              <Label className="text-xs" htmlFor="rp-age">Retire at age</Label>
+              <Input id="rp-age" type="number" value={retireForm.age} onChange={(e) => setRetireForm({ ...retireForm, age: e.target.value })} />
+            </div>
+            <div className="space-y-1">
+              <Label className="text-xs" htmlFor="rp-spend">Spending in retirement, % of now</Label>
+              <Input id="rp-spend" type="number" value={retireForm.spending} onChange={(e) => setRetireForm({ ...retireForm, spending: e.target.value })} />
+            </div>
+            <div className="space-y-1">
+              <Label className="text-xs">Paying for it from investments</Label>
+              <Select value={retireForm.method} onValueChange={(v) => setRetireForm({ ...retireForm, method: v === "fixed_pct" ? "fixed_pct" : "cover_shortfall" })}>
+                <SelectTrigger className="h-8 text-xs" aria-label="Paying for it from investments"><SelectValue /></SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="cover_shortfall">Sell only what&apos;s needed</SelectItem>
+                  <SelectItem value="fixed_pct">4% a year, growing with inflation</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+            <div className="space-y-1">
+              <Label className="text-xs" htmlFor="rp-pension">Pension or benefit, per month (today&apos;s money, optional)</Label>
+              <Input id="rp-pension" type="number" value={retireForm.pension} onChange={(e) => setRetireForm({ ...retireForm, pension: e.target.value })} />
+            </div>
+            <div className="space-y-1">
+              <Label className="text-xs" htmlFor="rp-page">It starts at age</Label>
+              <Input id="rp-page" type="number" value={retireForm.pensionAge} onChange={(e) => setRetireForm({ ...retireForm, pensionAge: e.target.value })} />
+            </div>
+          </div>
+          <p className="text-xs text-muted-foreground">Your birth year is saved (the year only) so ages can be shown. Taxes aren&apos;t modelled.</p>
+          {retireError && <p className="text-sm text-destructive">{retireError}</p>}
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setRetirePresetOpen(false)}>Cancel</Button>
+            <Button onClick={applyRetirePreset}>Show me</Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
       <Dialog open={debtPresetOpen} onOpenChange={setDebtPresetOpen}>
         <DialogContent className="sm:max-w-md">
           <DialogHeader>

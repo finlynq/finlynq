@@ -62,6 +62,8 @@ export type ForecastInputs = {
   today: string;
   /** First forecast month (next month); opening balances are today's. */
   startMonth: string;
+  /** For retirement: ages are this month's year minus it. Null = not given. */
+  birthYear?: number | null;
   currency: string;
   /** Longest horizon these inputs cover. */
   maxHorizonMonths: number;
@@ -97,7 +99,7 @@ export type ForecastLineResult = {
 };
 
 export type Milestone = {
-  kind: "loan_paid_off" | "debt_free" | "cash_negative" | "investments_depleted";
+  kind: "loan_paid_off" | "debt_free" | "cash_negative" | "investments_depleted" | "retired" | "money_runs_out";
   month: string;
   label: string;
   ref?: string;
@@ -142,12 +144,28 @@ export type ForecastResult = {
     purchases: number[];
     /** Loan money received in cash (a new loan with cashIn). */
     borrowed: number[];
+    /** Paid from investments to cash by a retirement withdrawal strategy. */
+    withdrawn: number[];
   };
   /** Today's balances (the starting point). */
   opening: Record<keyof SeriesBlock, number>;
   balances: SeriesBlock;
   loans: Array<{ key: string; accountId: number | null; label: string; openingBalance: number; payoffMonth: string | null; interestTotal: number; isNew: boolean }>;
   events: Array<{ id: string; kind: string; label: string; month: string; enabled: boolean }>;
+  birthYear: number | null;
+  /** Set when the scenario has a retire event inside the horizon. */
+  retirement: {
+    month: string;
+    age: number | null;
+    investmentsAtRetirement: number;
+    netWorthAtRetirement: number;
+    /** First month money runs out after retiring (cash below zero with nothing left to sell); null = not within the forecast. */
+    runsOutMonth: string | null;
+    runsOutAge: number | null;
+    /** Last month of the forecast and the age then, so "lasts past N" can be said. */
+    horizonEndMonth: string;
+    horizonEndAge: number | null;
+  } | null;
   milestones: Milestone[];
   warnings: ForecastWarning[];
   /** Divide a month's money by this to show it in today's money. */
