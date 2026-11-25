@@ -3,7 +3,8 @@
 /**
  * Scenario bar: pick a scenario, save / save as (copy or variant), rename,
  * detach, delete, history (with "put this version back"), freeze a snapshot,
- * manage snapshots, and choose what to compare with.
+ * manage snapshots. What to compare with is picked in the comparison section
+ * (CompareSelect), next to where the comparison shows.
  */
 import { useState } from "react";
 import { Button } from "@/components/ui/button";
@@ -22,6 +23,53 @@ import { Bot, Camera, ChevronDown, History, Save } from "lucide-react";
 
 type Hook = ReturnType<typeof useForecastScenarios>;
 
+type TreeScenario = { id: number; name: string; kind: string; parent: { type: string; id?: number } | null; unreadable?: boolean };
+
+/**
+ * Saved scenarios in tree order, each with its depth: variants of the built-in
+ * Baseline at depth 1 (under it), standalone scenarios at depth 0, and every
+ * variant right under its parent one level deeper. A variant whose parent
+ * can't be found (deleted or unreadable) is listed at the end at depth 1.
+ */
+export function scenarioTree<T extends TreeScenario>(scenarios: T[]): Array<{ scenario: T; depth: number }> {
+  const readable = scenarios.filter((s) => !s.unreadable);
+  const ids = new Set(readable.map((s) => s.id));
+  const childrenOf = new Map<number, T[]>();
+  const baselineKids: T[] = [];
+  const roots: T[] = [];
+  const orphans: T[] = [];
+  for (const s of readable) {
+    const p = s.parent;
+    if (!p) roots.push(s);
+    else if (p.type === "builtin") baselineKids.push(s);
+    else if (p.id != null && ids.has(p.id)) childrenOf.set(p.id, [...(childrenOf.get(p.id) ?? []), s]);
+    else orphans.push(s);
+  }
+  const out: Array<{ scenario: T; depth: number }> = [];
+  const seen = new Set<number>();
+  const walk = (s: T, depth: number) => {
+    if (seen.has(s.id)) return; // a loop can't be saved, but never recurse forever
+    seen.add(s.id);
+    out.push({ scenario: s, depth });
+    for (const c of childrenOf.get(s.id) ?? []) walk(c, depth + 1);
+  };
+  for (const s of baselineKids) walk(s, 1);
+  for (const s of roots) walk(s, 0);
+  for (const s of orphans) walk(s, 1);
+  for (const s of readable) if (!seen.has(s.id)) walk(s, 1);
+  return out;
+}
+
+/** A list entry indented by its depth, with ↳ for a variant. */
+function TreeLabel({ name, depth, prefix = "" }: { name: string; depth: number; prefix?: string }) {
+  return (
+    <span className="truncate" style={{ paddingLeft: Math.max(0, depth - 1) * 14 }}>
+      {depth > 0 && <span className="mr-1 text-muted-foreground">↳</span>}
+      {prefix}{name}
+    </span>
+  );
+}
+
 export function ScenarioBar({
   hook,
   working,
@@ -30,7 +78,7 @@ export function ScenarioBar({
   onOpened,
   compareWith,
   onCompareWith,
-  extraCompare,
+  trailing,
 }: {
   hook: Hook;
   working: ScenarioConfig;
@@ -39,8 +87,8 @@ export function ScenarioBar({
   onOpened: (config: ScenarioConfig) => void;
   compareWith: string;
   onCompareWith: (v: string) => void;
-  /** e.g. "This scenario before the debt plan", after a preset. */
-  extraCompare?: { value: string; label: string } | null;
+  /** Page controls shown at the end of the same row (horizon, money, refresh). */
+  trailing?: React.ReactNode;
 }) {
   const { open, scenarios, snapshots } = hook;
   const [message, setMessage] = useState<{ tone: "ok" | "error"; text: string } | null>(null);
@@ -80,7 +128,7 @@ export function ScenarioBar({
     if (!name) return;
     if (nameDialog === "saveAs") report(await hook.saveAs(name, working, asVariant), `Saved as "${name}".`);
     if (nameDialog === "rename") report(await hook.rename(name), "Renamed.");
-    if (nameDialog === "freeze") report(await hook.freeze(name, result, working), `Froze this forecast as "${name}". Pick it under Compare with to compare later.`);
+    if (nameDialog === "freeze") report(await hook.freeze(name, result, working), `Froze this forecast as "${name}". Pick it under Compare to compare later.`);
     setNameDialog(null);
   };
 
@@ -92,12 +140,16 @@ export function ScenarioBar({
   return (
     <div className="space-y-2">
       <div className="flex flex-wrap items-center gap-2">
-        <Select value={isSaved ? String(open.id) : "builtin"} onValueChange={pick}>
+        <Select
+          value={isSaved ? String(open.id) : "builtin"}
+          onValueChange={pick}
+          items={{ builtin: "Baseline (built in)", ...Object.fromEntries(scenarios.map((s) => [String(s.id), s.name])) }}
+        >
           <SelectTrigger className="h-8 w-64 text-xs" aria-label="Scenario"><SelectValue /></SelectTrigger>
           <SelectContent>
             <SelectItem value="builtin">Baseline (built in)</SelectItem>
-            {scenarios.filter((s) => !s.unreadable).map((s) => (
-              <SelectItem key={s.id} value={String(s.id)}>{s.kind === "variant" ? `↳ ${s.name}` : s.name}</SelectItem>
+            {scenarioTree(scenarios).map(({ scenario: s, depth }) => (
+              <SelectItem key={s.id} value={String(s.id)}><TreeLabel name={s.name} depth={depth} /></SelectItem>
             ))}
           </SelectContent>
         </Select>
@@ -133,23 +185,7 @@ export function ScenarioBar({
             </DropdownMenuGroup>
           </DropdownMenuContent>
         </DropdownMenu>
-        <div className="flex items-center gap-2 ml-auto">
-          <span className="text-xs text-muted-foreground">Compare with</span>
-          <Select value={compareWith || "none"} onValueChange={(v) => onCompareWith(!v || v === "none" ? "" : v)}>
-            <SelectTrigger className="h-8 w-56 text-xs" aria-label="Compare with"><SelectValue /></SelectTrigger>
-            <SelectContent>
-              <SelectItem value="none">Nothing</SelectItem>
-              {extraCompare && <SelectItem value={extraCompare.value}>{extraCompare.label}</SelectItem>}
-              {isSaved && <SelectItem value="builtin">Baseline (built in)</SelectItem>}
-              {scenarios.filter((s) => !s.unreadable && (!isSaved || s.id !== open.id)).map((s) => (
-                <SelectItem key={`s${s.id}`} value={`scenario:${s.id}`}>Scenario: {s.name}</SelectItem>
-              ))}
-              {snapshots.filter((s) => !s.unreadable).map((s) => (
-                <SelectItem key={`n${s.id}`} value={`snapshot:${s.id}`}>Snapshot: {s.name} ({new Date(s.createdAt).toLocaleDateString()})</SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
-        </div>
+        {trailing && <div className="ml-auto flex max-w-full flex-wrap items-center gap-2">{trailing}</div>}
       </div>
       {variantNote && <p className="text-xs text-muted-foreground">{variantNote}</p>}
       {message && (
@@ -215,7 +251,7 @@ export function ScenarioBar({
 
       <Dialog open={snapshotsOpen} onOpenChange={setSnapshotsOpen}>
         <DialogContent className="sm:max-w-lg">
-          <DialogHeader><DialogTitle>Snapshots</DialogTitle><DialogDescription>Frozen forecasts. Pick one under Compare with.</DialogDescription></DialogHeader>
+          <DialogHeader><DialogTitle>Snapshots</DialogTitle><DialogDescription>Frozen forecasts. Pick one under Compare.</DialogDescription></DialogHeader>
           {snapshots.length === 0 ? <p className="text-sm text-muted-foreground">None yet. Use Freeze to keep one.</p> : (
             <ol className="space-y-1.5 max-h-80 overflow-y-auto">
               {snapshots.map((s) => (
@@ -262,5 +298,48 @@ export function ScenarioBar({
         }}
       />
     </div>
+  );
+}
+
+/** What to compare this forecast with: a saved scenario, the Baseline, a frozen snapshot, or the state before a preset. */
+export function CompareSelect({
+  hook,
+  value,
+  onChange,
+  extra,
+}: {
+  hook: Hook;
+  value: string;
+  onChange: (v: string) => void;
+  /** e.g. "This scenario before the debt plan", after a preset. */
+  extra?: { value: string; label: string } | null;
+}) {
+  const { open, scenarios, snapshots } = hook;
+  const isSaved = !!open && open.id !== "builtin";
+  return (
+    <Select
+      value={value || "none"}
+      onValueChange={(v) => onChange(!v || v === "none" ? "" : v)}
+      items={{
+        none: "Nothing",
+        builtin: "Baseline (built in)",
+        ...(extra ? { [extra.value]: extra.label } : {}),
+        ...Object.fromEntries(scenarios.map((s) => [`scenario:${s.id}`, `Scenario: ${s.name}`])),
+        ...Object.fromEntries(snapshots.map((s) => [`snapshot:${s.id}`, `Snapshot: ${s.name}`])),
+      }}
+    >
+      <SelectTrigger className="h-8 w-full sm:w-64 text-xs" aria-label="Compare with"><SelectValue /></SelectTrigger>
+      <SelectContent>
+        <SelectItem value="none">Nothing</SelectItem>
+        {extra && <SelectItem value={extra.value}>{extra.label}</SelectItem>}
+        {isSaved && <SelectItem value="builtin">Baseline (built in)</SelectItem>}
+        {scenarioTree(scenarios).filter(({ scenario: s }) => !isSaved || s.id !== open!.id).map(({ scenario: s, depth }) => (
+          <SelectItem key={`s${s.id}`} value={`scenario:${s.id}`}><TreeLabel name={s.name} depth={depth} prefix="Scenario: " /></SelectItem>
+        ))}
+        {snapshots.filter((s) => !s.unreadable).map((s) => (
+          <SelectItem key={`n${s.id}`} value={`snapshot:${s.id}`}>Snapshot: {s.name} ({new Date(s.createdAt).toLocaleDateString()})</SelectItem>
+        ))}
+      </SelectContent>
+    </Select>
   );
 }

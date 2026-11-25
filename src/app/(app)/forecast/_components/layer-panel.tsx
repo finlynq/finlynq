@@ -105,7 +105,7 @@ export function LayerPanel({
   return (
     <div className="space-y-2">
       <div className="flex items-center justify-between">
-        <p className="text-xs font-medium text-muted-foreground uppercase tracking-wide">Layers, applied top to bottom</p>
+        <div><h3 className="text-sm font-semibold">Where amounts come from</h3><p className="text-xs text-muted-foreground">Applied top to bottom: later ones change earlier ones.</p></div>
         <DropdownMenu>
           <DropdownMenuTrigger render={<Button variant="outline" size="sm" className="h-7 text-xs"><Plus className="h-3.5 w-3.5 mr-1" /> Add layer</Button>} />
           <DropdownMenuContent align="end" className="min-w-56">
@@ -125,7 +125,7 @@ export function LayerPanel({
       {layers.length === 0 && <p className="text-sm text-muted-foreground">No layers: every line is blank. Add one.</p>}
       <ol className="space-y-1.5">
         {layers.map((l, i) => (
-          <li key={l.id} className={`flex items-start gap-2 rounded-md border px-2.5 py-2 ${l.enabled ? "" : "opacity-60"}`}>
+          <li key={l.id} className={`flex items-start gap-2 rounded-md border bg-muted/20 px-2.5 py-2 ${l.enabled ? "" : "opacity-60"}`}>
             <input
               type="checkbox"
               className="mt-1"
@@ -141,10 +141,10 @@ export function LayerPanel({
               <p className="text-xs text-muted-foreground">{KIND_LABEL[l.kind]}: {describe(l)}</p>
             </div>
             <div className="flex shrink-0">
-              <Button variant="ghost" size="icon" className="h-7 w-7" aria-label="Move up" disabled={i === 0} onClick={() => move(i, -1)}><ArrowUp className="h-3.5 w-3.5" /></Button>
-              <Button variant="ghost" size="icon" className="h-7 w-7" aria-label="Move down" disabled={i === layers.length - 1} onClick={() => move(i, 1)}><ArrowDown className="h-3.5 w-3.5" /></Button>
-              <Button variant="ghost" size="icon" className="h-7 w-7" aria-label="Edit layer" onClick={() => { setEditing(l); setIsNew(false); }}><Pencil className="h-3.5 w-3.5" /></Button>
-              <Button variant="ghost" size="icon" className="h-7 w-7 text-destructive" aria-label="Remove layer" onClick={() => onChange(layers.filter((x) => x.id !== l.id))}><Trash2 className="h-3.5 w-3.5" /></Button>
+              <Button variant="ghost" size="icon" className="h-6 w-6" aria-label="Move up" disabled={i === 0} onClick={() => move(i, -1)}><ArrowUp className="h-3.5 w-3.5" /></Button>
+              <Button variant="ghost" size="icon" className="h-6 w-6" aria-label="Move down" disabled={i === layers.length - 1} onClick={() => move(i, 1)}><ArrowDown className="h-3.5 w-3.5" /></Button>
+              <Button variant="ghost" size="icon" className="h-6 w-6" aria-label="Edit layer" onClick={() => { setEditing(l); setIsNew(false); }}><Pencil className="h-3.5 w-3.5" /></Button>
+              <Button variant="ghost" size="icon" className="h-6 w-6 text-destructive" aria-label="Remove layer" onClick={() => onChange(layers.filter((x) => x.id !== l.id))}><Trash2 className="h-3.5 w-3.5" /></Button>
             </div>
           </li>
         ))}

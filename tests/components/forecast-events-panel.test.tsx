@@ -39,6 +39,19 @@ describe("EventsPanel", () => {
     expect(onChange.mock.calls[2][0]).toEqual([]);
   });
 
+  it("Add event opens the picker; picking a kind opens its dialog and saves a new event", () => {
+    const onChange = vi.fn();
+    const { getByText, queryByText, getByRole } = render(<EventsPanel events={[]} lines={lines} loans={[]} onChange={onChange} />);
+    fireEvent.click(getByText("Add event"));
+    expect(getByText("What happens?")).toBeTruthy();
+    // No loans: the loan-only kinds can't be picked.
+    expect((getByText("Refinance").closest("button") as HTMLButtonElement).disabled).toBe(true);
+    fireEvent.click(getByText("Buy a home"));
+    expect(queryByText("What happens?")).toBeNull();
+    fireEvent.click(getByRole("button", { name: "Save event" }));
+    expect(onChange.mock.calls[0][0][0]).toMatchObject({ kind: "buy_home", enabled: true });
+  });
+
   it("new events are valid for every kind, and a new loan's key points at it", () => {
     for (const k of ["one_off", "recurring_item", "income_change", "move_money", "extra_debt_payment", "new_loan", "refinance", "buy_home", "debt_strategy", "retire"] as const) {
       const e = newEvent(k, "2027-01", [{ key: "debt:9", label: "Car" }]);
