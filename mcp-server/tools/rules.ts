@@ -144,6 +144,12 @@ export function registerRulesTools(server: McpServer, ctx: PgToolContext) {
       const txns = await q(db, sql`
         SELECT id, payee, amount, tags, account_id, date FROM transactions
         WHERE user_id = ${userId} AND (category_id IS NULL OR category_id = 0)
+          -- Trades must keep category_id NULL and transfer / brokerage / swap
+          -- legs take their category from the pair, so neither is "waiting
+          -- for a category" (same exclusions as the Action Center count).
+          -- Matters most with a catch-all rule (GH #456), which matches all.
+          AND portfolio_holding_id IS NULL
+          AND link_id IS NULL AND trade_link_id IS NULL AND swap_link_id IS NULL
         ORDER BY date DESC LIMIT ${maxRows}
       `);
       if (!txns.length) return text({ success: true, data: { message: "No uncategorized transactions found", updated: 0 } });

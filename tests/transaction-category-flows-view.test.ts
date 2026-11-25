@@ -34,7 +34,7 @@ describe("transaction_category_flows definition", () => {
 
 // file → how many separate queries in it must read the view.
 const READERS: Array<[string, RegExp, number]> = [
-  ["src/lib/queries.ts", /\.from\(flows\)/g, 6],
+  ["src/lib/queries.ts", /\.from\(flows\)/g, 7], // +1 getMerchantSpendRows (GH #457)
   ["src/app/api/reports/route.ts", /\.from\(schema\.transactionCategoryFlows\)/g, 2],
   ["src/app/api/reports/trends/route.ts", /\.from\(schema\.transactionCategoryFlows\)/g, 3],
   ["src/app/api/reports/yoy/route.ts", /\.from\(schema\.transactionCategoryFlows\)/g, 2],

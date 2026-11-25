@@ -199,7 +199,8 @@ describe("dashboard wiring", () => {
     }
     expect(src).toContain("monthSwitch: incomeCard.monthSwitch");
     expect(src).toContain("monthSwitch: expensesCard.monthSwitch");
-    expect(src).toContain("monthSwitch: budgetsCard.monthSwitch");
+    // Budgets switches between calendar months (its own budget month), always offered.
+    expect(src).toContain('monthSwitch: { showingCurrent: budgetsMode === "current", onToggle: toggleBudgetsMode }');
     // Available to Spend keeps its own choice inside the card.
     expect(src).toContain("<AvailableToSpend {...spendMonths} currency={apiDisplayCurrency} />");
   });

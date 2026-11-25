@@ -1,5 +1,5 @@
 import { db, schema, getDialect } from "@/db";
-import { eq, and, gte, lte, desc, sql, asc, inArray, isNotNull } from "drizzle-orm";
+import { eq, and, gte, lte, desc, sql, asc, inArray, isNotNull, isNull, or } from "drizzle-orm";
 import type { SQL, AnyColumn } from "drizzle-orm";
 import { requireHoldingForInvestmentAccount } from "@/lib/investment-account";
 import type { TransactionSource } from "@/lib/tx-source";
@@ -172,6 +172,11 @@ export type TxSortFilter = {
   // per chip.
   accountIds?: number[];
   categoryIds?: number[];
+  // GH #454 — "(Blank)" in the category filters: rows with no category.
+  // `categoryNone` is the top-bar picker (only uncategorized rows);
+  // `categoryIdsIncludeNone` adds them to the Category column's id list.
+  categoryNone?: boolean;
+  categoryIdsIncludeNone?: boolean;
   // Ticker (portfolio symbol) substring filter, resolved to holding ids at
   // the route boundary. Symbols are Stream-D encrypted so SQL can't LIKE on
   // them; the route decrypts the user's (small) holdings/securities symbol set,
@@ -228,8 +233,18 @@ function buildTxFilterConditions(userId: string, filters?: TxSortFilter) {
   if (filters?.accountIds && filters.accountIds.length > 0) {
     conditions.push(inArray(transactions.accountId, filters.accountIds));
   }
-  if (filters?.categoryIds && filters.categoryIds.length > 0) {
-    conditions.push(inArray(transactions.categoryId, filters.categoryIds));
+  if (filters?.categoryNone) conditions.push(isNull(transactions.categoryId));
+  {
+    const ids = filters?.categoryIds ?? [];
+    if (filters?.categoryIdsIncludeNone) {
+      conditions.push(
+        ids.length > 0
+          ? (or(inArray(transactions.categoryId, ids), isNull(transactions.categoryId)) as SQL)
+          : isNull(transactions.categoryId),
+      );
+    } else if (ids.length > 0) {
+      conditions.push(inArray(transactions.categoryId, ids));
+    }
   }
   // Ticker filter resolved to holding ids (see TxSortFilter doc). An empty
   // array is a real "no holding matched the ticker" signal — match nothing
@@ -917,6 +932,41 @@ export async function getMonthlySpending(userId: string, startDate: string, endD
     .where(and(eq(flows.userId, userId), gte(flows.date, startDate), lte(flows.date, endDate)))
     .groupBy(monthExpr(flows.date), categories.nameCt, categories.group, categories.type, flows.currency, flows.reportingCurrency)
     .orderBy(monthExpr(flows.date))
+    .all();
+}
+
+/**
+ * GH #457 — rows behind the dashboard's Top Merchants: expense-category
+ * spending only (split rows under their own category, via the flows view),
+ * leaving out transfer / brokerage / swap legs, investment trades and the
+ * bookkeeping kinds (opening balance, balance adjustment). Payee is ciphertext
+ * for the caller to decrypt; amounts are signed as stored, with the stored
+ * reporting amount for display-currency conversion.
+ */
+export async function getMerchantSpendRows(userId: string, startDate: string, endDate: string) {
+  return db
+    .select({
+      payee: flows.payee,
+      amount: flows.amount,
+      currency: flows.currency,
+      reportingCurrency: flows.reportingCurrency,
+      reportingAmount: flows.reportingAmount,
+    })
+    .from(flows)
+    .innerJoin(categories, eq(flows.categoryId, categories.id))
+    .where(
+      and(
+        eq(flows.userId, userId),
+        gte(flows.date, startDate),
+        lte(flows.date, endDate),
+        eq(categories.type, "E"),
+        isNull(flows.linkId),
+        isNull(flows.tradeLinkId),
+        isNull(flows.swapLinkId),
+        isNull(flows.portfolioHoldingId),
+        sql`(${flows.kind} IS NULL OR ${flows.kind} NOT IN ('opening_balance', 'balance_adjustment'))`,
+      ),
+    )
     .all();
 }
 

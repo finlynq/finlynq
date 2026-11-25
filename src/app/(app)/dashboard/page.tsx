@@ -23,6 +23,8 @@ import { QuickImport } from "./_components/quick-import";
 import { IncomeExpenseChart } from "./_components/income-expense-chart";
 import { SpendingCategoryChart } from "./_components/spending-category-chart";
 import { NetWorthHistoryChart } from "@/components/net-worth-history-chart";
+import { monthOverMonth, type MonthEndNetWorthPoint } from "@/lib/net-worth-month-end";
+import { budgetCardMonth, budgetCardView, type BudgetCardSummary } from "@/lib/dashboard/budget-card";
 import { AvailableToSpend } from "./_components/available-to-spend";
 import { useSpendMonthMode } from "./_components/month-switch";
 import { InsightsSection } from "./_components/insights-section";
@@ -121,18 +123,32 @@ export default function DashboardPage() {
   const { displayCurrency, isLoading: currencyLoading } = useDisplayCurrency();
   const [data, setData] = useState<DashboardData | null>(null);
   const [health, setHealth] = useState<HealthData | null>(null);
+  const [nwPoints, setNwPoints] = useState<MonthEndNetWorthPoint[]>([]);
   const [showOnboarding, setShowOnboarding] = useState(false);
   const [userInfo, setUserInfo] = useState<{ email: string; displayName?: string } | null>(null);
   // GH #447: each card switches between last month and this month on its own.
   const [incomeMode, toggleIncomeMode] = useSpendMonthMode(DASHBOARD_MONTH_KEYS.income);
   const [expensesMode, toggleExpensesMode] = useSpendMonthMode(DASHBOARD_MONTH_KEYS.expenses);
   const [budgetsMode, toggleBudgetsMode] = useSpendMonthMode(DASHBOARD_MONTH_KEYS.budgets);
+  // The Budgets card reads the budget month model (planned spending − spent),
+  // the same figures as the Budgets page, for its own calendar month. Kept per
+  // month so switching back and forth doesn't refetch; null = failed.
+  const budgetMonthKey = budgetCardMonth(getCurrentMonth(), budgetsMode);
+  const [budgetSummaries, setBudgetSummaries] = useState<Record<string, BudgetCardSummary | null>>({});
 
   useEffect(() => {
     if (currencyLoading) return; // wait until provider has read settings
     fetch(`/api/dashboard?currency=${encodeURIComponent(displayCurrency)}`)
       .then((r) => { if (r.ok) return r.json(); })
       .then((d) => { if (d) setData(d); });
+
+    // The hero card's line + "vs last month": month-end points of the accurate
+    // net-worth history (investments at market, today live), so the line ends
+    // on the hero number. A failure just leaves the card without a line.
+    fetch(`/api/net-worth-history?period=1y&resolution=month&currency=${encodeURIComponent(displayCurrency)}`)
+      .then((r) => (r.ok ? r.json() : null))
+      .then((d) => { if (d && Array.isArray(d.series)) setNwPoints(d.series); })
+      .catch(() => {});
 
     // Financial-health payload feeds both the Health Score card and the
     // KeyMetrics strip (savings rate + DTI) — fetched once here and passed down
@@ -157,6 +173,25 @@ export default function DashboardPage() {
       })
       .catch(() => {});
   }, [displayCurrency, currencyLoading]);
+
+  useEffect(() => {
+    if (currencyLoading) return;
+    let cancelled = false;
+    fetch(`/api/budgets/month?month=${budgetMonthKey}`)
+      .then((r) => (r.ok ? r.json() : null))
+      .then((body) => {
+        const s = body?.data?.summary ?? body?.summary;
+        const summary: BudgetCardSummary | null =
+          s && typeof s.plannedSpending === "number" && typeof s.spent === "number"
+            ? { plannedSpending: s.plannedSpending, spent: s.spent }
+            : null;
+        if (!cancelled) setBudgetSummaries((prev) => ({ ...prev, [budgetMonthKey]: summary }));
+      })
+      .catch(() => {
+        if (!cancelled) setBudgetSummaries((prev) => ({ ...prev, [budgetMonthKey]: null }));
+      });
+    return () => { cancelled = true; };
+  }, [budgetMonthKey, displayCurrency, currencyLoading]);
 
   const handleMouseMove = useCallback((e: React.MouseEvent<HTMLDivElement>) => {
     const rect = e.currentTarget.getBoundingClientRect();
@@ -194,7 +229,11 @@ export default function DashboardPage() {
   (data.incomeVsExpenses ?? []).forEach((row) => {
     const entry = monthMap.get(row.month) ?? { month: row.month, income: 0, expenses: 0 };
     if (row.type === "I") entry.income = row.total;
-    if (row.type === "E") entry.expenses = Math.abs(row.total);
+    // Spending is the negated expense total, NOT its absolute value: a month
+    // whose refunds outweigh its purchases nets POSITIVE, and Math.abs turned
+    // that inflow into spending (dev demo, Nov 2026: +1,560.70 of refunds read
+    // as 1,560.70 spent, and the Budgets card said "Over budget").
+    if (row.type === "E") entry.expenses = -row.total;
     monthMap.set(row.month, entry);
   });
   // FINLYNQ-128 — attach the per-category tooltip breakdown (keyed by the same
@@ -214,33 +253,11 @@ export default function DashboardPage() {
   const incomeSparkline = incExpLast6.map((d) => d.income);
   const expenseSparkline = incExpLast6.map((d) => d.expenses);
 
-  // Net worth over time — API returns rows already converted to display
-  // currency (route.ts collapses currencies via getRateMap + convertWithRateMap
-  // before returning).
-  const nwMap = new Map<string, number>();
-  let runningTotal = 0;
-  (data.netWorthOverTime ?? [])
-    .forEach((p) => {
-      runningTotal += p.cumulative;
-      nwMap.set(p.month, runningTotal);
-    });
-  const netWorthData = Array.from(nwMap.entries())
-    .map(([month, value]) => ({ month, value }))
-    .slice(-24);
-  // Net Worth sparkline shows the last twelve months (the hero card's line).
-  const nwSparkPoints = netWorthData.slice(-12);
-  const nwSparkline = nwSparkPoints.map((d) => d.value);
-  const nwSparkLabels = nwSparkPoints.map((d) => d.month);
-
-  // Month-over-month change
-  let momChange = 0;
-  let momPct = 0;
-  if (netWorthData.length >= 2) {
-    const current = netWorthData[netWorthData.length - 1].value;
-    const prev = netWorthData[netWorthData.length - 2].value;
-    momChange = current - prev;
-    momPct = prev !== 0 ? (momChange / Math.abs(prev)) * 100 : 0;
-  }
+  // Total Net Worth line: last day of each month from the accurate history
+  // (the same series as the Net Worth chart), ending on today's live value.
+  const nwSparkline = nwPoints.map((d) => d.value);
+  const nwSparkLabels = nwPoints.map((d) => d.month);
+  const nwChange = monthOverMonth(nwPoints);
 
   // FINLYNQ-291 (C1) + GH #447 — the Monthly Income / Expenses / Budgets tiles
   // and the Available to Spend card each summarize one month: the last complete
@@ -274,12 +291,14 @@ export default function DashboardPage() {
   };
   const incomeCard = cardMonth(incomeMode, toggleIncomeMode);
   const expensesCard = cardMonth(expensesMode, toggleExpensesMode);
-  const budgetsCard = cardMonth(budgetsMode, toggleBudgetsMode);
-  const budgetLeft = budgetsCard.figures.income - budgetsCard.figures.expenses;
-  const expensePct = expensesCard.figures.income > 0
+  const budgetsView = budgetCardView(
+    budgetSummaries[budgetMonthKey],
+    budgetsMode === "current",
+    (n) => formatCurrency(n, apiDisplayCurrency),
+  );
+  const expensePct = expensesCard.figures.income > 0 && expensesCard.figures.expenses > 0
     ? ` · ${Math.round((expensesCard.figures.expenses / expensesCard.figures.income) * 100)}% of income`
     : "";
-  const budgetSparkline = incExpLast6.map((d) => d.income - d.expenses);
 
   // Dev-mode: spending by category for charts
   const spendingData = (data.spendingByCategory ?? [])
@@ -316,17 +335,16 @@ export default function DashboardPage() {
     },
     {
       label: "Budgets",
-      value: budgetLeft,
-      sub: budgetsCard.showingCurrent
-        ? (budgetLeft >= 0 ? "Available to spend" : "Over budget")
-        : (budgetLeft >= 0 ? "Left over" : "Overspent"),
+      value: budgetsView.value,
+      sub: budgetsView.sub,
       icon: Target,
       iconBg: "bg-amber-100 text-amber-600 dark:bg-amber-950/60 dark:text-amber-400",
       sparkColor: "#f59e0b",
-      sparkData: budgetSparkline,
-      sparkLabels: incExpSparkLabels,
-      href: "/budgets",
-      monthSwitch: budgetsCard.monthSwitch,
+      // No line: each month's budget is its own request, and a line of
+      // income minus spending is what made this card misleading.
+      sparkData: [],
+      href: `/budgets?month=${budgetMonthKey}`,
+      monthSwitch: { showingCurrent: budgetsMode === "current", onToggle: toggleBudgetsMode },
     },
   ];
 
@@ -414,22 +432,24 @@ export default function DashboardPage() {
                     </p>
 
                     {/* Change pill */}
+                    {nwChange && (
                     <div className="flex items-center gap-2.5 mt-1">
-                      {momChange >= 0 ? (
+                      {nwChange.change >= 0 ? (
                         <span className="inline-flex items-center gap-1 text-[12px] font-semibold text-emerald-600 bg-emerald-100/80 dark:bg-emerald-950/60 dark:text-emerald-400 px-2.5 py-0.5 rounded-full">
                           <ArrowUpRight className="h-3 w-3" />
-                          +{momPct.toFixed(1)}%
+                          {nwChange.pct != null && `+${nwChange.pct.toFixed(1)}%`}
                         </span>
                       ) : (
                         <span className="inline-flex items-center gap-1 text-[12px] font-semibold text-rose-600 bg-rose-100/80 dark:bg-rose-950/60 dark:text-rose-400 px-2.5 py-0.5 rounded-full">
                           <ArrowDownRight className="h-3 w-3" />
-                          {momPct.toFixed(1)}%
+                          {nwChange.pct != null && `${nwChange.pct.toFixed(1)}%`}
                         </span>
                       )}
                       <span className="text-[11px] text-muted-foreground">
-                        {momChange >= 0 ? "+" : ""}{formatCurrency(momChange, apiDisplayCurrency)} vs last month
+                        {nwChange.change >= 0 ? "+" : ""}{formatCurrency(nwChange.change, apiDisplayCurrency)} vs last month
                       </span>
                     </div>
+                    )}
                   </div>
 
                 </div>
@@ -480,7 +500,7 @@ export default function DashboardPage() {
       </div>
 
       {/* ============================================
-          ROW 4–6 — Dev-only: Charts, Available to Spend, Insights
+          ROW 4–5 — Dev-only: Charts, Available to Spend
           ============================================ */}
       {devMode && (
         <>
@@ -491,9 +511,11 @@ export default function DashboardPage() {
           <div className="grid grid-cols-1 lg:grid-cols-3 gap-5">
             <AvailableToSpend {...spendMonths} currency={apiDisplayCurrency} />
           </div>
-          <InsightsSection currency={apiDisplayCurrency} />
         </>
       )}
+
+      {/* GH #457 — Insights is out of dev mode: shown to everyone. */}
+      <InsightsSection currency={apiDisplayCurrency} />
 
     </motion.div>
     </>

@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { z } from "zod";
+import { isoDateSchema } from "@/lib/schemas/iso-date";
 import { apiHandler } from "@/lib/api-handler";
 import { recordSwap } from "@/lib/portfolio/operations";
 import { invalidateUser as invalidateUserTxCache } from "@/lib/mcp/user-tx-cache";
@@ -14,7 +15,7 @@ const schema = z.object({
   destHoldingId: z.number().int().positive(),
   destQty: z.number().positive(),
   destCost: z.number().positive(),
-  date: z.string(),
+  date: isoDateSchema,
   payee: z.string().optional(),
   note: z.string().optional(),
   editId: z.number().int().positive().optional(),

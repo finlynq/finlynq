@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { z } from "zod";
+import { isoDateSchema } from "@/lib/schemas/iso-date";
 import { db } from "@/db";
 import { apiHandler } from "@/lib/api-handler";
 import {
@@ -24,7 +25,7 @@ const schema = z.object({
   // right report. 'dividend'/'interest' apply to income (amount>0); 'fee' to
   // expense (amount<0); 'other' leaves the category as-is.
   incomeType: z.enum(["dividend", "interest", "fee", "other"]).optional(),
-  date: z.string(),
+  date: isoDateSchema,
   payee: z.string().optional(),
   note: z.string().optional(),
   tags: z.string().optional(),

@@ -125,8 +125,18 @@ export type MonthlyData = {
 };
 
 export type InsightsData = {
+  /** GH #457 — the months Top Merchants + Category Trends cover. */
+  period?: { key: string; label: string; previousLabel: string; from: string; to: string };
+  displayCurrency?: string;
+  payeesLocked?: boolean;
   anomalies: { category: string; currentMonth: number; average: number; percentAbove: number; severity: string }[];
-  trends: { category: string; trend: string; changePercent: number }[];
+  trends: {
+    category: string;
+    trend: string;
+    changePercent: number | null;
+    currentTotal?: number;
+    previousTotal?: number;
+  }[];
   topMerchants: { payee: string; totalSpent: number; count: number }[];
   spendingByDay: { day: string; total: number; count: number }[];
 };

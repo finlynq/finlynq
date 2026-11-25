@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getTransactions, getTransactionCount, createTransaction, updateTransaction, getAccountById, type TxSortFilter } from "@/lib/queries";
+import { parseCategoryFilter } from "@/lib/transactions/category-filter";
 import { requireAuth } from "@/lib/auth/require-auth";
 import { requireEncryption } from "@/lib/auth/require-encryption";
 import { encryptTxWrite, decryptTxRows, nameLookup, decryptName } from "@/lib/crypto/encrypted-columns";
@@ -26,6 +27,7 @@ import { and, eq, ne, or } from "drizzle-orm";
 import { markSnapshotsDirty } from "@/lib/portfolio/snapshots/dirty";
 import { markCashSnapshotsDirty } from "@/lib/portfolio/snapshots/cash-dirty";
 import { z } from "zod";
+import { isoDateSchema } from "@/lib/schemas/iso-date";
 import { validateBody, safeErrorMessage, logApiError } from "@/lib/validate";
 import { isSortableColumnId } from "@/lib/transactions/columns";
 import { deleteTransactionsCascade } from "@/lib/transactions/delete-cascade";
@@ -35,7 +37,7 @@ import { securitiesReadEnabledForUser } from "@/lib/securities/flag";
 import { transferLegChanges } from "@/lib/transactions/transfer-leg-guard";
 
 const postSchema = z.object({
-  date: z.string(),
+  date: isoDateSchema,
   amount: z.number().optional(),       // account-currency amount; computed by server when entered* is provided
   accountId: z.number().int().positive({ message: "Please pick an account" }),
   // Reject 0 (the UI's "no selection" sentinel) up front — letting it through
@@ -64,7 +66,7 @@ const postSchema = z.object({
 
 const putSchema = z.object({
   id: z.number(),
-  date: z.string().optional(),
+  date: isoDateSchema.optional(),
   amount: z.number().optional(),
   accountId: z.number().int().positive({ message: "Please pick an account" }).optional(),
   categoryId: z.number().int().positive({ message: "Please pick a category" }).optional(),
@@ -269,6 +271,10 @@ export async function GET(request: NextRequest) {
     }
   }
 
+  // GH #454 — category filters accept `none` ("(Blank)": no category).
+  const topCategory = parseCategoryFilter(params.get("categoryId"));
+  const columnCategories = parseCategoryFilter(params.get("categoryIds"));
+
   // FK filter is SQL-side, so it's NOT a postDecryptFilter — paginate normally.
   const postDecryptFilter = search || tag || hasEncryptedSubstringFilter;
   const limit = params.get("limit") ? parseInt(params.get("limit")!) : 100;
@@ -282,11 +288,13 @@ export async function GET(request: NextRequest) {
     updatedAtFrom: params.get("updatedAtFrom") ?? undefined,
     updatedAtTo: params.get("updatedAtTo") ?? undefined,
     accountId: params.get("accountId") ? parseInt(params.get("accountId")!) : undefined,
-    categoryId: params.get("categoryId") ? parseInt(params.get("categoryId")!) : undefined,
+    categoryId: topCategory && topCategory.ids.length > 0 ? topCategory.ids[0] : undefined,
+    categoryNone: topCategory?.includeNone ?? false,
     portfolioHoldingId: Number.isFinite(portfolioHoldingId) ? portfolioHoldingId : undefined,
     portfolioHoldingIds,
     accountIds: parseIdList("accountIds"),
-    categoryIds: parseIdList("categoryIds"),
+    categoryIds: columnCategories?.ids,
+    categoryIdsIncludeNone: columnCategories?.includeNone ?? false,
     amountMin: parseNum("amountMin"),
     amountMax: parseNum("amountMax"),
     amountEq: parseNum("amountEq"),

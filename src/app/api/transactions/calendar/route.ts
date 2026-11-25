@@ -1,5 +1,6 @@
 import { db, schema } from "@/db";
-import { and, eq, gte, lte, sql } from "drizzle-orm";
+import { and, eq, gte, isNull, lte, sql } from "drizzle-orm";
+import { NO_CATEGORY_FILTER_VALUE } from "@/lib/transactions/category-filter";
 import { apiHandler } from "@/lib/api-handler";
 import { AppError } from "@/lib/validate";
 import { getDisplayCurrency, getRateMap } from "@/lib/fx-service";
@@ -54,7 +55,9 @@ export const GET = apiHandler({ auth: "auth" }, async ({ request, userId }) => {
     }
   }
   const accountId = optionalId(params.get("accountId"), "accountId");
-  const categoryId = optionalId(params.get("categoryId"), "categoryId");
+  // GH #454 — `categoryId=none` is "(Blank)": rows with no category.
+  const categoryNone = params.get("categoryId") === NO_CATEGORY_FILTER_VALUE;
+  const categoryId = categoryNone ? undefined : optionalId(params.get("categoryId"), "categoryId");
 
   const displayCurrency = (await getDisplayCurrency(userId, params.get("currency"))).toUpperCase();
   const rateMap = await getRateMap(displayCurrency, userId);
@@ -65,6 +68,7 @@ export const GET = apiHandler({ auth: "auth" }, async ({ request, userId }) => {
   const conditions = [eq(t.userId, userId), gte(t.date, start), lte(t.date, end)];
   if (accountId) conditions.push(eq(t.accountId, accountId));
   if (categoryId) conditions.push(eq(t.categoryId, categoryId));
+  if (categoryNone) conditions.push(isNull(t.categoryId));
 
   const rows = await db
     .select({

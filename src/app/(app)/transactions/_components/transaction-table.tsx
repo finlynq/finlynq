@@ -25,6 +25,7 @@ import {
   type ColumnId,
   type SortableColumnId,
 } from "@/lib/transactions/columns";
+import { AccountAvatar, useAccountLogos } from "@/components/accounts/account-logo";
 import { ColumnFilterPopover } from "./column-filter-popover";
 import { SplitBadge } from "./split-badge";
 import type { Transaction, Account, Category, ColFilterShape, SortPref, ColumnPref } from "../_types";
@@ -113,6 +114,9 @@ export function TransactionTable({
   openSplitDialog: (t: Transaction) => void;
   confirmDelete: (t: Transaction) => void;
 }) {
+  // GH #455: the same icon as the Accounts page, next to each row's account.
+  // One fetch per table; no logo (or no key to read it) = the letter avatar.
+  const { versions: logoVersions } = useAccountLogos();
   if (loading) return <TableSkeleton />;
   if (txns.length === 0) {
     return (
@@ -216,7 +220,18 @@ export function TransactionTable({
                 case "account":
                   return (
                     <TableCell key={c.id} className="text-sm">
-                      {formatAccountLabel({ name: t.accountName, alias: t.accountAlias, type: t.accountType })}
+                      <span className="flex items-center gap-2 min-w-0">
+                        <AccountAvatar
+                          accountId={t.accountId}
+                          name={t.accountName}
+                          logoVersion={logoVersions[t.accountId]}
+                          className="h-5 w-5 rounded text-[10px]"
+                          letterClassName="bg-muted text-muted-foreground"
+                        />
+                        <span className="truncate">
+                          {formatAccountLabel({ name: t.accountName, alias: t.accountAlias, type: t.accountType })}
+                        </span>
+                      </span>
                     </TableCell>
                   );
                 case "accountType":

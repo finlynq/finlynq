@@ -6,6 +6,19 @@ import { formatCurrency } from "@/lib/currency";
 import { AlertTriangle, RefreshCw, Store, TrendingUp, ArrowUpRight, ArrowDownRight } from "lucide-react";
 import { motion } from "framer-motion";
 import type { InsightsData, RecurringData } from "./types";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { DEFAULT_INSIGHT_PERIOD, INSIGHT_PERIODS, isInsightPeriod, type InsightPeriodKey } from "@/lib/insights/period";
+
+// GH #457 — the chosen period is remembered per browser.
+const PERIOD_KEY = "pf-dashboard-insights-period";
+function readStoredPeriod(): InsightPeriodKey {
+  try {
+    const v = window.localStorage.getItem(PERIOD_KEY);
+    return isInsightPeriod(v) ? v : DEFAULT_INSIGHT_PERIOD;
+  } catch {
+    return DEFAULT_INSIGHT_PERIOD;
+  }
+}
 
 const containerVariants = {
   hidden: { opacity: 0 },
@@ -56,10 +69,18 @@ function InsightCard({
 export function InsightsSection({ currency = "CAD" }: { currency?: string }) {
   const [insights, setInsights] = useState<InsightsData | null>(null);
   const [recurring, setRecurring] = useState<RecurringData | null>(null);
+  // null until the stored choice is read after mount (SSR-safe).
+  const [period, setPeriod] = useState<InsightPeriodKey | null>(null);
 
   useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- one read of a per-browser preference after mount
+    setPeriod(readStoredPeriod());
+  }, []);
+
+  useEffect(() => {
+    if (!period) return;
     let cancelled = false;
-    fetch("/api/insights")
+    fetch(`/api/insights?period=${period}`)
       .then((r) => (r.ok ? r.json() : null))
       .then((d) => {
         if (!cancelled && d && typeof d === "object") setInsights(d as InsightsData);
@@ -67,6 +88,23 @@ export function InsightsSection({ currency = "CAD" }: { currency?: string }) {
       .catch(() => {
         /* cards self-hide when data is absent */
       });
+    return () => {
+      cancelled = true;
+    };
+  }, [period]);
+
+  function choosePeriod(v: string | null) {
+    if (!isInsightPeriod(v)) return;
+    setPeriod(v);
+    try {
+      window.localStorage.setItem(PERIOD_KEY, v);
+    } catch {
+      /* per-browser convenience only */
+    }
+  }
+
+  useEffect(() => {
+    let cancelled = false;
     fetch("/api/recurring")
       .then((r) => (r.ok ? r.json() : null))
       .then((d) => {
@@ -80,7 +118,15 @@ export function InsightsSection({ currency = "CAD" }: { currency?: string }) {
     };
   }, []);
 
+  const shownCurrency = insights?.displayCurrency || currency;
+  const periodLabel = insights?.period?.label ?? "";
+  const previousLabel = insights?.period?.previousLabel ?? "";
+
   return (
+    <div className="space-y-5">
+    {/* Not tied to the period picker: alerts are this month vs your average,
+        recurring is your regular payments. */}
+    {((insights && insights.anomalies.length > 0) || (recurring && recurring.count > 0)) && (
     <motion.div
       className="grid grid-cols-1 lg:grid-cols-2 gap-5"
       variants={containerVariants}
@@ -93,7 +139,7 @@ export function InsightsSection({ currency = "CAD" }: { currency?: string }) {
           icon={AlertTriangle}
           iconBg="bg-amber-100 text-amber-600 dark:bg-amber-950/60 dark:text-amber-400"
           title="Spending Alerts"
-          subtitle="Categories above average"
+          subtitle="This month vs your monthly average"
         >
           <div className="space-y-1.5">
             {insights.anomalies.slice(0, 5).map((a, i) => (
@@ -107,10 +153,10 @@ export function InsightsSection({ currency = "CAD" }: { currency?: string }) {
                 </div>
                 <div className="text-right shrink-0 ml-2">
                   <p className="text-[13px] font-mono font-semibold text-amber-700 dark:text-amber-400 tabular-nums">
-                    {formatCurrency(a.currentMonth, currency)}
+                    {formatCurrency(a.currentMonth, shownCurrency)}
                   </p>
                   <p className="text-[10px] text-muted-foreground tabular-nums">
-                    avg {formatCurrency(a.average, currency)}
+                    avg {formatCurrency(a.average, shownCurrency)}
                   </p>
                 </div>
               </div>
@@ -143,13 +189,39 @@ export function InsightsSection({ currency = "CAD" }: { currency?: string }) {
         </InsightCard>
       )}
 
+    </motion.div>
+    )}
+    {/* GH #457 — the picker drives these two cards only. */}
+    <div className="space-y-3">
+    <div className="flex flex-wrap items-center justify-between gap-2">
+      <h2 className="text-sm font-semibold">Insights</h2>
+      <div className="flex items-center gap-2">
+        <span className="text-xs text-muted-foreground">Merchants and trends for</span>
+        <Select value={period ?? DEFAULT_INSIGHT_PERIOD} onValueChange={choosePeriod}>
+          <SelectTrigger className="h-8 w-44 text-xs" aria-label="Insights period">
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            {INSIGHT_PERIODS.map((p) => (
+              <SelectItem key={p.key} value={p.key}>{p.label}</SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+      </div>
+    </div>
+    <motion.div
+      className="grid grid-cols-1 lg:grid-cols-2 gap-5"
+      variants={containerVariants}
+      initial="hidden"
+      animate="visible"
+    >
       {/* Top Merchants */}
       {insights && insights.topMerchants.length > 0 && (
         <InsightCard
           icon={Store}
           iconBg="bg-violet-100 text-violet-600 dark:bg-violet-950/60 dark:text-violet-400"
           title="Top Merchants"
-          subtitle="Last 6 months spending"
+          subtitle={periodLabel ? `Spending, ${periodLabel}` : "Spending"}
         >
           <div className="divide-y divide-border/40">
             {insights.topMerchants.slice(0, 8).map((m, i) => (
@@ -159,7 +231,7 @@ export function InsightsSection({ currency = "CAD" }: { currency?: string }) {
                   <p className="text-[11px] text-muted-foreground">{m.count} transactions</p>
                 </div>
                 <p className="text-[13px] font-mono font-semibold text-rose-500 tabular-nums shrink-0 ml-2">
-                  {formatCurrency(m.totalSpent, currency)}
+                  {formatCurrency(m.totalSpent, shownCurrency)}
                 </p>
               </div>
             ))}
@@ -173,12 +245,19 @@ export function InsightsSection({ currency = "CAD" }: { currency?: string }) {
           icon={TrendingUp}
           iconBg="bg-primary/10 text-primary"
           title="Category Trends"
-          subtitle="Spending direction by category"
+          subtitle={periodLabel && previousLabel ? `${periodLabel} vs ${previousLabel}` : "Spending by category"}
         >
           <div className="divide-y divide-border/40">
             {insights.trends.slice(0, 8).map((t, i) => (
               <div key={i} className="flex items-center justify-between py-2.5 first:pt-0 last:pb-0">
-                <p className="text-[13px]">{t.category}</p>
+                <div className="min-w-0">
+                  <p className="text-[13px]">{t.category}</p>
+                  {t.currentTotal != null && t.previousTotal != null && (
+                    <p className="text-[11px] text-muted-foreground tabular-nums">
+                      {formatCurrency(t.currentTotal, shownCurrency)} vs {formatCurrency(t.previousTotal, shownCurrency)}
+                    </p>
+                  )}
+                </div>
                 <span className={`inline-flex items-center gap-1 text-[11px] font-semibold px-2.5 py-1 rounded-full ${
                   t.trend === "rising"
                     ? "bg-rose-100 text-rose-700 dark:bg-rose-950/60 dark:text-rose-400"
@@ -187,7 +266,7 @@ export function InsightsSection({ currency = "CAD" }: { currency?: string }) {
                       : "bg-muted text-muted-foreground"
                 }`}>
                   {t.trend === "rising" ? <ArrowUpRight className="h-3 w-3" /> : t.trend === "declining" ? <ArrowDownRight className="h-3 w-3" /> : null}
-                  {t.trend === "rising" ? "+" : ""}{t.changePercent}%
+                  {t.changePercent == null ? "new" : `${t.trend === "rising" ? "+" : ""}${t.changePercent}%`}
                 </span>
               </div>
             ))}
@@ -195,5 +274,7 @@ export function InsightsSection({ currency = "CAD" }: { currency?: string }) {
         </InsightCard>
       )}
     </motion.div>
+    </div>
+    </div>
   );
 }

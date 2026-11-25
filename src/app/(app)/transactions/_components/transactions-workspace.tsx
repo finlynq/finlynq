@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, useRef, useEffect, useCallback, useMemo } from "react";
+import { NO_CATEGORY_FILTER_LABEL, NO_CATEGORY_FILTER_VALUE } from "@/lib/transactions/category-filter";
 import { useSearchParams, useRouter } from "next/navigation";
 import Link from "next/link";
 import { Card, CardContent } from "@/components/ui/card";
@@ -968,6 +969,7 @@ export function TransactionsWorkspace({
               onValueChange={(v) => { setFilters({ ...filters, categoryId: v === "all" ? "" : v }); setPage(0); }}
               items={[
                 { value: "all", label: "All categories" } satisfies ComboboxItemShape,
+                { value: NO_CATEGORY_FILTER_VALUE, label: NO_CATEGORY_FILTER_LABEL } satisfies ComboboxItemShape,
                 ...sortCategory(
                   categories.map((c): ComboboxItemShape => ({ value: String(c.id), label: c.name })),
                   (c) => Number(c.value),
@@ -1064,6 +1066,7 @@ export function TransactionsWorkspace({
                   const labels = f.values.map((v) => {
                     if (f.columnId === "source") return labelForSource(v as TransactionSource);
                     if (f.columnId === "category") {
+                      if (v === NO_CATEGORY_FILTER_VALUE) return NO_CATEGORY_FILTER_LABEL;
                       const cat = categories.find((c) => String(c.id) === v);
                       return cat?.name ?? v;
                     }

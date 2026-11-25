@@ -498,7 +498,12 @@ export function InboxToCategorizeTab({
           {unlinkedRows.length} row
           {unlinkedRows.length === 1 ? "" : "s"} need
           {unlinkedRows.length === 1 ? "s" : ""} categorizing — no rule matched
-          these at upload.
+          these at upload. To record rows like these straight away under
+          Uncategorized, add the{" "}
+          <a href="/settings/rules#catch-all" className="underline hover:text-foreground">
+            catch-all rule
+          </a>
+          .
         </p>
       )}
 

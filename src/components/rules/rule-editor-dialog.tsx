@@ -145,6 +145,53 @@ const VAR_SOURCES: Array<{ value: string; label: string }> = [
   { value: "fixed", label: "Fixed value" },
 ];
 
+/** Text typed into a number field, read as a number (blank / "-" / "." read as 0). */
+function readDecimal(text: string): number {
+  const n = parseFloat(text);
+  return Number.isFinite(n) ? n : 0;
+}
+
+/**
+ * A number box that keeps what you type while you type it (GH #453). The old
+ * fields fed `parseFloat(e.target.value) || 0` straight back as the value, so
+ * "12.0" turned into "12" before you could finish "12.05", and with no `step`
+ * the browser treated anything with cents as invalid. The typed text is shown
+ * for as long as it still reads as the stored number; a value changed from
+ * outside (a reset, another field) replaces it.
+ */
+export function DecimalInput({
+  value,
+  onValue,
+  className,
+  placeholder,
+  ariaLabel,
+}: {
+  value: number | null | undefined;
+  onValue: (n: number) => void;
+  className?: string;
+  placeholder?: string;
+  ariaLabel?: string;
+}) {
+  const [text, setText] = useState<string | null>(null);
+  const current = value ?? 0;
+  const shown = text !== null && readDecimal(text) === current ? text : String(current);
+  return (
+    <Input
+      type="number"
+      inputMode="decimal"
+      step="any"
+      value={shown}
+      onChange={(e) => {
+        setText(e.target.value);
+        onValue(readDecimal(e.target.value));
+      }}
+      className={className}
+      placeholder={placeholder}
+      aria-label={ariaLabel}
+    />
+  );
+}
+
 export function blankCondition(): Condition {
   return defaultConditionForField("payee");
 }
@@ -350,7 +397,7 @@ export function RuleEditorDialog({
             <Label className="text-xs uppercase tracking-wide text-muted-foreground">Live preview (pure actions only)</Label>
             <div className="grid grid-cols-2 gap-2">
               <Input value={samplePayee} onChange={(e) => setSamplePayee(e.target.value)} placeholder="Sample payee" />
-              <Input type="number" value={sampleAmount} onChange={(e) => setSampleAmount(parseFloat(e.target.value) || 0)} placeholder="Sample amount" />
+              <DecimalInput value={sampleAmount} onValue={setSampleAmount} placeholder="Sample amount" />
             </div>
             <div className="text-xs space-y-0.5 text-muted-foreground">
               <p>Sample: <span className="font-mono">{samplePayee || "(empty)"}</span> @ ${sampleAmount}</p>
@@ -425,7 +472,7 @@ function ConditionRow({
               <SelectItem value="between">between</SelectItem>
             </SelectContent>
           </Select>
-          <Input type="number" value={(cond as { value: number }).value} onChange={(e) => onChange({ value: parseFloat(e.target.value) || 0 } as Partial<Condition>)} className="flex-1" />
+          <DecimalInput value={(cond as { value: number }).value} onValue={(n) => onChange({ value: n } as Partial<Condition>)} className="flex-1" />
         </>
       )}
       {cond.field === "quantity" && cond.op === "between" && (
@@ -439,8 +486,8 @@ function ConditionRow({
               <SelectItem value="between">between</SelectItem>
             </SelectContent>
           </Select>
-          <Input type="number" value={(cond as { min: number }).min ?? 0} onChange={(e) => onChange({ min: parseFloat(e.target.value) || 0 } as Partial<Condition>)} className="w-24" placeholder="min" />
-          <Input type="number" value={(cond as { max: number }).max ?? 0} onChange={(e) => onChange({ max: parseFloat(e.target.value) || 0 } as Partial<Condition>)} className="w-24" placeholder="max" />
+          <DecimalInput value={(cond as { min: number }).min ?? 0} onValue={(n) => onChange({ min: n } as Partial<Condition>)} className="w-32" placeholder="min" ariaLabel="Minimum" />
+          <DecimalInput value={(cond as { max: number }).max ?? 0} onValue={(n) => onChange({ max: n } as Partial<Condition>)} className="w-32" placeholder="max" ariaLabel="Maximum" />
         </>
       )}
 
@@ -455,7 +502,7 @@ function ConditionRow({
               <SelectItem value="between">between</SelectItem>
             </SelectContent>
           </Select>
-          <Input type="number" value={(cond as { value: number }).value} onChange={(e) => onChange({ value: parseFloat(e.target.value) || 0 } as Partial<Condition>)} className="flex-1" />
+          <DecimalInput value={(cond as { value: number }).value} onValue={(n) => onChange({ value: n } as Partial<Condition>)} className="flex-1" />
         </>
       )}
       {cond.field === "amount" && cond.op === "between" && (
@@ -469,8 +516,8 @@ function ConditionRow({
               <SelectItem value="between">between</SelectItem>
             </SelectContent>
           </Select>
-          <Input type="number" value={(cond as { min: number }).min ?? 0} onChange={(e) => onChange({ min: parseFloat(e.target.value) || 0 } as Partial<Condition>)} className="w-24" placeholder="min" />
-          <Input type="number" value={(cond as { max: number }).max ?? 0} onChange={(e) => onChange({ max: parseFloat(e.target.value) || 0 } as Partial<Condition>)} className="w-24" placeholder="max" />
+          <DecimalInput value={(cond as { min: number }).min ?? 0} onValue={(n) => onChange({ min: n } as Partial<Condition>)} className="w-32" placeholder="min" ariaLabel="Minimum" />
+          <DecimalInput value={(cond as { max: number }).max ?? 0} onValue={(n) => onChange({ max: n } as Partial<Condition>)} className="w-32" placeholder="max" ariaLabel="Maximum" />
         </>
       )}
 
@@ -933,10 +980,9 @@ function VarBindingRow({
         </SelectContent>
       </Select>
       {from === "fixed" && (
-        <Input
-          type="number"
+        <DecimalInput
           value={value?.value ?? 0}
-          onChange={(e) => onChange({ from: "fixed", value: parseFloat(e.target.value) || 0 })}
+          onValue={(n) => onChange({ from: "fixed", value: n })}
           className="w-28"
           placeholder="value"
         />

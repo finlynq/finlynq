@@ -22,6 +22,7 @@ import type { FilterOption } from "@/lib/table-filters";
 import { labelForSource, SOURCES } from "@/lib/tx-source";
 import type { ColumnId as SharedColumnId, FilterType } from "@/lib/transactions/columns";
 import type { ColFilterShape } from "../_types";
+import { NO_CATEGORY_FILTER_LABEL, NO_CATEGORY_FILTER_VALUE } from "@/lib/transactions/category-filter";
 
 export function ColumnFilterPopover({
   columnId,
@@ -46,7 +47,11 @@ export function ColumnFilterPopover({
       case "source":
         return SOURCES.map((s) => ({ value: s, label: labelForSource(s) }));
       case "category":
-        return categories.map((c) => ({ value: String(c.id), label: c.name }));
+        // GH #454 — "(Blank)" first: rows with no category at all.
+        return [
+          { value: NO_CATEGORY_FILTER_VALUE, label: NO_CATEGORY_FILTER_LABEL },
+          ...categories.map((c) => ({ value: String(c.id), label: c.name })),
+        ];
       case "account":
         return accounts.map((a) => ({ value: String(a.id), label: a.name }));
       case "accountType":

@@ -17,6 +17,7 @@
 // See pf-app/docs/architecture/mcp.md and CLAUDE.md "Load-bearing gotchas".
 
 import { z } from "zod";
+import { isoDateSchema } from "../../src/lib/schemas/iso-date";
 
 const YMD_REGEX = /^\d{4}-(0[1-9]|1[0-2])-(0[1-9]|[12]\d|3[01])$/;
 const YM_REGEX = /^\d{4}-(0[1-9]|1[0-2])$/;
@@ -28,15 +29,7 @@ const YM_REGEX = /^\d{4}-(0[1-9]|1[0-2])$/;
  * then a `.refine` round-trip (catches Feb 30, non-leap Feb 29, etc. that
  * JS's `Date` constructor would silently roll forward).
  */
-export const ymdDate = z
-  .string()
-  .regex(YMD_REGEX, "expected YYYY-MM-DD")
-  .refine((s) => {
-    const d = new Date(s + "T00:00:00Z");
-    if (Number.isNaN(d.getTime())) return false;
-    // Round-trip: 2025-02-29 -> 2025-03-01 fails this check.
-    return d.toISOString().slice(0, 10) === s;
-  }, "invalid calendar date");
+export const ymdDate = isoDateSchema;
 
 /**
  * Strict YYYY-MM validator (used by `set_budget` / `get_budget_summary`).
