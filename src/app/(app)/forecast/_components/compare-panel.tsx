@@ -60,12 +60,15 @@ export function ComparePanel({
   labelB,
   currency,
   note,
+  control,
 }: {
   comparison: ForecastComparison;
   labelA: string;
   labelB: string;
   currency: string;
   note?: string;
+  /** The "Compare with" picker, shown in the header. */
+  control?: React.ReactNode;
 }) {
   const fmt = (v: number | null) => (v == null ? "–" : formatCurrency(v, currency, { decimals: 0 }));
   const signed = (v: number) => `${v >= 0 ? "+" : "−"}${formatCurrency(Math.abs(v), currency, { decimals: 0 })}`;
@@ -89,7 +92,10 @@ export function ComparePanel({
   return (
     <Card>
       <CardHeader className="pb-2">
-        <CardTitle className="text-base">Comparing with {labelB}</CardTitle>
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <CardTitle className="text-base">Compare</CardTitle>
+          {control}
+        </div>
         <CardDescription className="space-y-0.5">
           <span className="flex flex-wrap items-center gap-x-2"><Dot color={colA} /> <span className="font-medium text-foreground">This forecast</span> {labelA}</span>
           <span className="flex flex-wrap items-center gap-x-2"><Dot color={colB} dashed /> <span className="font-medium text-foreground">Compared</span> {labelB}</span>

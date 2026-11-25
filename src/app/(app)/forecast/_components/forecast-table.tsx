@@ -11,7 +11,6 @@
  * every line is blank), and section totals always show.
  */
 import { Fragment, useState } from "react";
-import { formatCurrency } from "@/lib/currency";
 import { cn } from "@/lib/utils";
 import { ChevronDown, ChevronRight } from "lucide-react";
 
@@ -23,6 +22,17 @@ export type TableModel = {
   totals: { income: number[]; expense: number[]; debtPayment: number[]; net: number[]; toInvestments?: number[]; purchases?: number[]; borrowed?: number[]; withdrawn?: number[] };
   balances: { cash: number[]; investments: number[]; loans: number[]; netWorth: number[] };
 };
+
+// Whole amounts with no currency sign (the currency is named once above the
+// table), so more columns fit.
+const WHOLE = new Intl.NumberFormat("en-US", { maximumFractionDigits: 0 });
+
+/** A table amount: whole number, grouped, no currency sign; "–" for blank. */
+export function formatTableAmount(v: number | null): string {
+  if (v == null) return "–";
+  const r = Math.round(v);
+  return r === 0 ? "0" : WHOLE.format(r).replace("-", "−");
+}
 
 /** Per column, the sum of the lines' amounts; null where every line is blank. */
 export function groupTotals(lines: TableLine[], columns: number): Array<number | null> {
@@ -67,15 +77,15 @@ export function ForecastTable({
       return next;
     });
 
-  const fmt = (v: number | null) => (v == null ? "–" : formatCurrency(v, currency, { decimals: 0 }));
+  const fmt = formatTableAmount;
   const income = model.lines.filter((l) => l.type === "income");
   const debt = model.lines.filter((l) => l.type === "debt");
   const groups = spendingGroups(model.lines);
   const allIds = ["s:income", "s:spending", ...(debt.length ? ["s:debt"] : []), ...[...groups.keys()].map((g) => `g:${g}`)];
   const allCollapsed = allIds.every((id) => collapsed.has(id));
 
-  const headCell = "sticky left-0 z-10 bg-card px-3 py-1.5 text-left font-medium whitespace-nowrap";
-  const numCell = "px-3 py-1.5 text-right tabular-nums whitespace-nowrap";
+  const headCell = "sticky left-0 z-10 bg-card px-3 py-1.5 text-left text-sm font-medium whitespace-nowrap";
+  const numCell = "px-2 py-1.5 text-right text-xs tabular-nums whitespace-nowrap";
 
   const lineRow = (l: TableLine, indent = "pl-6") => (
     <tr key={l.key} className="border-t border-border/40">
@@ -152,7 +162,8 @@ export function ForecastTable({
 
   return (
     <div className="space-y-1.5">
-      <div className="flex justify-end">
+      <div className="flex items-center justify-between gap-2">
+        <span className="text-xs text-muted-foreground">Amounts in {currency}</span>
         <button
           type="button"
           className="text-xs text-muted-foreground hover:text-foreground hover:underline"
@@ -162,7 +173,7 @@ export function ForecastTable({
         </button>
       </div>
       <div className="overflow-x-auto rounded-lg border">
-        <table className="w-full text-sm">
+        <table className="w-full">
           <thead>
             <tr className="bg-muted/40">
               <th className={cn(headCell, "bg-muted/40")}>Line</th>

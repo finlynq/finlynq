@@ -7,7 +7,7 @@
 import { describe, it, expect, afterEach } from "vitest";
 import React from "react";
 import { render, cleanup, fireEvent } from "@testing-library/react";
-import { ForecastTable, groupTotals, type TableModel } from "@/app/(app)/forecast/_components/forecast-table";
+import { ForecastTable, formatTableAmount, groupTotals, type TableModel } from "@/app/(app)/forecast/_components/forecast-table";
 
 afterEach(cleanup);
 
@@ -31,13 +31,23 @@ describe("groupTotals", () => {
   });
 });
 
+describe("formatTableAmount", () => {
+  it("whole numbers, no currency sign, a real minus, 0 for rounding noise", () => {
+    expect(formatTableAmount(74459.4)).toBe("74,459");
+    expect(formatTableAmount(-16435)).toBe("−16,435");
+    expect(formatTableAmount(-0.3)).toBe("0");
+    expect(formatTableAmount(null)).toBe("–");
+  });
+});
+
 describe("ForecastTable", () => {
   it("shows group totals, collapses a group and a section, keeps section totals", () => {
     const { getByRole, queryByText, getByText } = render(<ForecastTable model={model} currency="USD" selected={null} onSelect={null} />);
     const food = getByRole("button", { name: /Food/ });
     const foodRow = food.closest("tr")!;
-    expect(foodRow.textContent).toContain("$7,200");
-    expect(foodRow.textContent).toContain("$6,100");
+    expect(foodRow.textContent).toContain("7,200");
+    expect(foodRow.textContent).toContain("6,100");
+    expect(foodRow.textContent).not.toContain("$");
     expect(getByRole("button", { name: /Health/ }).closest("tr")!.textContent).toContain("–");
 
     fireEvent.click(food);

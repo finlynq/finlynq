@@ -33,11 +33,12 @@ import type { ForecastInputs, ForecastResult } from "@/lib/forecast/types";
 import { BalancesChart, CashFlowChart, type BalancePoint, type ChartMarker, type FlowPoint } from "./_components/forecast-charts";
 import { ForecastTable, type TableModel } from "./_components/forecast-table";
 import { LayerPanel } from "./_components/layer-panel";
-import { ScenarioBar } from "./_components/scenario-bar";
+import { CompareSelect, ScenarioBar } from "./_components/scenario-bar";
 import { ComparePanel, PlanVsActualCard } from "./_components/compare-panel";
 import { EVENT_LABEL, EventsPanel, newEvent } from "./_components/events-panel";
 import { AnswerCards, FirstRunCard, NotesStrip, monthLong, type ForecastNote } from "./_components/forecast-overview";
 import { Segmented } from "./_components/segmented";
+import { StickyBar } from "./_components/sticky-bar";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { layerSchema } from "@/lib/forecast/config";
 import { useForecastScenarios } from "./_components/use-forecast-scenarios";
@@ -394,39 +395,30 @@ export default function ForecastPage() {
     ...data.inputs.leftOut.map((l) => ({ tone: "info" as const, text: <><span className="font-medium">{l.label}</span>: {l.reason}</> })),
   ];
 
+  const compareSelect = (
+    <CompareSelect
+      hook={sc}
+      value={compareWith}
+      onChange={setCompareWith}
+      extra={beforePreset ? { value: "before", label: `This scenario ${beforePreset.label}` } : null}
+    />
+  );
+
   const presetBtn = "flex w-full items-center gap-2.5 rounded-lg border bg-muted/30 px-3 py-2.5 text-left text-sm transition-colors hover:border-primary/60 hover:bg-muted/60 disabled:cursor-not-allowed disabled:opacity-50";
 
   return (
     <div className="space-y-5 max-w-7xl">
       {/* Header */}
-      <div className="flex flex-wrap items-end justify-between gap-3">
-        <div className="min-w-0">
-          <h1 className="text-2xl font-bold tracking-tight">Forecast</h1>
-          <p className="text-sm text-muted-foreground mt-0.5">
-            From {monthLong(result.startMonth)}, starting from today&apos;s balances, your budgets and loan schedules. Data as of{" "}
-            {new Date(data.inputs.inputsAsOf).toLocaleString()}.
-          </p>
-        </div>
-        <div className="flex max-w-full flex-wrap items-center gap-2">
-          <Segmented
-            label="How far ahead"
-            value={String(config.horizonMonths)}
-            options={horizonOptions}
-            onChange={(v) => update({ horizonMonths: Number(v) })}
-          />
-          <Segmented
-            label="Show amounts in"
-            value={real ? "real" : "nominal"}
-            options={[{ value: "nominal", label: "Future $" }, { value: "real", label: "Today's $" }]}
-            onChange={(v) => setReal(v === "real")}
-          />
-          <Button variant="outline" size="icon" className="h-9 w-9" onClick={load} disabled={loading} aria-label="Refresh data" title="Refresh data">
-            <RefreshCw className={`h-4 w-4 ${loading ? "animate-spin" : ""}`} />
-          </Button>
-        </div>
+      <div className="min-w-0">
+        <h1 className="text-2xl font-bold tracking-tight">Forecast</h1>
+        <p className="text-sm text-muted-foreground mt-0.5">
+          From {monthLong(result.startMonth)}, starting from today&apos;s balances, your budgets and loan schedules. Data as of{" "}
+          {new Date(data.inputs.inputsAsOf).toLocaleString()}.
+        </p>
       </div>
 
-      <div className="rounded-lg border bg-card p-2.5">
+      {/* Scenario, horizon and money: one toolbar that stays at the top while scrolling. */}
+      <StickyBar className="rounded-lg border bg-card p-2.5">
         <ScenarioBar
           hook={sc}
           working={config}
@@ -435,9 +427,29 @@ export default function ForecastPage() {
           onOpened={onOpened}
           compareWith={compareWith}
           onCompareWith={setCompareWith}
-          extraCompare={beforePreset ? { value: "before", label: `This scenario ${beforePreset.label}` } : null}
+          trailing={
+            <>
+              <Segmented
+                label="How far ahead"
+                size="sm"
+                value={String(config.horizonMonths)}
+                options={horizonOptions}
+                onChange={(v) => update({ horizonMonths: Number(v) })}
+              />
+              <Segmented
+                label="Show amounts in"
+                size="sm"
+                value={real ? "real" : "nominal"}
+                options={[{ value: "nominal", label: "Future $" }, { value: "real", label: "Today's $" }]}
+                onChange={(v) => setReal(v === "real")}
+              />
+              <Button variant="outline" size="icon" className="h-8 w-8" onClick={load} disabled={loading} aria-label="Refresh data" title="Refresh data">
+                <RefreshCw className={`h-3.5 w-3.5 ${loading ? "animate-spin" : ""}`} />
+              </Button>
+            </>
+          }
         />
-      </div>
+      </StickyBar>
 
       {mostlyBlank && !firstRunDismissed && (
         <FirstRunCard
@@ -497,14 +509,25 @@ export default function ForecastPage() {
             notes={notes}
           />
 
-          {comparison && compareSource && (
+          {comparison && compareSource ? (
             <ComparePanel
               comparison={comparison}
               labelA={`${sc.open && sc.open.id !== "builtin" ? sc.open.name : "Baseline"}${dirty ? " (with your unsaved changes)" : ""}`}
               labelB={compareSource.label}
               currency={cur}
               note={compareSource.note}
+              control={compareSelect}
             />
+          ) : (
+            <Card>
+              <CardContent className="flex flex-wrap items-center gap-3 py-3">
+                <div className="min-w-[200px] flex-1">
+                  <p className="text-sm font-semibold">Compare</p>
+                  <p className="text-xs text-muted-foreground">See this forecast next to a saved scenario or a frozen snapshot. The difference shows here.</p>
+                </div>
+                {compareSelect}
+              </CardContent>
+            </Card>
           )}
           {planActual && compareSource && (
             <PlanVsActualCard data={planActual} snapshotLabel={compareSource.label} currency={cur} />
