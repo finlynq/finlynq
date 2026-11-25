@@ -123,23 +123,10 @@ export function InsightsSection({ currency = "CAD" }: { currency?: string }) {
   const previousLabel = insights?.period?.previousLabel ?? "";
 
   return (
-    <div className="space-y-3">
-    <div className="flex flex-wrap items-center justify-between gap-2">
-      <h2 className="text-sm font-semibold">Insights</h2>
-      <div className="flex items-center gap-2">
-        <span className="text-xs text-muted-foreground">Merchants and trends for</span>
-        <Select value={period ?? DEFAULT_INSIGHT_PERIOD} onValueChange={choosePeriod}>
-          <SelectTrigger className="h-8 w-44 text-xs" aria-label="Insights period">
-            <SelectValue />
-          </SelectTrigger>
-          <SelectContent>
-            {INSIGHT_PERIODS.map((p) => (
-              <SelectItem key={p.key} value={p.key}>{p.label}</SelectItem>
-            ))}
-          </SelectContent>
-        </Select>
-      </div>
-    </div>
+    <div className="space-y-5">
+    {/* Not tied to the period picker: alerts are this month vs your average,
+        recurring is your regular payments. */}
+    {((insights && insights.anomalies.length > 0) || (recurring && recurring.count > 0)) && (
     <motion.div
       className="grid grid-cols-1 lg:grid-cols-2 gap-5"
       variants={containerVariants}
@@ -202,6 +189,32 @@ export function InsightsSection({ currency = "CAD" }: { currency?: string }) {
         </InsightCard>
       )}
 
+    </motion.div>
+    )}
+    {/* GH #457 — the picker drives these two cards only. */}
+    <div className="space-y-3">
+    <div className="flex flex-wrap items-center justify-between gap-2">
+      <h2 className="text-sm font-semibold">Insights</h2>
+      <div className="flex items-center gap-2">
+        <span className="text-xs text-muted-foreground">Merchants and trends for</span>
+        <Select value={period ?? DEFAULT_INSIGHT_PERIOD} onValueChange={choosePeriod}>
+          <SelectTrigger className="h-8 w-44 text-xs" aria-label="Insights period">
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            {INSIGHT_PERIODS.map((p) => (
+              <SelectItem key={p.key} value={p.key}>{p.label}</SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+      </div>
+    </div>
+    <motion.div
+      className="grid grid-cols-1 lg:grid-cols-2 gap-5"
+      variants={containerVariants}
+      initial="hidden"
+      animate="visible"
+    >
       {/* Top Merchants */}
       {insights && insights.topMerchants.length > 0 && (
         <InsightCard
@@ -261,6 +274,7 @@ export function InsightsSection({ currency = "CAD" }: { currency?: string }) {
         </InsightCard>
       )}
     </motion.div>
+    </div>
     </div>
   );
 }

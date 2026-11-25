@@ -144,6 +144,15 @@ describe("#457 wiring", () => {
     expect(read("src/app/api/insights/route.ts")).not.toContain("requireDevMode");
   });
 
+  it("the period picker heads only Top Merchants and Category Trends", () => {
+    const src = read("src/app/(app)/dashboard/_components/insights-section.tsx");
+    const picker = src.indexOf('aria-label="Insights period"');
+    expect(src.indexOf("{/* Spending Alerts */}")).toBeLessThan(picker);
+    expect(src.indexOf("{/* Recurring */}")).toBeLessThan(picker);
+    expect(src.indexOf("{/* Top Merchants */}")).toBeGreaterThan(picker);
+    expect(src.indexOf("{/* Category Trends */}")).toBeGreaterThan(picker);
+  });
+
   it("merchant rows come from expense categories without transfer, trade or bookkeeping rows", () => {
     const q = read("src/lib/queries.ts");
     const fn = q.slice(q.indexOf("export async function getMerchantSpendRows"), q.indexOf("export async function getSpendingByCategory"));
