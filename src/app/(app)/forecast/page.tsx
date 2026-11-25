@@ -443,7 +443,7 @@ export default function ForecastPage() {
       {comparison && compareSource && (
         <ComparePanel
           comparison={comparison}
-          labelA={sc.open && sc.open.id !== "builtin" ? sc.open.name : "Baseline"}
+          labelA={`${sc.open && sc.open.id !== "builtin" ? sc.open.name : "Baseline"}${dirty ? " (with your unsaved changes)" : ""}`}
           labelB={compareSource.label}
           currency={cur}
           note={compareSource.note}
