@@ -63,6 +63,14 @@ export type ForecastInputs = {
   budget: Record<string, BudgetSeries>;
   loans: LoanInput[];
   accounts: PoolAccount[];
+  /** Complete months before the forecast (oldest first) that `history` / `pastBudget` cover. */
+  historyMonths: string[];
+  /** Actual amount per line per past month (spending and income positive, refunds net), budget attribution rules. */
+  history: Record<string, Record<string, number>>;
+  /** Budget per line per past month (for budget realism). */
+  pastBudget: Record<string, Record<string, number>>;
+  /** Subscriptions + recurring payments per line per forecast month. */
+  scheduled: Record<string, Record<string, number>>;
   notes: string[];
   /** Lines left out on purpose, with why (e.g. loan interest the debt payment already covers). */
   leftOut: Array<{ key: string; label: string; reason: string }>;

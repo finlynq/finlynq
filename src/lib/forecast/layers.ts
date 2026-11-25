@@ -79,6 +79,60 @@ function budgetValue(
   return { value: null, carriedFrom: null, detail: "no budget this month" };
 }
 
+/** History layer: average or median of the last N complete months (seasonal option). Null when the line has no history. */
+export function historyValue(
+  inputs: ForecastInputs,
+  layer: Extract<ForecastLayer, { kind: "history" }>,
+  key: string,
+  month: string,
+): { value: number | null; detail: string } {
+  const all = inputs.historyMonths ?? [];
+  const n = Math.min(layer.params.lookbackMonths, all.length);
+  if (n === 0) return { value: null, detail: "no history yet" };
+  const window = all.slice(all.length - n);
+  const series = inputs.history?.[key] ?? {};
+  if (window.every((m) => !series[m])) return { value: null, detail: "no history in these months" };
+  let pick = window;
+  let how = `${layer.params.method} of the last ${n} month${n === 1 ? "" : "s"}`;
+  if (layer.params.seasonal && n >= 12) {
+    const same = window.filter((m) => m.slice(5) === month.slice(5));
+    if (same.length) {
+      pick = same;
+      how = `same month in the last ${same.length} year${same.length === 1 ? "" : "s"}`;
+    }
+  }
+  const vals = pick.map((m) => series[m] ?? 0);
+  let v: number;
+  if (layer.params.method === "median") {
+    const sorted = [...vals].sort((a, b) => a - b);
+    const mid = Math.floor(sorted.length / 2);
+    v = sorted.length % 2 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2;
+  } else {
+    v = vals.reduce((t, x) => t + x, 0) / vals.length;
+  }
+  return { value: v, detail: how };
+}
+
+/** Budget realism: actual ÷ budget over the last N months that had a budget (null when too few). */
+export function realismRatio(
+  inputs: ForecastInputs,
+  layer: Extract<ForecastLayer, { kind: "budget_realism" }>,
+  key: string,
+): { ratio: number | null; detail: string } {
+  const all = inputs.historyMonths ?? [];
+  const window = all.slice(Math.max(0, all.length - layer.params.lookbackMonths));
+  const budgets = inputs.pastBudget?.[key] ?? {};
+  const actual = inputs.history?.[key] ?? {};
+  const months = window.filter((m) => (budgets[m] ?? 0) > 0);
+  if (months.length < layer.params.minMonths) {
+    return { ratio: null, detail: `needs ${layer.params.minMonths} budgeted month${layer.params.minMonths === 1 ? "" : "s"} in the last ${window.length}, has ${months.length}` };
+  }
+  const b = months.reduce((t, m) => t + budgets[m], 0);
+  const a = months.reduce((t, m) => t + (actual[m] ?? 0), 0);
+  const ratio = Math.max(0, Math.min(5, a / b));
+  return { ratio, detail: `actual was ${(ratio * 100).toFixed(0)}% of budget over ${months.length} month${months.length === 1 ? "" : "s"}` };
+}
+
 function combine(op: string, before: number | null, amount: number | null): number | null {
   switch (op) {
     case "fill":
@@ -130,12 +184,30 @@ export function foldCell(
       if (layer.params.appliesTo === "carried") base = cell.carriedFrom;
       else base = layer.from ?? shiftMonth(inputs.startMonth, -1);
       if (!base) {
-        detail = "not a carried budget";
+        detail = "a budget you set (not grown)";
       } else {
         const n = Math.max(0, monthsBetween(base, month));
         cell.value = before * Math.pow(1 + rate, n / 12);
         detail = `${(rate * 100).toFixed(2)}% a year for ${n} month${n === 1 ? "" : "s"}`;
       }
+    } else if (layer.kind === "history") {
+      const h = historyValue(inputs, layer, line.key, month);
+      detail = h.detail;
+      const next = combine(layer.op, before, h.value);
+      // History is at today's prices: the default (carried) inflation grows it from the forecast start.
+      if (next !== before) cell.carriedFrom = shiftMonth(inputs.startMonth, -1);
+      cell.value = next;
+    } else if (layer.kind === "budget_realism") {
+      if (before == null) continue;
+      const r = realismRatio(inputs, layer, line.key);
+      detail = r.detail;
+      if (r.ratio != null) cell.value = before * r.ratio;
+    } else if (layer.kind === "scheduled") {
+      const v = inputs.scheduled?.[line.key]?.[month] ?? null;
+      detail = v == null ? "nothing scheduled" : "subscriptions and recurring payments due this month";
+      const next = combine(layer.op, before, v);
+      if (next !== before) cell.carriedFrom = null;
+      cell.value = next;
     } else {
       cell.value = combine(layer.op, before, layer.params.amount);
     }

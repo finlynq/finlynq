@@ -27,6 +27,7 @@ import {
   real,
   smallint,
   pgView,
+  type AnyPgColumn,
 } from "drizzle-orm/pg-core";
 import { sql } from "drizzle-orm";
 
@@ -765,6 +766,62 @@ export const savedViews = pgTable("saved_views", {
   uniqueIndex("saved_views_user_default_unique").on(t.userId, t.kind).where(sql`is_default`),
   check("saved_views_kind_check", sql`${t.kind} IN ('report','transactions')`),
   check("saved_views_default_kind_check", sql`(NOT ${t.isDefault}) OR ${t.kind} = 'transactions'`),
+]);
+
+// Forecast Phase 2 (2026-11-25, plan/forecast-scenarios.md; migration
+// 20261125_forecast_scenarios.sql). Name + doc/result DEK-encrypted. Store:
+// src/lib/forecast/store.ts (SERVER ONLY).
+export const forecastScenarios = pgTable("forecast_scenarios", {
+  id: serial("id").primaryKey(),
+  userId: text("user_id").notNull(),
+  nameCt: text("name_ct").notNull(),
+  nameLookup: text("name_lookup").notNull(),
+  parentId: integer("parent_id").references((): AnyPgColumn => forecastScenarios.id),
+  docCt: text("doc_ct").notNull(),
+  version: integer("version").notNull().default(1),
+  updatedBy: text("updated_by").notNull().default("user").$type<"user" | "assistant">(),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+}, (t) => [
+  index("idx_forecast_scenarios_user_id").on(t.userId),
+  uniqueIndex("forecast_scenarios_user_name_unique").on(t.userId, t.nameLookup),
+  index("idx_forecast_scenarios_parent_id").on(t.parentId),
+  check("forecast_scenarios_updated_by_check", sql`${t.updatedBy} IN ('user','assistant')`),
+]);
+
+export const forecastScenarioRevisions = pgTable("forecast_scenario_revisions", {
+  id: serial("id").primaryKey(),
+  userId: text("user_id").notNull(),
+  scenarioId: integer("scenario_id").notNull().references(() => forecastScenarios.id, { onDelete: "cascade" }),
+  version: integer("version").notNull(),
+  docCt: text("doc_ct").notNull(),
+  summaryCt: text("summary_ct"),
+  updatedBy: text("updated_by").notNull().default("user").$type<"user" | "assistant">(),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+}, (t) => [
+  index("idx_forecast_scenario_revisions_user_id").on(t.userId),
+  index("idx_forecast_scenario_revisions_scenario").on(t.scenarioId, t.version),
+  check("forecast_scenario_revisions_updated_by_check", sql`${t.updatedBy} IN ('user','assistant')`),
+]);
+
+export const forecastSnapshots = pgTable("forecast_snapshots", {
+  id: serial("id").primaryKey(),
+  userId: text("user_id").notNull(),
+  scenarioId: integer("scenario_id").references(() => forecastScenarios.id, { onDelete: "set null" }),
+  nameCt: text("name_ct").notNull(),
+  nameLookup: text("name_lookup").notNull(),
+  resultCt: text("result_ct").notNull(),
+  configCt: text("config_ct").notNull(),
+  resultSchemaVersion: integer("result_schema_version").notNull(),
+  engineVersion: integer("engine_version").notNull(),
+  inputsAsOf: timestamp("inputs_as_of", { withTimezone: true }).notNull(),
+  createdBy: text("created_by").notNull().default("user").$type<"user" | "assistant">(),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+}, (t) => [
+  index("idx_forecast_snapshots_user_id").on(t.userId),
+  uniqueIndex("forecast_snapshots_user_name_unique").on(t.userId, t.nameLookup),
+  index("idx_forecast_snapshots_scenario_id").on(t.scenarioId),
+  check("forecast_snapshots_created_by_check", sql`${t.createdBy} IN ('user','assistant')`),
 ]);
 
 // Multi-account goal linking (issue #130, 2026-05-03). JOIN grain is

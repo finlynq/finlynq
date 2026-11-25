@@ -21,14 +21,17 @@ import { safeName } from "@/lib/safe-name";
 import { buildLoanSchedule, loanScheduleExtras, LoanValidationError } from "@/lib/loan-calculator";
 import { projectLoanFromToday } from "@/lib/loans/projection";
 import { getLinkedAccountBalances } from "@/lib/loans/linked-account-balances";
-import { loadBudgetContext, loadBudgetsByMonth } from "@/lib/budgets/load-month";
-import { categoryKey, groupKey } from "@/lib/budgets/lines";
+import { loadActualsByMonth, loadBudgetContext, loadBudgetsByMonth, loadScheduledBetween } from "@/lib/budgets/load-month";
+import { categoryKey, groupKey, monthEndDate, monthStartDate } from "@/lib/budgets/lines";
 import { horizonEnd, loadRules, rulesByLine } from "@/lib/budgets/rule-store";
 import { forecastMonths, shiftMonth } from "./layers";
 import type { BudgetSeries, ForecastInputs, ForecastLineDef, LoanInput, PoolAccount } from "./types";
 
 const round2 = (n: number) => Math.round(n * 100) / 100;
-export const FORECAST_INPUT_HORIZON_MONTHS = 120;
+/** Inputs always cover the longest horizon (50 years), so any horizon change re-runs in the browser. */
+export const FORECAST_INPUT_HORIZON_MONTHS = 600;
+/** Complete past months loaded for the History and Budget realism layers. */
+export const FORECAST_HISTORY_MONTHS = 24;
 
 export async function loadForecastInputs(
   userId: string,
@@ -58,6 +61,8 @@ export async function loadForecastInputs(
   const incomeLines: ForecastLineDef[] = [];
   const expenseLines: ForecastLineDef[] = [];
   const groupLines = new Map<string, ForecastLineDef>();
+  /** Category id → the forecast line it counts in (its own, or its group's). */
+  const keyOfCategory = new Map<number, string>();
   for (const c of ctx.categories) {
     const gs = c.type === "E" ? ctx.groupSettings.get(c.group) : undefined;
     if (c.excluded || gs?.excluded) continue;
@@ -70,9 +75,11 @@ export async function loadForecastInputs(
     if (c.type === "E" && gs?.byGroup) {
       const key = groupKey(c.group);
       if (!groupLines.has(key)) groupLines.set(key, { key, label: c.group || "Other", type: "expense", group: c.group });
+      keyOfCategory.set(c.id, key);
       continue;
     }
     const line: ForecastLineDef = { key: categoryKey(c.id), label: c.name, type: c.type === "I" ? "income" : "expense", group: c.group };
+    keyOfCategory.set(c.id, line.key);
     (c.type === "I" ? incomeLines : expenseLines).push(line);
   }
   const byGroupThenName = (a: ForecastLineDef, b: ForecastLineDef) =>
@@ -104,6 +111,43 @@ export async function loadForecastInputs(
       : seriesFor(l.key, budgets.categories.get(Number(l.key.slice(2))));
     if (s) budget[l.key] = s;
   }
+
+  // ── History, past budgets, scheduled payments (Phase 2 layers) ─────────
+  const historyFrom = shiftMonth(ctx.currentMonth, -FORECAST_HISTORY_MONTHS);
+  const historyTo = shiftMonth(ctx.currentMonth, -1);
+  const historyMonths = forecastMonths(historyFrom, FORECAST_HISTORY_MONTHS);
+  const [actuals, pastBudgets, scheduledByCat] = await Promise.all([
+    loadActualsByMonth(ctx, historyFrom, historyTo),
+    loadBudgetsByMonth(ctx, historyFrom, historyTo),
+    loadScheduledBetween(ctx, monthStartDate(startMonth), monthEndDate(endMonth)),
+  ]);
+  const sumInto = (target: Record<string, Record<string, number>>, key: string, byMonth: Record<string, number>) => {
+    const t = target[key] ?? {};
+    for (const [m, v] of Object.entries(byMonth)) t[m] = round2((t[m] ?? 0) + v);
+    target[key] = t;
+  };
+  const history: Record<string, Record<string, number>> = {};
+  for (const [catId, byMonth] of actuals) {
+    const key = keyOfCategory.get(catId);
+    if (key) sumInto(history, key, byMonth);
+  }
+  const pastBudget: Record<string, Record<string, number>> = {};
+  for (const [catId, byMonth] of pastBudgets.categories) {
+    const key = keyOfCategory.get(catId);
+    if (key && key.startsWith("c:")) sumInto(pastBudget, key, byMonth);
+  }
+  for (const [group, byMonth] of pastBudgets.groups) {
+    const key = groupKey(group);
+    if (groupLines.has(key)) sumInto(pastBudget, key, byMonth);
+  }
+  const scheduled: Record<string, Record<string, number>> = {};
+  let unassignedScheduled = 0;
+  for (const [catId, byMonth] of scheduledByCat) {
+    const key = keyOfCategory.get(catId);
+    if (key) sumInto(scheduled, key, byMonth);
+    else unassignedScheduled++;
+  }
+  if (unassignedScheduled) notes.push(`${unassignedScheduled} scheduled payment categor${unassignedScheduled === 1 ? "y is" : "ies are"} left out or excluded from the budget, so the Scheduled layer skips ${unassignedScheduled === 1 ? "it" : "them"}.`);
 
   // ── Balances and pools ─────────────────────────────────────────────────
   const rows = await getAccountBalances(userId, { includeArchived: true });
@@ -216,6 +260,10 @@ export async function loadForecastInputs(
     budgetHorizonEnd,
     lines: [...incomeLines, ...allExpense, ...debtLines],
     budget,
+    historyMonths,
+    history,
+    pastBudget,
+    scheduled,
     loans,
     accounts,
     notes,

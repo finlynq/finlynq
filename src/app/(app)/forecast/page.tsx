@@ -1,12 +1,13 @@
 "use client";
 
 /**
- * /forecast — Forecast, Phase 1 (plan/forecast-scenarios.md).
+ * /forecast — Forecast (plan/forecast-scenarios.md), Phases 1-2.
  *
  * One request loads a snapshot of your real data plus the Baseline result;
  * every change on the page (horizon, assumptions, layers) re-runs the same
  * pure engine in the browser, so there is no Recalculate button and nothing
- * is stored. Lines with no budget stay blank (owner decision 2026-11-25).
+ * is stored unless you save a scenario or freeze a snapshot. Lines with no
+ * budget stay blank (owner decision 2026-11-25); a History layer can fill them.
  */
 import { useCallback, useEffect, useMemo, useState } from "react";
 import Link from "next/link";
@@ -21,9 +22,14 @@ import { formatCurrency } from "@/lib/currency";
 import { runForecast, yearlyView } from "@/lib/forecast/engine";
 import { traceCell } from "@/lib/forecast/layers";
 import { HORIZON_CHOICES, scenarioConfigSchema, type ScenarioConfig } from "@/lib/forecast/config";
+import { compareResults } from "@/lib/forecast/compare";
 import type { ForecastInputs, ForecastResult } from "@/lib/forecast/types";
 import { BalancesChart, CashFlowChart, type BalancePoint, type FlowPoint } from "./_components/forecast-charts";
 import { ForecastTable, type TableModel } from "./_components/forecast-table";
+import { LayerPanel } from "./_components/layer-panel";
+import { ScenarioBar } from "./_components/scenario-bar";
+import { ComparePanel } from "./_components/compare-panel";
+import { useForecastScenarios } from "./_components/use-forecast-scenarios";
 import { AlertTriangle, Info, RefreshCw } from "lucide-react";
 
 type RunResponse = { inputs: ForecastInputs; scenario: ScenarioConfig; result: ForecastResult };
@@ -44,6 +50,12 @@ export default function ForecastPage() {
   const [view, setView] = useState<"monthly" | "yearly">("yearly");
   const [real, setReal] = useState(false);
   const [selected, setSelected] = useState<{ key: string; column: string } | null>(null);
+  const [editorKey, setEditorKey] = useState(0);
+  const [compareWith, setCompareWith] = useState("");
+  const [compareSource, setCompareSource] = useState<
+    { label: string; config: ScenarioConfig | null; result: ForecastResult | null; note?: string } | null
+  >(null);
+  const sc = useForecastScenarios(data?.scenario ?? null);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -68,13 +80,60 @@ export default function ForecastPage() {
   // The engine runs here, on every change (milliseconds).
   const result = useMemo(() => (data && config ? runForecast(data.inputs, config) : null), [data, config]);
 
+  const dirty = !!(sc.open && config && JSON.stringify(sc.open.saved) !== JSON.stringify(config));
+
+  const onOpened = (c: ScenarioConfig) => {
+    setConfig(c);
+    setEditorKey((k) => k + 1);
+    setSelected(null);
+  };
+
+  // What to compare with: a saved scenario / the Baseline re-run on today's
+  // data, or a frozen snapshot's stored numbers.
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      if (!compareWith || !config) {
+        setCompareSource(null);
+        return;
+      }
+      if (compareWith.startsWith("snapshot:")) {
+        const id = Number(compareWith.slice(9));
+        const snap = sc.snapshots.find((x) => x.id === id);
+        const r = await sc.snapshotResult(id);
+        if (!cancelled) {
+          setCompareSource({
+            label: snap ? `snapshot "${snap.name}"` : "snapshot",
+            config: null,
+            result: r,
+            note: snap ? `Frozen on ${new Date(snap.createdAt).toLocaleDateString()} from data of ${new Date(snap.inputsAsOf).toLocaleDateString()}.` : undefined,
+          });
+        }
+        return;
+      }
+      const target = compareWith === "builtin" ? "builtin" : Number(compareWith.slice(9));
+      const cfg = await sc.configOf(target, config.horizonMonths);
+      const name = target === "builtin" ? "Baseline" : sc.scenarios.find((x) => x.id === target)?.name ?? "scenario";
+      if (!cancelled) setCompareSource({ label: name, config: cfg, result: null });
+    })();
+    return () => {
+      cancelled = true;
+    };
+    // config.horizonMonths only matters for the built-in Baseline's length.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [compareWith, sc.snapshots, sc.scenarios]);
+
+  const comparison = useMemo(() => {
+    if (!compareSource || !data || !result) return null;
+    const other = compareSource.result ?? (compareSource.config ? runForecast(data.inputs, compareSource.config) : null);
+    return other ? compareResults(result, other) : null;
+  }, [compareSource, data, result]);
+
   const update = (patch: Partial<ScenarioConfig>) => {
     if (!config) return;
     const next = scenarioConfigSchema.safeParse({ ...config, ...patch });
     if (next.success) setConfig(next.data);
   };
-  const setLayerEnabled = (id: string, enabled: boolean) =>
-    config && update({ layers: config.layers.map((l) => (l.id === id ? { ...l, enabled } : l)) });
   const setAssumption = (k: keyof ScenarioConfig["assumptions"], raw: string) => {
     if (!config) return;
     const v = Number(raw);
@@ -144,7 +203,6 @@ export default function ForecastPage() {
   const debtFree = result.milestones.find((m) => m.kind === "debt_free");
   const runsOut = result.milestones.find((m) => m.kind === "cash_negative" || m.kind === "investments_depleted");
   const budgetLayer = config.layers.find((l) => l.kind === "budget");
-  const inflationLayer = config.layers.find((l) => l.kind === "growth");
   const blankIncome = result.blankLines.filter((l) => l.type === "income");
   const blankSpending = result.blankLines.filter((l) => l.type === "expense");
 
@@ -187,6 +245,16 @@ export default function ForecastPage() {
         </div>
       </div>
 
+      <ScenarioBar
+        hook={sc}
+        working={config}
+        dirty={dirty}
+        result={result}
+        onOpened={onOpened}
+        compareWith={compareWith}
+        onCompareWith={setCompareWith}
+      />
+
       {/* Milestones */}
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
         <Card><CardContent className="py-4">
@@ -226,28 +294,13 @@ export default function ForecastPage() {
       </div>
 
       {/* Settings */}
-      <Card>
+      <Card key={editorKey}>
         <CardHeader className="pb-2">
           <CardTitle className="text-base">Layers and assumptions</CardTitle>
-          <CardDescription>Changes recalculate straight away. They are not saved yet (saved scenarios come next).</CardDescription>
+          <CardDescription>Changes recalculate straight away. Save them as a scenario to keep them.</CardDescription>
         </CardHeader>
         <CardContent className="grid gap-4 md:grid-cols-2">
-          <div className="space-y-2">
-            <p className="text-xs font-medium text-muted-foreground uppercase tracking-wide">Layers, applied in order</p>
-            {budgetLayer && (
-              <label className="flex items-start gap-2 text-sm cursor-pointer">
-                <input type="checkbox" className="mt-0.5" checked={budgetLayer.enabled} onChange={(e) => setLayerEnabled(budgetLayer.id, e.target.checked)} />
-                <span><span className="font-medium">Budget</span>: your budgets and budget rules. Lines with no budget stay blank.</span>
-              </label>
-            )}
-            {inflationLayer && (
-              <label className="flex items-start gap-2 text-sm cursor-pointer">
-                <input type="checkbox" className="mt-0.5" checked={inflationLayer.enabled} onChange={(e) => setLayerEnabled(inflationLayer.id, e.target.checked)} />
-                <span><span className="font-medium">Inflation</span>: grows spending budgets carried past {monthLong(data.inputs.budgetHorizonEnd)}, the end of your budget months. Budgets you typed are never changed.</span>
-              </label>
-            )}
-            <p className="text-xs text-muted-foreground">More layers (your spending history, scheduled payments, manual changes) and events (retire, buy a home) come in the next phases.</p>
-          </div>
+          <LayerPanel layers={config.layers} lines={data.inputs.lines} onChange={(layers) => update({ layers })} />
           <div className="grid grid-cols-2 gap-3 content-start">
             <div className="space-y-1">
               <Label className="text-xs" htmlFor="fc-infl">Inflation, % a year</Label>
@@ -283,7 +336,7 @@ export default function ForecastPage() {
               <Info className="h-4 w-4 shrink-0 mt-0.5" />
               <span>
                 {blankIncome.length + blankSpending.length} {blankIncome.length + blankSpending.length === 1 ? "line has" : "lines have"} no budget in this period, so {blankIncome.length + blankSpending.length === 1 ? "it is" : "they are"} blank
-                {blankIncome.length > 0 ? ` (including ${blankIncome.length} income)` : ""}. Add budgets on the <Link href="/budgets" className="underline">Budgets page</Link> to include them.
+                {blankIncome.length > 0 ? ` (including ${blankIncome.length} income)` : ""}. Add budgets on the <Link href="/budgets" className="underline">Budgets page</Link>, or add a &quot;Your history&quot; layer to fill them from what you actually spent.
               </span>
             </div>
           )}
@@ -305,6 +358,19 @@ export default function ForecastPage() {
           <CardContent><CashFlowChart points={model.flows} currency={cur} /></CardContent>
         </Card>
       </div>
+
+      {comparison && compareSource && (
+        <ComparePanel
+          comparison={comparison}
+          labelA={sc.open && sc.open.id !== "builtin" ? sc.open.name : "Baseline"}
+          labelB={compareSource.label}
+          currency={cur}
+          note={compareSource.note}
+        />
+      )}
+      {compareWith && compareSource && !comparison && (
+        <p className="text-sm text-destructive">That comparison can&apos;t be read.</p>
+      )}
 
       <ForecastTable
         model={model.table}

@@ -504,6 +504,28 @@ export async function loadUpcoming(ctx: BudgetContext, month: string): Promise<M
   const from = month === ctx.currentMonth ? tomorrow : monthStartDate(month);
   const to = monthEndDate(month);
   if (from > to) return out;
+  const byCategory = await loadScheduledBetween(ctx, from, to);
+  for (const [categoryId, byMonth] of byCategory) out.set(categoryId, round2(byMonth[month] ?? 0));
+  return out;
+}
+
+/**
+ * Subscriptions and recurring payments due between two dates (inclusive), per
+ * category and month, in the display currency at the current rate (amounts
+ * positive). Active subscriptions and recurring transactions with a category
+ * and a next date only. ONE rule for the budget's "still due" and the
+ * forecast's Scheduled layer.
+ */
+/** Enough for a weekly payment over the forecast's 50 years. */
+const MAX_OCCURRENCES = 3000;
+
+export async function loadScheduledBetween(
+  ctx: BudgetContext,
+  fromDate: string,
+  toDate: string,
+): Promise<Map<number, Record<string, number>>> {
+  const out = new Map<number, Record<string, number>>();
+  if (fromDate > toDate) return out;
   await advanceStaleSubscriptionDatesSafe(db, ctx.userId);
   const accountCurrency = new Map(ctx.accounts.map((a) => [a.id, a.currency]));
   const [subs, recurring] = await Promise.all([
@@ -532,18 +554,23 @@ export async function loadUpcoming(ctx: BudgetContext, month: string): Promise<M
       .where(eq(schema.recurringTransactions.userId, ctx.userId))
       .all(),
   ]);
-  const add = (categoryId: number, amount: number) =>
-    out.set(categoryId, round2((out.get(categoryId) ?? 0) + amount));
+  const add = (categoryId: number, dates: string[], each: number) => {
+    if (!dates.length) return;
+    const byMonth = out.get(categoryId) ?? {};
+    for (const d of dates) {
+      const m = d.slice(0, 7);
+      byMonth[m] = round2((byMonth[m] ?? 0) + each);
+    }
+    out.set(categoryId, byMonth);
+  };
   for (const s of subs) {
     if (s.status !== "active" || s.categoryId == null || !s.nextDate) continue;
-    const n = occurrencesBetween(s.nextDate, s.frequency, from, to).length;
-    if (n) add(s.categoryId, n * Math.abs(convertWithRateMap(Number(s.amount), s.currency, ctx.rateMap)));
+    add(s.categoryId, occurrencesBetween(s.nextDate, s.frequency, fromDate, toDate, MAX_OCCURRENCES), Math.abs(convertWithRateMap(Number(s.amount), s.currency, ctx.rateMap)));
   }
   for (const r of recurring) {
     if (r.active !== 1 || r.categoryId == null || !r.nextDate) continue;
-    const n = occurrencesBetween(r.nextDate, r.frequency, from, to).length;
     const cur = (r.accountId != null ? accountCurrency.get(r.accountId) : null) ?? ctx.currency;
-    if (n) add(r.categoryId, n * Math.abs(convertWithRateMap(Number(r.amount), cur, ctx.rateMap)));
+    add(r.categoryId, occurrencesBetween(r.nextDate, r.frequency, fromDate, toDate, MAX_OCCURRENCES), Math.abs(convertWithRateMap(Number(r.amount), cur, ctx.rateMap)));
   }
   return out;
 }
