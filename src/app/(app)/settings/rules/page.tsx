@@ -30,7 +30,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import {
-  Zap, Plus, Trash2, AlertTriangle,
+  Zap, Plus, Trash2, AlertTriangle, Inbox,
 } from "lucide-react";
 import {
   RuleEditorDialog,
@@ -40,6 +40,7 @@ import {
   type RuleSeed,
 } from "@/components/rules/rule-editor-dialog";
 import type { Condition, Action } from "@/lib/rules/schema";
+import { isAnyAmountCondition, isCatchAllRule } from "@/lib/rules/catch-all";
 
 type RuleRow = {
   id: number;
@@ -69,6 +70,7 @@ function describeCondition(c: Condition, fkNames?: RuleRow["actionFKNames"]): st
     case "tags":
       return `${c.field} ${c.op} "${c.value}"`;
     case "amount":
+      if (isAnyAmountCondition(c)) return "any amount";
       if (c.op === "between") return `amount between ${c.min}-${c.max}`;
       return `amount ${c.op} ${c.value}`;
     case "account": {
@@ -146,6 +148,9 @@ export default function RulesSettingsPage() {
   const [error, setError] = useState("");
   const [editing, setEditing] = useState<RuleRow | null>(null);
   const [showEditor, setShowEditor] = useState(false);
+  const [loaded, setLoaded] = useState(false);
+  const [addingCatchAll, setAddingCatchAll] = useState(false);
+  const [catchAllNotice, setCatchAllNotice] = useState("");
 
   async function load() {
     try {
@@ -165,10 +170,41 @@ export default function RulesSettingsPage() {
       }
     } catch (e) {
       setError(String(e));
+    } finally {
+      setLoaded(true);
     }
   }
 
   useEffect(() => { load(); }, []);
+
+  const catchAllRule = rules.find((r) => isCatchAllRule(r)) ?? null;
+
+  async function handleAddCatchAll() {
+    if (addingCatchAll) return;
+    setAddingCatchAll(true);
+    setError("");
+    try {
+      const res = await fetch("/api/rules/catch-all", { method: "POST" });
+      if (!res.ok) {
+        const msg = res.status === 423
+          ? "Your session is locked. Sign in again to add the rule."
+          : ((await res.json().catch(() => ({})))?.error ?? "Failed to add the catch-all rule");
+        setError(msg);
+        return;
+      }
+      const body = await res.json().catch(() => ({}));
+      const made = body?.data?.categoryCreated ? " and the Uncategorized category" : "";
+      setCatchAllNotice(
+        `Added the catch-all rule${made}. New rows no other rule matches are now recorded under Uncategorized; ` +
+        "rows already waiting on Auto-pilot accounts are picked up on the next sync.",
+      );
+      await load();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setAddingCatchAll(false);
+    }
+  }
 
   async function handleToggle(rule: RuleRow) {
     try {
@@ -213,6 +249,35 @@ export default function RulesSettingsPage() {
         </p>
       </div>
 
+      {loaded && !catchAllRule && (
+        <Card id="catch-all">
+          <CardContent className="flex flex-col gap-3 py-4 sm:flex-row sm:items-center">
+            <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-muted text-muted-foreground">
+              <Inbox className="h-5 w-5" />
+            </div>
+            <div className="min-w-0 flex-1">
+              <p className="text-sm font-medium">Record everything else as Uncategorized</p>
+              <p className="text-xs text-muted-foreground mt-0.5">
+                Adds one rule, listed last, that files every row no other rule matches under an
+                {" "}&quot;Uncategorized&quot; category (made if you don&apos;t have one). On Auto-pilot
+                accounts those rows then reach your transactions instead of waiting in Import.
+                Edit, disable or delete it like any rule.
+              </p>
+            </div>
+            <Button size="sm" onClick={handleAddCatchAll} disabled={addingCatchAll} className="shrink-0">
+              {addingCatchAll ? "Adding…" : "Add catch-all rule"}
+            </Button>
+          </CardContent>
+        </Card>
+      )}
+
+      {catchAllNotice && (
+        <div className="rounded-md border border-emerald-200 bg-emerald-50 p-3 text-sm text-emerald-900 dark:border-emerald-900/50 dark:bg-emerald-950/40 dark:text-emerald-200">
+          {catchAllNotice}
+          <button className="ml-2 text-xs underline" onClick={() => setCatchAllNotice("")}>dismiss</button>
+        </div>
+      )}
+
       <Card>
         <CardHeader>
           <div className="flex items-center justify-between">
@@ -253,6 +318,7 @@ export default function RulesSettingsPage() {
                   <div className="flex items-center gap-2 flex-wrap">
                     <span className="font-medium text-sm truncate">{rule.name}</span>
                     {rule.priority > 0 && <Badge variant="secondary" className="text-[10px]">P{rule.priority}</Badge>}
+                    {isCatchAllRule(rule) && <Badge variant="outline" className="text-[10px]">catch-all</Badge>}
                     {!rule.isActive && <Badge variant="outline" className="text-[10px]">disabled</Badge>}
                   </div>
                   <p className="text-xs text-muted-foreground mt-0.5">

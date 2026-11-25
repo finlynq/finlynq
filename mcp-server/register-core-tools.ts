@@ -699,7 +699,10 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
 
       const uncategorized = await sqlite.prepare(
         `SELECT id, payee, amount, tags FROM transactions
-         WHERE user_id = ? AND category_id IS NULL ORDER BY date DESC LIMIT ?`
+         WHERE user_id = ? AND category_id IS NULL
+           AND portfolio_holding_id IS NULL
+           AND link_id IS NULL AND trade_link_id IS NULL AND swap_link_id IS NULL
+         ORDER BY date DESC LIMIT ?`
       ).all(userId, maxRows) as Array<{ id: number; payee: string; amount: number; tags: string }>;
 
       if (uncategorized.length === 0) {
