@@ -470,7 +470,7 @@ export default function DashboardPage() {
       </div>
 
       {/* ============================================
-          ROW 4–6 — Dev-only: Charts, Available to Spend, Insights
+          ROW 4–5 — Dev-only: Charts, Available to Spend
           ============================================ */}
       {devMode && (
         <>
@@ -481,9 +481,11 @@ export default function DashboardPage() {
           <div className="grid grid-cols-1 lg:grid-cols-3 gap-5">
             <AvailableToSpend {...spendMonths} currency={apiDisplayCurrency} />
           </div>
-          <InsightsSection currency={apiDisplayCurrency} />
         </>
       )}
+
+      {/* GH #457 — Insights is out of dev mode: shown to everyone. */}
+      <InsightsSection currency={apiDisplayCurrency} />
 
     </motion.div>
     </>

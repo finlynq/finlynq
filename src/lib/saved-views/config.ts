@@ -147,10 +147,17 @@ const idString = z
   .regex(/^\d*$/, "Use an id.")
   .default("");
 
+// GH #454 — the category picker also takes "none" ("(Blank)": no category).
+const categoryIdString = z
+  .string()
+  .max(20)
+  .regex(/^(\d*|none)$/, "Use an id.")
+  .default("");
+
 export const transactionsViewConfigSchema = z.object({
   date: transactionsDateRangeSchema,
   accountId: idString,
-  categoryId: idString,
+  categoryId: categoryIdString,
   search: z.string().max(200).default(""),
   portfolioHolding: z.string().max(200).default(""),
   tag: z.string().max(200).default(""),

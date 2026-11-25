@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getTransactions, getTransactionCount, createTransaction, updateTransaction, getAccountById, type TxSortFilter } from "@/lib/queries";
+import { parseCategoryFilter } from "@/lib/transactions/category-filter";
 import { requireAuth } from "@/lib/auth/require-auth";
 import { requireEncryption } from "@/lib/auth/require-encryption";
 import { encryptTxWrite, decryptTxRows, nameLookup, decryptName } from "@/lib/crypto/encrypted-columns";
@@ -270,6 +271,10 @@ export async function GET(request: NextRequest) {
     }
   }
 
+  // GH #454 — category filters accept `none` ("(Blank)": no category).
+  const topCategory = parseCategoryFilter(params.get("categoryId"));
+  const columnCategories = parseCategoryFilter(params.get("categoryIds"));
+
   // FK filter is SQL-side, so it's NOT a postDecryptFilter — paginate normally.
   const postDecryptFilter = search || tag || hasEncryptedSubstringFilter;
   const limit = params.get("limit") ? parseInt(params.get("limit")!) : 100;
@@ -283,11 +288,13 @@ export async function GET(request: NextRequest) {
     updatedAtFrom: params.get("updatedAtFrom") ?? undefined,
     updatedAtTo: params.get("updatedAtTo") ?? undefined,
     accountId: params.get("accountId") ? parseInt(params.get("accountId")!) : undefined,
-    categoryId: params.get("categoryId") ? parseInt(params.get("categoryId")!) : undefined,
+    categoryId: topCategory && topCategory.ids.length > 0 ? topCategory.ids[0] : undefined,
+    categoryNone: topCategory?.includeNone ?? false,
     portfolioHoldingId: Number.isFinite(portfolioHoldingId) ? portfolioHoldingId : undefined,
     portfolioHoldingIds,
     accountIds: parseIdList("accountIds"),
-    categoryIds: parseIdList("categoryIds"),
+    categoryIds: columnCategories?.ids,
+    categoryIdsIncludeNone: columnCategories?.includeNone ?? false,
     amountMin: parseNum("amountMin"),
     amountMax: parseNum("amountMax"),
     amountEq: parseNum("amountEq"),

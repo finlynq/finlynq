@@ -4,17 +4,14 @@ vi.mock("@/lib/auth/require-auth", () => ({
   requireAuth: vi.fn(async () => ({ authenticated: true, context: { userId: "default", method: "passphrase" as const, mfaVerified: false, dek: Buffer.alloc(32, 0xaa), sessionId: "test-session-jti" } })),
 }));
 
-// Insights is dev-gated; mock the guard so the route body (incl. the
-// FINLYNQ-123 FX conversion path) actually runs.
-vi.mock("@/lib/require-dev-mode", () => ({
-  requireDevMode: vi.fn(async () => null),
-}));
-
+// GH #457 — insights is no longer behind dev mode; no guard to mock.
 const mockGetMonthlySpending = vi.fn();
 const mockGetTransactions = vi.fn();
+const mockGetMerchantSpendRows = vi.fn();
 vi.mock("@/lib/queries", () => ({
   getMonthlySpending: (...a: unknown[]) => mockGetMonthlySpending(...a),
   getTransactions: (...a: unknown[]) => mockGetTransactions(...a),
+  getMerchantSpendRows: (...a: unknown[]) => mockGetMerchantSpendRows(...a),
 }));
 
 // FINLYNQ-123 — insights converts each monthly-spending slice to the display
@@ -32,8 +29,8 @@ vi.mock("@/lib/fx-service", () => ({
 // collapse happened.
 vi.mock("@/lib/spending-insights", () => ({
   detectAnomalies: vi.fn(() => [{ category: "Food", severity: "high" }]),
-  analyzeTrends: vi.fn(() => [{ category: "Food", direction: "up" }]),
-  analyzeMerchants: vi.fn(() => [{ payee: "Starbucks", total: -200 }]),
+  comparePeriods: vi.fn(() => [{ category: "Food", trend: "rising" }]),
+  merchantSpending: vi.fn(() => [{ payee: "Starbucks", totalSpent: 200 }]),
   spendingByDayOfWeek: vi.fn(() => [{ day: "Monday", total: -100 }]),
 }));
 
@@ -53,6 +50,7 @@ describe("API /api/insights", () => {
     vi.clearAllMocks();
     mockGetMonthlySpending.mockReturnValue([]);
     mockGetTransactions.mockReturnValue([]);
+    mockGetMerchantSpendRows.mockReturnValue([]);
   });
 
   it("returns insights structure", async () => {
@@ -68,8 +66,8 @@ describe("API /api/insights", () => {
   });
 
   it("limits trends to 15 items", async () => {
-    const { analyzeTrends } = await import("@/lib/spending-insights");
-    vi.mocked(analyzeTrends).mockReturnValue(Array(20).fill({ category: "Test", direction: "up" }));
+    const { comparePeriods } = await import("@/lib/spending-insights");
+    vi.mocked(comparePeriods).mockReturnValue(Array(20).fill({ category: "Test", group: "", trend: "rising", changePercent: 5, currentTotal: 1, previousTotal: 1 }));
     const req = createMockRequest("http://localhost:3000/api/insights");
     const res = await GET(req);
     const { data } = await parseResponse(res);
@@ -78,8 +76,8 @@ describe("API /api/insights", () => {
   });
 
   it("limits merchants to 20 items", async () => {
-    const { analyzeMerchants } = await import("@/lib/spending-insights");
-    vi.mocked(analyzeMerchants).mockReturnValue(Array(25).fill({ payee: "Test", total: -100 }));
+    const { merchantSpending } = await import("@/lib/spending-insights");
+    vi.mocked(merchantSpending).mockReturnValue(Array(25).fill({ payee: "Test", totalSpent: 100, count: 1, avgTransaction: 100 }));
     const req = createMockRequest("http://localhost:3000/api/insights");
     const res = await GET(req);
     const { data } = await parseResponse(res);
@@ -99,8 +97,10 @@ describe("API /api/insights", () => {
     // and one CAD slice with NO stored reporting_amount (current-rate fallback
     // 1000 * 0.7175 = 717.5). Same (month, category) → collapse to one row.
     mockGetMonthlySpending.mockReturnValue([
-      { month: "2024-01", categoryGroup: "Food", categoryNameCt: "ct", categoryType: "E", currency: "CAD", reportingCurrency: "USD", totalAmount: 1000, totalReporting: 700 },
-      { month: "2024-01", categoryGroup: "Food", categoryNameCt: "ct", categoryType: "E", currency: "CAD", reportingCurrency: null, totalAmount: 1000, totalReporting: null },
+      { month: "2024-01", categoryGroup: "Food", categoryNameCt: "ct", categoryType: "E", currency: "CAD", reportingCurrency: "USD", totalAmount: -1000, totalReporting: -700 },
+      { month: "2024-01", categoryGroup: "Food", categoryNameCt: "ct", categoryType: "E", currency: "CAD", reportingCurrency: null, totalAmount: -1000, totalReporting: null },
+      // GH #457 — an income category never reaches alerts or trends.
+      { month: "2024-01", categoryGroup: "Pay", categoryNameCt: "ct", categoryType: "I", currency: "USD", reportingCurrency: "USD", totalAmount: 5000, totalReporting: 5000 },
     ]);
     const req = createMockRequest("http://localhost:3000/api/insights");
     const res = await GET(req);
@@ -114,5 +114,20 @@ describe("API /api/insights", () => {
     expect(passed).toHaveLength(1);
     expect(passed[0].month).toBe("2024-01");
     expect(passed[0].total).toBeCloseTo(1417.5, 2);
+  });
+
+  it("refuses an unknown period and names the choices", async () => {
+    const res = await GET(createMockRequest("http://localhost:3000/api/insights?period=forever"));
+    const { status, data } = await parseResponse(res);
+    expect(status).toBe(400);
+    expect(JSON.stringify(data)).toContain("last_3");
+  });
+
+  it("returns the period it covered", async () => {
+    const res = await GET(createMockRequest("http://localhost:3000/api/insights?period=last_month"));
+    const { status, data } = await parseResponse(res);
+    expect(status).toBe(200);
+    expect((data as { period: { key: string } }).period.key).toBe("last_month");
+    expect(mockGetMerchantSpendRows).toHaveBeenCalledTimes(1);
   });
 });

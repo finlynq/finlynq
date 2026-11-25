@@ -148,3 +148,92 @@ export function spendingByDayOfWeek(
     count: data[i].count,
   }));
 }
+
+// ── GH #457 draft: real merchant spending + period-vs-period trends ─────────
+
+/**
+ * One expense row for Top Merchants: the payee and the amount in the display
+ * currency, signed as stored (spending negative, a refund positive). The
+ * caller passes expense-category rows only, with transfers, trades and
+ * bookkeeping entries already left out.
+ */
+export type MerchantSpendRow = { payee: string; amount: number };
+
+/**
+ * Top merchants by net spending: a refund at a merchant reduces its total
+ * (the old version added refunds and income as spending via Math.abs), and a
+ * merchant whose refunds cover its purchases drops out. `count` is purchases.
+ */
+export function merchantSpending(rows: MerchantSpendRow[]): MerchantInsight[] {
+  const byPayee = new Map<string, { label: string; net: number; count: number }>();
+  for (const r of rows) {
+    const label = (r.payee ?? "").trim();
+    if (!label || !Number.isFinite(r.amount)) continue;
+    const key = label.toLowerCase().replace(/\s+/g, " ");
+    const e = byPayee.get(key) ?? { label, net: 0, count: 0 };
+    e.net += -r.amount;
+    if (r.amount < 0) e.count++;
+    byPayee.set(key, e);
+  }
+  return Array.from(byPayee.values())
+    .filter((e) => e.net > 0.005 && e.count > 0)
+    .map((e) => ({
+      payee: e.label,
+      totalSpent: Math.round(e.net * 100) / 100,
+      count: e.count,
+      avgTransaction: Math.round((e.net / e.count) * 100) / 100,
+    }))
+    .sort((a, b) => b.totalSpent - a.totalSpent);
+}
+
+export type PeriodTrend = {
+  category: string;
+  group: string;
+  trend: "rising" | "stable" | "declining" | "new";
+  /** null when the category had no spending in the earlier period. */
+  changePercent: number | null;
+  currentTotal: number;
+  previousTotal: number;
+};
+
+/**
+ * Spending per category in `months` against the same number of months just
+ * before (`previousMonths`). Rows are expense-category totals per month in the
+ * display currency, signed as stored; spending = -total, so refunds net out.
+ * Sorted by the size of the change in money, biggest first.
+ */
+export function comparePeriods(
+  rows: SpendingRow[],
+  months: readonly string[],
+  previousMonths: readonly string[],
+): PeriodTrend[] {
+  const inA = new Set(months);
+  const inB = new Set(previousMonths);
+  const byCat = new Map<string, { group: string; a: number; b: number }>();
+  for (const r of rows) {
+    const inCurrent = inA.has(r.month);
+    const inPrevious = inB.has(r.month);
+    if (!inCurrent && !inPrevious) continue;
+    const name = r.categoryName || "Uncategorized";
+    const e = byCat.get(name) ?? { group: r.categoryGroup ?? "", a: 0, b: 0 };
+    if (inCurrent) e.a += -r.total;
+    else e.b += -r.total;
+    byCat.set(name, e);
+  }
+  const out: PeriodTrend[] = [];
+  for (const [category, e] of byCat) {
+    const a = Math.max(0, e.a);
+    const b = Math.max(0, e.b);
+    if (a < 0.005 && b < 0.005) continue;
+    const change = b > 0.005 ? ((a - b) / b) * 100 : null;
+    out.push({
+      category,
+      group: e.group,
+      trend: change == null ? "new" : change > 10 ? "rising" : change < -10 ? "declining" : "stable",
+      changePercent: change == null ? null : Math.round(change),
+      currentTotal: Math.round(a * 100) / 100,
+      previousTotal: Math.round(b * 100) / 100,
+    });
+  }
+  return out.sort((x, y) => Math.abs(y.currentTotal - y.previousTotal) - Math.abs(x.currentTotal - x.previousTotal));
+}
