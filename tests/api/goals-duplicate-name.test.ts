@@ -64,6 +64,17 @@ describe("POST /api/goals duplicate name", () => {
     expect((data as { error: string }).error).toMatch(/already exists/);
   });
 
+  it("accepts a null deadline, which the goals page sends for no deadline (2026-11-27)", async () => {
+    // Reaching the (mocked) write proves validation passed: before the fix
+    // this was a 400 "expected string, received null" for every web goal
+    // created without a deadline.
+    txError.current = drizzleWrapped("goals_user_name_lookup_uniq");
+    const res = await POST(
+      createMockRequest("http://localhost:3000/api/goals", { method: "POST", body: { ...body, deadline: null, note: "" } }),
+    );
+    expect((await parseResponse(res)).status).toBe(409);
+  });
+
   it("another unique violation stays a 500", async () => {
     txError.current = drizzleWrapped("some_other_uniq");
     const res = await POST(createMockRequest("http://localhost:3000/api/goals", { method: "POST", body }));

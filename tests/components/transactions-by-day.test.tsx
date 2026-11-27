@@ -92,6 +92,16 @@ describe("TransactionsByDay", () => {
     expect(headers[1].textContent).not.toContain("Net ");
   });
 
+  it("calls a day where refunds outweighed purchases Refunds, not Out +", () => {
+    renderView({
+      txns: [tx({ id: 9, payee: "Store refund", amount: 50 })],
+      dayTotals: { displayCurrency: "USD", days: [{ date: "2026-11-27", income: 0, spending: -50, count: 1 }] },
+    });
+    const header = screen.getAllByRole("button", { expanded: true })[0];
+    expect(header.textContent).toContain("Refunds +$50.00");
+    expect(header.textContent).not.toContain("Out");
+  });
+
   it("shows each row in its own currency and opens it on click", () => {
     const { onEdit } = renderView();
     expect(screen.getByText(/€10\.00/)).toBeTruthy();

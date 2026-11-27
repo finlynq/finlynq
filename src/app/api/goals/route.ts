@@ -55,7 +55,9 @@ const postSchema = z.object({
   type: z.string(),
   targetAmount: z.number(),
   currency: z.string().regex(/^[A-Z]{3,4}$/, "ISO currency code").optional(),
-  deadline: z.string().optional(),
+  // The goals page sends null for "no deadline"; refusing it made every
+  // web goal without a deadline fail with "expected string, received null".
+  deadline: z.string().nullable().optional(),
   accountId: z.number().optional(),
   // Issue #130 — multi-account linking. When supplied, replaces the legacy
   // single-account `accountId` semantics. Empty array means "unlinked".
@@ -76,7 +78,9 @@ const putSchema = z.object({
   type: z.string().optional(),
   targetAmount: z.number().optional(),
   currency: z.string().regex(/^[A-Z]{3,4}$/, "ISO currency code").optional(),
-  deadline: z.string().optional(),
+  // The goals page sends null for "no deadline"; refusing it made every
+  // web goal without a deadline fail with "expected string, received null".
+  deadline: z.string().nullable().optional(),
   accountId: z.number().optional(),
   accountIds: z.array(z.number()).optional(),
   accountLinks: z.array(accountLinkSchema).optional(),

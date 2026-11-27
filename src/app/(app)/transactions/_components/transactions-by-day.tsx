@@ -38,10 +38,17 @@ function MoneyParts({ income, spending, currency }: { income: number; spending: 
       </span>,
     );
   }
-  if (spending !== 0) {
+  if (spending > 0) {
     parts.push(
       <span key="out" className="text-rose-600 dark:text-rose-400">
         Out {signedMoney(-spending, currency)}
+      </span>,
+    );
+  } else if (spending < 0) {
+    // Refunds outweighed purchases that day: say so instead of "Out +$X".
+    parts.push(
+      <span key="out" className="text-emerald-600 dark:text-emerald-400">
+        Refunds {signedMoney(-spending, currency)}
       </span>,
     );
   }
