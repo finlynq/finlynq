@@ -41,6 +41,8 @@ const READERS: Array<[string, RegExp, number]> = [
   ["src/app/api/reports/categories/route.ts", /\.from\(schema\.transactionCategoryFlows\)/g, 1],
   ["src/app/api/reports/category/route.ts", /\.from\(schema\.transactionCategoryFlows\)/g, 3],
   ["src/app/api/transactions/calendar/route.ts", /const t = schema\.transactionCategoryFlows;/g, 1],
+  // GH #465 — the Transactions "By day" view's whole-day totals.
+  ["src/lib/transactions/day-totals.ts", /const f = schema\.transactionCategoryFlows;/g, 1],
   ["src/app/api/notifications/route.ts", /schema\.transactionCategoryFlows, eq\(/g, 1],
   ["src/lib/budgets/load-month.ts", /FROM transaction_category_flows/g, 2],
   ["src/lib/financial-health.ts", /FROM transaction_category_flows t/g, 2],

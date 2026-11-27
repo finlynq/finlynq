@@ -29,6 +29,12 @@ import { and, eq, inArray, lt, sql } from "drizzle-orm";
 import { getHoldingsValueByAccount } from "@/lib/holdings-value";
 import { getLatestFxRate } from "@/lib/fx-service";
 import { dayBefore, normalizeProgressMode, type GoalProgressMode } from "@/lib/goals/progress-mode";
+import {
+  allocatedValue,
+  linkClaim,
+  type GoalAllocation,
+  type GoalAllocationKind,
+} from "@/lib/goals/allocation";
 
 export type GoalProgressInput = {
   id: number;
@@ -42,6 +48,35 @@ export type GoalProgressInput = {
   progressMode?: string | null;
   /** Growth goals only: the first day counted (YYYY-MM-DD). */
   startDate?: string | null;
+  /**
+   * GH #462: how much of each linked account this goal counts, keyed by
+   * account id. A missing key or null = the whole account (every goal before
+   * this). See lib/goals/allocation.ts.
+   */
+  allocations?: Readonly<Record<number, GoalAllocation | null>>;
+};
+
+/** GH #462: one linked account's part in a goal. */
+export type GoalLinkProgress = {
+  accountId: number;
+  allocationKind: GoalAllocationKind | null;
+  allocationValue: number | null;
+  /**
+   * False when the allocation is stored but not used: a liability linked to a
+   * balance-mode debt_payoff goal counts the whole debt (the goal measures
+   * what is still owed; part of a debt is not a meaningful "paid off" share).
+   */
+  allocationApplied: boolean;
+  /** What this link counts toward the goal, goal currency. */
+  countedAmount: number;
+  accountCurrency: string;
+  accountIsLiability: boolean;
+  /** The account's balance now, account currency. */
+  accountBalance: number;
+  /** What this link claims of the account (allocation.ts `linkClaim`), account currency. */
+  claim: number;
+  /** Percent of the account this link claims, or null (amount / growth links). */
+  claimPercent: number | null;
 };
 
 export type GoalProgressOutput = {
@@ -52,10 +87,15 @@ export type GoalProgressOutput = {
   remaining: number;
   monthlyNeeded: number;
   progressMode: GoalProgressMode;
-  /** The linked accounts' balance now, in the goal currency (= currentAmount for a balance goal). */
+  /**
+   * The linked accounts' WHOLE balance now, in the goal currency (= currentAmount
+   * for a balance goal with no allocations; GH #462 allocations count part of it).
+   */
   balanceNow: number;
-  /** Growth goals: the balance at the end of the day before the start date. Null for balance goals. */
+  /** Growth goals: the whole linked balance at the end of the day before the start date. Null for balance goals. */
   startAmount: number | null;
+  /** GH #462: per linked account, what it counts and what it claims. */
+  links: GoalLinkProgress[];
 };
 
 /**
@@ -194,8 +234,10 @@ export async function computeGoalProgress(
     const growth = mode === "growth" && !!g.startDate;
     const atStart = growth ? startBalances.get(g.startDate as string) : undefined;
     let currentAmount = 0;
+    let balanceNow = 0;
     let startAmount = 0;
     let linksLiability = false;
+    const links: GoalLinkProgress[] = [];
     for (const accountId of g.accountIds) {
       const meta = accountMeta.get(accountId);
       if (!meta) continue; // account got deleted under us; skip silently
@@ -204,16 +246,47 @@ export async function computeGoalProgress(
         ? holdingsByAccount.get(accountId)?.value ?? 0
         : cashByAccount.get(accountId) ?? 0;
       const fx = await getFx(meta.currency, goalCurrency);
-      currentAmount += valueInAccountCcy * fx;
+      const nowInGoalCcy = valueInAccountCcy * fx;
+      balanceNow += nowInGoalCcy;
       // Both ends at today's rate, so a currency move alone is not growth.
-      if (atStart) startAmount += (atStart.get(accountId) ?? 0) * fx;
-    }
-    const balanceNow = currentAmount;
+      const startInGoalCcy = atStart ? (atStart.get(accountId) ?? 0) * fx : 0;
+      if (atStart) startAmount += startInGoalCcy;
 
-    // Growth goals count only what changed since the start date. A liability
-    // paid down reads as positive growth on its own, so the debt_payoff flip
-    // below is for balance goals only.
-    if (growth) currentAmount = balanceNow - startAmount;
+      // What this account counts, in the goal currency: its balance, or (growth
+      // goals) only what changed since the start date. A liability paid down
+      // reads as positive growth on its own, so the debt_payoff flip below is
+      // for balance goals only.
+      const base = growth ? nowInGoalCcy - startInGoalCcy : nowInGoalCcy;
+
+      // GH #462: count only this link's share of it, AFTER the conversion so an
+      // amount allocation is in the goal's currency. Not applied to a liability
+      // in a balance-mode debt_payoff goal: the flip below measures the whole
+      // debt still owed, and "part of a debt" has no paid-off meaning there.
+      const stored = g.allocations?.[accountId] ?? null;
+      const applies = stored != null && !(!growth && g.type === "debt_payoff" && meta.isLiability);
+      const allocation = applies ? stored : null;
+      const counted = allocatedValue(base, allocation);
+      currentAmount += counted;
+
+      const { claim, percent } = linkClaim({
+        allocation,
+        countedInAccountCurrency: fx > 0 ? counted / fx : 0,
+        amountInAccountCurrency: allocation?.kind === "amount" && fx > 0 ? allocation.value / fx : undefined,
+        measuresBalance: !growth,
+      });
+      links.push({
+        accountId,
+        allocationKind: stored?.kind ?? null,
+        allocationValue: stored?.value ?? null,
+        allocationApplied: applies,
+        countedAmount: Math.round(counted * 100) / 100,
+        accountCurrency: meta.currency,
+        accountIsLiability: meta.isLiability,
+        accountBalance: Math.round(valueInAccountCcy * 100) / 100,
+        claim: Math.round(claim * 100) / 100,
+        claimPercent: percent,
+      });
+    }
 
     // debt_payoff goals linked to a liability account measure the debt itself:
     // the summed balance is negative (what is still owed), and progress is the
@@ -257,6 +330,7 @@ export async function computeGoalProgress(
       progressMode: growth ? "growth" : "balance",
       balanceNow: Math.round(balanceNow * 100) / 100,
       startAmount: growth ? Math.round(startAmount * 100) / 100 : null,
+      links,
     });
   }
 

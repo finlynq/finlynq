@@ -61,8 +61,20 @@ describe("PerformanceChart", () => {
   it("shows the new money excluded from the returns", async () => {
     mockPerformance(-6383.5);
     render(<PerformanceChart accountId={null} />);
-    expect(await screen.findByText(/Net new money:/)).toBeTruthy();
-    expect(screen.getByText(/Net new money:/).textContent).toContain("-C$6,383.50");
+    const label = await screen.findByText("Net new money");
+    expect(label.tagName).toBe("DT");
+    expect(label.nextElementSibling?.textContent).toContain("-C$6,383.50");
+  });
+
+  it("shows the return figures as plain stats with explanations, not pills (GH #466)", async () => {
+    mockPerformance(100);
+    render(<PerformanceChart accountId={null} />);
+    const twrr = await screen.findByText("TWRR (period)");
+    expect(twrr.tagName).toBe("DT");
+    expect(twrr.closest("button")).toBeNull();
+    expect(screen.queryByText(/Return over this period/)).toBeNull();
+    fireEvent.click(screen.getByText("What do these mean?"));
+    expect(screen.getByText(/Return over this period/)).toBeTruthy();
   });
 
   it("says nothing about new money when there was none", async () => {

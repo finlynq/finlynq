@@ -442,6 +442,7 @@ export async function computeReconcileForAccount(
         ticker: b.tickerPlain,
         securityName: b.securityNamePlain,
         quantity: b.quantity,
+        merchantCategoryCode: b.merchantCategoryCode ?? null,
       },
       activeRules,
     );
@@ -1058,6 +1059,7 @@ export async function applyRulesToBankRows(
       encryptionTier: schema.bankTransactions.encryptionTier,
       importHash: schema.bankTransactions.importHash,
       fitId: schema.bankTransactions.fitId,
+      merchantCategoryCode: schema.bankTransactions.merchantCategoryCode,
     })
     .from(schema.bankTransactions)
     .where(
@@ -1208,6 +1210,9 @@ export async function applyRulesToBankRows(
         ticker: tickerPlain,
         securityName: securityNamePlain,
         quantity: bank.quantity,
+        // GH #464 — the bank row's merchant code (merchant_category_code
+        // conditions, and the virtual `mcc:<code>` tag for older rules).
+        merchantCategoryCode: bank.merchantCategoryCode,
       },
       activeRules,
     );
@@ -1440,6 +1445,7 @@ export async function applyRulesToBankRows(
             tags: encryptField(dekForWrite, effectiveTags) ?? "",
             importHash: bank.importHash,
             fitId: bank.fitId,
+            merchantCategoryCode: bank.merchantCategoryCode,
             bankTransactionId: bank.id,
             // Auto-pilot rule-fired attribution. Allowed by the CHECK
             // constraint update in

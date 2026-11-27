@@ -43,6 +43,7 @@ import { encryptField } from "@/lib/crypto/envelope";
 import { encryptStaged } from "@/lib/crypto/staging-envelope";
 import { encryptStagingMeta } from "@/lib/crypto/staging-metadata";
 import { SOURCES, type TransactionSource } from "@/lib/tx-source";
+import { normalizeMerchantCategoryCode } from "@/lib/transactions/merchant-category-code";
 
 /**
  * Source attribution for a bank-ledger row. Strict subset of the SOURCES
@@ -90,6 +91,10 @@ export interface BankLedgerRowInput {
    */
   occurrenceIndex: number;
   fitId?: string | null;
+  /** GH #464 — merchant category code (4 digits), plain text. Set on INSERT
+   *  only; a re-seen row keeps what it was first written with. Not part of
+   *  the import hash. */
+  merchantCategoryCode?: string | null;
   /** YYYY-MM-DD. */
   date: string;
   amount: number;
@@ -246,7 +251,8 @@ export async function upsertBankTransaction(
       amount, currency, entered_amount, entered_currency, entered_fx_rate,
       quantity, payee, note, tags, account_name, ticker, security_name,
       encryption_tier, source,
-      source_filenames, original_staged_import_id, upload_batch_id
+      source_filenames, original_staged_import_id, upload_batch_id,
+      merchant_category_code
     )
     VALUES (
       ${row.userId},
@@ -271,7 +277,8 @@ export async function upsertBankTransaction(
       ${row.source},
       ${filenamesFragment},
       ${row.originalStagedImportId ?? null},
-      ${row.uploadBatchId ?? null}
+      ${row.uploadBatchId ?? null},
+      ${normalizeMerchantCategoryCode(row.merchantCategoryCode)}
     )
     ON CONFLICT (user_id, account_id, import_hash, occurrence_index)
     DO UPDATE SET

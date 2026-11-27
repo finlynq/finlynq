@@ -25,6 +25,7 @@ import { cleanPayeeName } from "@/lib/payees/suggest";
 import { splitTags } from "@/lib/transactions/tag-list";
 import { findLikelyDuplicates } from "./likely-duplicates";
 import { noteWithPayee } from "@/lib/transactions/auto-description";
+import { extractMerchantCodeTags } from "@/lib/transactions/merchant-category-code";
 
 export const MAX_MERGE_SOURCES = 50;
 const UPDATE_CHUNK = 500;
@@ -372,6 +373,77 @@ export async function replaceTags(
       sql`s.transaction_id IN (SELECT id FROM transactions WHERE user_id = ${userId})`,
     );
     return { updated: txUpdates.length };
+  });
+  invalidateUser(userId);
+  return result;
+}
+
+// ─── Merchant category codes in tags (GH #464) ─────────────────────────────
+
+/**
+ * Move legacy `mcc:<code>` tags (written by SimpleFIN imports before GH #464)
+ * out of the tags and into `transactions.merchant_category_code`. A row that
+ * already has a code keeps it; `mcc:0000` and malformed codes are dropped
+ * without being saved. Split rows only lose the tag (they have no code
+ * column). Transactions and split rows only — never bank rows or pending
+ * statement files. One database transaction; stamps `updated_at`.
+ */
+export async function moveMerchantCodesOutOfTags(
+  userId: string,
+  dek: Buffer,
+): Promise<{ updated: number; codesSaved: number; splitsUpdated: number }> {
+  const result = await withDbTransaction(async () => {
+    const txRes = await db.execute(sql`
+      SELECT id, tags, merchant_category_code FROM transactions
+       WHERE user_id = ${userId} AND tags IS NOT NULL AND tags <> ''
+    `);
+    const txUpdates: Array<{ id: number; tags: string; code: string | null }> = [];
+    let codesSaved = 0;
+    for (const r of rowsOf<{ id: number; tags: string; merchant_category_code: string | null }>(txRes)) {
+      const moved = extractMerchantCodeTags(tryDecryptField(dek, r.tags, "transaction-tags"));
+      if (!moved.found) continue;
+      const code = r.merchant_category_code ? null : moved.code;
+      if (code) codesSaved += 1;
+      txUpdates.push({
+        id: Number(r.id),
+        tags: moved.tags ? (encryptField(dek, moved.tags) ?? "") : "",
+        code,
+      });
+    }
+    for (let i = 0; i < txUpdates.length; i += UPDATE_CHUNK) {
+      const chunk = txUpdates.slice(i, i + UPDATE_CHUNK);
+      const values = sql.join(
+        chunk.map((u) => sql`(${u.id}::int, ${u.tags}::text, ${u.code}::text)`),
+        sql`, `,
+      );
+      await db.execute(sql`
+        UPDATE transactions AS t
+           SET tags = v.tags,
+               merchant_category_code = COALESCE(t.merchant_category_code, v.code),
+               updated_at = NOW()
+          FROM (VALUES ${values}) AS v(id, tags, code)
+         WHERE t.id = v.id AND t.user_id = ${userId}
+      `);
+    }
+
+    const splitRes = await db.execute(sql`
+      SELECT s.id, s.tags FROM transaction_splits s
+        JOIN transactions t ON t.id = s.transaction_id
+       WHERE t.user_id = ${userId} AND s.tags IS NOT NULL AND s.tags <> ''
+    `);
+    const splitUpdates: Array<{ id: number; value: string | null }> = [];
+    for (const r of rowsOf<{ id: number; tags: string }>(splitRes)) {
+      const moved = extractMerchantCodeTags(tryDecryptField(dek, r.tags, "transaction_splits.tags"));
+      if (!moved.found) continue;
+      splitUpdates.push({ id: Number(r.id), value: moved.tags ? encryptField(dek, moved.tags) : "" });
+    }
+    await writeColumn(
+      "transaction_splits",
+      "tags",
+      splitUpdates,
+      sql`s.transaction_id IN (SELECT id FROM transactions WHERE user_id = ${userId})`,
+    );
+    return { updated: txUpdates.length, codesSaved, splitsUpdated: splitUpdates.length };
   });
   invalidateUser(userId);
   return result;

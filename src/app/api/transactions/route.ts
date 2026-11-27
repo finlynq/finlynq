@@ -6,6 +6,7 @@ import { requireEncryption } from "@/lib/auth/require-encryption";
 import { encryptTxWrite, decryptTxRows, nameLookup, decryptName } from "@/lib/crypto/encrypted-columns";
 import { findMatchingTransactionIds, getTransactionsByIds } from "@/lib/transactions/search-scan";
 import { holdingDisplayName } from "@/lib/transactions/search-match";
+import { loadDayTotals } from "@/lib/transactions/day-totals";
 import { invalidateUser as invalidateUserTxCache } from "@/lib/mcp/user-tx-cache";
 import { rememberPayee, rememberPayeeIfChanged } from "@/lib/payees/store";
 import { buildHoldingResolver } from "@/lib/external-import/portfolio-holding-resolver";
@@ -321,8 +322,9 @@ export async function GET(request: NextRequest) {
   // total only counted that window (in-app feedback #28, 2026-10-29).
   let rawRows: Awaited<ReturnType<typeof getTransactions>>;
   let total: number;
+  let matchedIds: number[] | null = null;
   if (postDecryptFilter) {
-    const matchedIds = await findMatchingTransactionIds(
+    matchedIds = await findMatchingTransactionIds(
       userId,
       dek,
       filters,
@@ -398,6 +400,15 @@ export async function GET(request: NextRequest) {
     delete row.securitySymbolCt;
     return row;
   });
+
+  // GH #465 — the "By day" view asks for each day's totals with the page.
+  // They cover the WHOLE day under the same filters (not just this page's
+  // rows), so a day split across two pages shows its full total on both.
+  if (params.get("dayTotals") === "1") {
+    const dates = rawRows.map((r) => r.date);
+    const dayTotals = await loadDayTotals(userId, filters, dates, matchedIds);
+    return NextResponse.json({ data: decrypted, total, dayTotals });
+  }
 
   return NextResponse.json({ data: decrypted, total });
 }

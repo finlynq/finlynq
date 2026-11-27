@@ -31,7 +31,8 @@ import { ErrorState } from "@/components/error-state";
 import { parseSaveError } from "@/lib/save-error";
 import { clearPayeeOptionsCache } from "@/lib/hooks/usePayeeOptions";
 import { clearTagOptionsCache } from "@/lib/hooks/useTagOptions";
-import { Merge, Pencil, Search, StickyNote, Trash2, X } from "lucide-react";
+import { isMerchantCodeTag } from "@/lib/transactions/merchant-category-code";
+import { Merge, Pencil, Search, StickyNote, Store, Trash2, X } from "lucide-react";
 
 type Kind = "payees" | "tags";
 
@@ -123,6 +124,7 @@ function NamesPanel({ kind }: { kind: Kind }) {
   const [rename, setRename] = useState<Item | null>(null);
   const [remove, setRemove] = useState<Item | null>(null);
   const [toNote, setToNote] = useState<Item[] | null>(null);
+  const [moveCodes, setMoveCodes] = useState(false);
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
 
@@ -154,6 +156,12 @@ function NamesPanel({ kind }: { kind: Kind }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [state, hidden, byKey],
   );
+  // GH #464 — legacy `mcc:<code>` tags from SimpleFIN imports.
+  const merchantCodeTags = useMemo(
+    () => (kind === "tags" ? (state?.items ?? []).filter((i) => isMerchantCodeTag(i.name)) : []),
+    [kind, state],
+  );
+  const merchantCodeUses = merchantCodeTags.reduce((n, i) => n + i.count, 0);
   const visible = useMemo(() => {
     const q = query.trim().toLowerCase();
     const items = state?.items ?? [];
@@ -196,6 +204,25 @@ function NamesPanel({ kind }: { kind: Kind }) {
             <X className="h-4 w-4" />
           </button>
         </div>
+      )}
+
+      {merchantCodeTags.length > 0 && (
+        <Card>
+          <CardHeader>
+            <CardTitle className="text-base">Merchant codes in tags</CardTitle>
+            <CardDescription>
+              Bank feed imports used to add the merchant category code as a tag (like
+              &ldquo;mcc:5812&rdquo;). It now has its own field, shown when you edit a transaction.{" "}
+              {plural(merchantCodeTags.length, "tag", "tags")} of this kind{" "}
+              {merchantCodeTags.length === 1 ? "is" : "are"} on {plural(merchantCodeUses, "transaction", "transactions")}.
+            </CardDescription>
+          </CardHeader>
+          <CardContent>
+            <Button size="sm" onClick={() => setMoveCodes(true)}>
+              <Store className="mr-1 h-3.5 w-3.5" /> Move merchant codes out of tags
+            </Button>
+          </CardContent>
+        </Card>
       )}
 
       <Card>
@@ -403,6 +430,35 @@ function NamesPanel({ kind }: { kind: Kind }) {
             await afterChange(`Moved the payee into the note on ${plural(d.updated, "transaction", "transactions")}.`);
           } catch (e) {
             setNotice(e instanceof Error ? e.message : "Could not move it.");
+          } finally {
+            setBusy(false);
+          }
+        }}
+      />
+      <ConfirmDialog
+        open={moveCodes}
+        onOpenChange={(o) => !o && setMoveCodes(false)}
+        title="Move merchant codes out of tags"
+        description={`Every "mcc:" tag is taken off its transaction and the code is saved in the transaction's merchant category field. "mcc:0000" means the bank had no code, so it is removed without being saved. Rules that match "tags contains mcc:…" keep working. Bank statement rows are not changed.`}
+        confirmLabel="Move codes"
+        busy={busy}
+        busyLabel="Moving…"
+        onConfirm={async () => {
+          setBusy(true);
+          try {
+            const res = await fetch(cfg.url, {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ action: "move_merchant_codes" }),
+            });
+            if (!res.ok) throw new Error(await parseSaveError(res, "Could not move the codes."));
+            const d = (await res.json()).data as { updated: number; codesSaved: number };
+            setMoveCodes(false);
+            await afterChange(
+              `Took merchant code tags off ${plural(d.updated, "transaction", "transactions")} and saved the code on ${plural(d.codesSaved, "of them", "of them")}.`,
+            );
+          } catch (e) {
+            setNotice(e instanceof Error ? e.message : "Could not move the codes.");
           } finally {
             setBusy(false);
           }

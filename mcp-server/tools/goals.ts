@@ -43,8 +43,46 @@ import { todayISO } from "../../src/lib/utils/date";
 import { pickRecordCurrency } from "../../src/lib/fx/record-currency";
 import { resolveReportingCurrency } from "../reporting-currency";
 import { registerManageTool } from "./_consolidate";
+import {
+  GOAL_ALLOCATION_KINDS,
+  allocationRefusal,
+  readAllocation,
+  type GoalAllocation,
+} from "../../src/lib/goals/allocation";
 
 type ToolResult = { content: Array<{ type: "text"; text: string }> };
+
+/** GH #462: one `account_allocations` entry as the tool receives it. */
+type AccountAllocationArg = {
+  account_id: number;
+  allocation_kind?: "amount" | "percent" | null;
+  allocation_value?: number | null;
+};
+
+/**
+ * GH #462: validate `account_allocations` (same rules as REST `accountLinks`):
+ * each account once, percent 0 < v <= 100, amount > 0 (goal currency), no
+ * value without a kind. Returns the links to write, or the refusal text.
+ */
+function resolveAccountAllocations(
+  list: AccountAllocationArg[],
+): { links: Array<{ accountId: number; allocation: GoalAllocation | null }> } | { error: string } {
+  const seen = new Set<number>();
+  const links: Array<{ accountId: number; allocation: GoalAllocation | null }> = [];
+  for (const entry of list) {
+    if (seen.has(entry.account_id)) return { error: `Account id ${entry.account_id} is listed twice in account_allocations.` };
+    seen.add(entry.account_id);
+    const refusal = allocationRefusal(entry.allocation_kind, entry.allocation_value);
+    if (refusal) return { error: `Account id ${entry.account_id}: ${refusal}` };
+    links.push({ accountId: entry.account_id, allocation: readAllocation(entry.allocation_kind, entry.allocation_value) });
+  }
+  return { links };
+}
+
+/** GH #462: what the tool echoes back for a link's allocation. */
+function allocationOut(a: GoalAllocation | null | undefined) {
+  return { allocation_kind: a?.kind ?? null, allocation_value: a?.value ?? null };
+}
 
 export function registerGoalsTools(server: McpServer, ctx: PgToolContext) {
   const { db, userId, dek } = ctx;
@@ -59,18 +97,26 @@ export function registerGoalsTools(server: McpServer, ctx: PgToolContext) {
     account?: string;
     account_id?: number;
     account_ids?: number[];
+    account_allocations?: AccountAllocationArg[];
     currency?: string;
     progress_mode?: "balance" | "growth";
     start_date?: string;
   }): Promise<ToolResult> {
     const { name, type, target_amount, deadline, account, account_id, account_ids, currency } = args;
+    // GH #462: account_allocations wins over every other linker.
+    const allocations = new Map<number, GoalAllocation | null>();
     // Resolve the canonical id list. account_ids wins; then the legacy single
     // `account`/`account_id`. FINLYNQ-267: a mistyped `account` name now REFUSES
     // the create (via resolveEntity → resolveOrReport) instead of silently
     // producing an UNLINKED goal (decision 5b — a user who typed a name intended
     // a link). account_id is the FK fast-path (wins over the fuzzy name).
     let resolvedIds: number[] = [];
-    if (account_ids !== undefined) {
+    if (args.account_allocations !== undefined) {
+      const res = resolveAccountAllocations(args.account_allocations);
+      if ("error" in res) return err(res.error);
+      for (const l of res.links) allocations.set(l.accountId, l.allocation);
+      resolvedIds = res.links.map((l) => l.accountId);
+    } else if (account_ids !== undefined) {
       resolvedIds = account_ids;
     } else if (account_id != null || account) {
       const rawAccounts = await q(db, sql`
@@ -136,9 +182,10 @@ export function registerGoalsTools(server: McpServer, ctx: PgToolContext) {
     const goalId = Number(inserted[0]?.id);
     if (goalId && resolvedIds.length > 0) {
       for (const accountId of resolvedIds) {
+        const a = allocations.get(accountId) ?? null;
         await db.execute(sql`
-          INSERT INTO goal_accounts (user_id, goal_id, account_id)
-          VALUES (${userId}, ${goalId}, ${accountId})
+          INSERT INTO goal_accounts (user_id, goal_id, account_id, allocation_kind, allocation_value)
+          VALUES (${userId}, ${goalId}, ${accountId}, ${a?.kind ?? null}, ${a?.value ?? null})
           ON CONFLICT (goal_id, account_id, user_id) DO NOTHING
         `);
       }
@@ -148,6 +195,7 @@ export function registerGoalsTools(server: McpServer, ctx: PgToolContext) {
       data: {
         goalId,
         accountIds: resolvedIds,
+        accountLinks: resolvedIds.map((id) => ({ account_id: id, ...allocationOut(allocations.get(id)) })),
         currency: goalCurrency,
         progressMode,
         startDate,
@@ -166,11 +214,24 @@ export function registerGoalsTools(server: McpServer, ctx: PgToolContext) {
     status?: "active" | "completed" | "paused";
     name?: string;
     account_ids?: number[];
+    account_allocations?: AccountAllocationArg[];
     currency?: string;
     progress_mode?: "balance" | "growth";
     start_date?: string;
   }): Promise<ToolResult> {
-    const { goal, goal_id, target_amount, deadline, status, name, account_ids, currency } = args;
+    const { goal, goal_id, target_amount, deadline, status, name, currency } = args;
+    // GH #462: account_allocations (links WITH allocations) wins over
+    // account_ids (whole accounts); either replaces the goal's links.
+    const allocations = new Map<number, GoalAllocation | null>();
+    let account_ids = args.account_ids;
+    if (args.account_allocations !== undefined) {
+      const res = resolveAccountAllocations(args.account_allocations);
+      if ("error" in res) return err(res.error);
+      for (const l of res.links) allocations.set(l.accountId, l.allocation);
+      account_ids = res.links.map((l) => l.accountId);
+    } else if (account_ids !== undefined) {
+      account_ids = Array.from(new Set(account_ids));
+    }
     // FINLYNQ-267: `goal_id` FK fast-path wins; a name resolves via the shared
     // envelope (mistyped → refuse, 2+ → ambiguous — was `fuzzyFind` silent-first).
     const rawGoals = await q(db, sql`SELECT id, name_ct FROM goals WHERE user_id = ${userId}`);
@@ -246,9 +307,10 @@ export function registerGoalsTools(server: McpServer, ctx: PgToolContext) {
         DELETE FROM goal_accounts WHERE goal_id = ${g.id} AND user_id = ${userId}
       `);
       for (const accountId of account_ids) {
+        const a = allocations.get(accountId) ?? null;
         await db.execute(sql`
-          INSERT INTO goal_accounts (user_id, goal_id, account_id)
-          VALUES (${userId}, ${g.id}, ${accountId})
+          INSERT INTO goal_accounts (user_id, goal_id, account_id, allocation_kind, allocation_value)
+          VALUES (${userId}, ${g.id}, ${accountId}, ${a?.kind ?? null}, ${a?.value ?? null})
           ON CONFLICT (goal_id, account_id, user_id) DO NOTHING
         `);
       }
@@ -258,6 +320,9 @@ export function registerGoalsTools(server: McpServer, ctx: PgToolContext) {
       success: true,
       data: {
         accountIds: account_ids ?? null,
+        accountLinks: account_ids
+          ? account_ids.map((id) => ({ account_id: id, ...allocationOut(allocations.get(id)) }))
+          : null,
         message: `Goal "${g.name}" updated`,
       },
     });
@@ -292,19 +357,24 @@ export function registerGoalsTools(server: McpServer, ctx: PgToolContext) {
     const goalIds = goalsRaw.map((g) => Number(g.id));
     const goalIdsExpr = sql.join(goalIds.map((id) => sql`${id}`), sql`, `);
     const linksRaw = await q(db, sql`
-      SELECT ga.goal_id, ga.account_id, a.name_ct AS account_name_ct
+      SELECT ga.goal_id, ga.account_id, a.name_ct AS account_name_ct,
+             ga.allocation_kind, ga.allocation_value
       FROM goal_accounts ga
       LEFT JOIN accounts a ON ga.account_id = a.id
       WHERE ga.user_id = ${userId} AND ga.goal_id = ANY(ARRAY[${goalIdsExpr}]::int[])
     `);
-    const linksByGoal = new Map<number, { ids: number[]; names: string[] }>();
+    const linksByGoal = new Map<
+      number,
+      { ids: number[]; names: string[]; allocations: Record<number, GoalAllocation | null> }
+    >();
     for (const l of linksRaw) {
       const goalId = Number(l.goal_id);
       const accountId = Number(l.account_id);
       const acctName = l.account_name_ct && dek ? decryptField(dek, l.account_name_ct) : null;
-      const entry = linksByGoal.get(goalId) ?? { ids: [], names: [] };
+      const entry = linksByGoal.get(goalId) ?? { ids: [], names: [], allocations: {} };
       entry.ids.push(accountId);
       entry.names.push(acctName ?? "");
+      entry.allocations[accountId] = readAllocation(l.allocation_kind, l.allocation_value);
       linksByGoal.set(goalId, entry);
     }
     // FINLYNQ-268: per-goal valuation basis. A goal contributes MARKET value
@@ -342,11 +412,12 @@ export function registerGoalsTools(server: McpServer, ctx: PgToolContext) {
         accountIds: linksByGoal.get(Number(r.id))?.ids ?? [],
         progressMode: (r.progress_mode as string | null) ?? null,
         startDate: (r.start_date as string | null) ?? null,
+        allocations: linksByGoal.get(Number(r.id))?.allocations,
       })),
     );
     const rows = goalsRaw.map((r) => {
       const { name_ct, ...rest } = r;
-      const links = linksByGoal.get(Number(r.id)) ?? { ids: [], names: [] };
+      const links = linksByGoal.get(Number(r.id)) ?? { ids: [], names: [], allocations: {} };
       const progress = progressByGoal.get(Number(r.id));
       // FINLYNQ-268: 'market' when the goal links an investment account AND a
       // DEK is present (else that account's holdings can't be priced), else
@@ -370,12 +441,30 @@ export function registerGoalsTools(server: McpServer, ctx: PgToolContext) {
         progressMode: progress?.progressMode ?? "balance",
         startAmount: progress?.startAmount ?? null,
         balanceNow: progress?.balanceNow ?? progress?.currentAmount ?? 0,
+        // GH #462: each linked account with its allocation (null kind = the
+        // whole account) and what it counts toward this goal, goal currency.
+        accountLinks: (progress?.links ?? []).map((l) => ({
+          account_id: l.accountId,
+          allocation_kind: l.allocationKind,
+          allocation_value: l.allocationValue,
+          allocation_applied: l.allocationApplied,
+          counted_amount: l.countedAmount,
+        })),
       };
     });
     return dataResponse(rows);
   }
 
   // ── consolidated tool ───────────────────────────────────────────────────────
+  // GH #462: fully typed (no z.unknown, GH #341). Value rules are checked in
+  // resolveAccountAllocations so the refusal names the account.
+  const accountAllocationsParam = z.array(
+    z.object({
+      account_id: z.number().int().positive().describe("Account id (must belong to the user)."),
+      allocation_kind: z.enum(GOAL_ALLOCATION_KINDS).nullable().optional().describe("'amount' or 'percent'; omit or null for the whole account."),
+      allocation_value: z.number().positive().nullable().optional().describe("Amount in the goal's currency, or a percentage (0 < v <= 100)."),
+    }),
+  );
   const addVariant = z.object({
     op: z.literal("add"),
     name: z.string().describe("Goal name"),
@@ -385,6 +474,7 @@ export function registerGoalsTools(server: McpServer, ctx: PgToolContext) {
     account: z.string().optional().describe("Legacy single-account linker — name or alias (fuzzy matched). A mistyped/unmatched name is REFUSED (never silently unlinked). Prefer `account_id` or `account_ids`."),
     account_id: z.number().int().positive().optional().describe("Single-account linker FK fast-path — wins over the fuzzy `account` name. Prefer `account_ids` for multi-account goals."),
     account_ids: z.array(z.number().int()).optional().describe("Multi-account linker (issue #130). Goal progress sums transactions across every account id supplied. Each id must belong to the user. Empty array = unlinked (manual tracking)."),
+    account_allocations: accountAllocationsParam.optional().describe("Link accounts AND say how much of each the goal counts (wins over account_ids). Omit allocation_kind for the whole account; 'amount' counts up to allocation_value in the goal's currency (never more than the account holds); 'percent' counts allocation_value % (0 < v <= 100). Use it when several goals share one account so its money is not counted twice."),
     currency: z.string().regex(/^[A-Za-z]{3,4}$/).optional().describe("ISO code the goal is measured in, e.g. 'EUR'. Defaults to the first linked account's currency, else the user's display currency — never a hardcoded default."),
     progress_mode: z.enum(["balance", "growth"]).optional().describe("'balance' (default): progress is the linked accounts' balance now. 'growth': progress is how much their balance grew since start_date, and target_amount is the amount to grow by. Use growth when the account already holds other money or is shared by several goals."),
     start_date: ymdDate.optional().describe("Growth goals: the first day counted (YYYY-MM-DD, not in the future). Progress = balance now minus balance at the end of the day before."),
@@ -398,6 +488,7 @@ export function registerGoalsTools(server: McpServer, ctx: PgToolContext) {
     status: z.enum(["active", "completed", "paused"]).optional(),
     name: z.string().optional().describe("Rename the goal"),
     account_ids: z.array(z.number().int()).optional().describe("Replace the goal's linked accounts (issue #130). When supplied, the existing goal_accounts rows are deleted and replaced with the new set in a single transaction. Pass `[]` to unlink all. Omit to leave links unchanged."),
+    account_allocations: accountAllocationsParam.optional().describe("Replace the goal's linked accounts WITH allocations (wins over account_ids). Each entry: account_id, optional allocation_kind 'amount' (goal currency, capped at what the account holds) or 'percent' (0 < v <= 100) and allocation_value. No kind = the whole account. Omit to leave links unchanged."),
     currency: z.string().regex(/^[A-Za-z]{3,4}$/).optional().describe("ISO code the goal is measured in. Changes the currency target_amount is interpreted in — it does NOT convert it."),
     progress_mode: z.enum(["balance", "growth"]).optional().describe("'balance' (default): progress is the linked accounts' balance now. 'growth': progress is how much their balance grew since start_date, and target_amount is the amount to grow by. Use growth when the account already holds other money or is shared by several goals."),
     start_date: ymdDate.optional().describe("Growth goals: the first day counted (YYYY-MM-DD, not in the future). Progress = balance now minus balance at the end of the day before."),
@@ -414,7 +505,7 @@ export function registerGoalsTools(server: McpServer, ctx: PgToolContext) {
   registerManageTool(
     server,
     "manage_goals",
-    "Manage financial goals: `op` selects add / update / delete / list. add: create a goal (name/type/target_amount, optional deadline, account_ids + currency, progress_mode balance|growth + start_date). update: change a goal's target, deadline, status, name, currency, linked accounts or progress mode (fuzzy `goal`). delete: remove a goal by name. list: all goals with progress (accountIds, currentAmount, progress, remaining, monthlyNeeded).",
+    "Manage financial goals: `op` selects add / update / delete / list. add: create a goal (name/type/target_amount, optional deadline, account_ids or account_allocations + currency, progress_mode balance|growth + start_date). update: change a goal's target, deadline, status, name, currency, linked accounts (with optional per-account amount/percent allocations) or progress mode (fuzzy `goal`). delete: remove a goal by name. list: all goals with progress (accountIds, accountLinks with allocations, currentAmount, progress, remaining, monthlyNeeded).",
     z.discriminatedUnion("op", [addVariant, updateVariant, deleteVariant, listVariant]),
     async (input) => {
       switch (input.op) {

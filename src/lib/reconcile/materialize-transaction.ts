@@ -100,6 +100,7 @@ export async function materializeBankRowAsTransaction(
       encryptionTier: schema.bankTransactions.encryptionTier,
       importHash: schema.bankTransactions.importHash,
       fitId: schema.bankTransactions.fitId,
+      merchantCategoryCode: schema.bankTransactions.merchantCategoryCode,
     })
     .from(schema.bankTransactions)
     .where(
@@ -200,6 +201,7 @@ export async function materializeBankRowAsTransaction(
         tags: encryptField(dek, tagsPlain) ?? "",
         importHash: bank.importHash,
         fitId: bank.fitId,
+        merchantCategoryCode: bank.merchantCategoryCode,
         bankTransactionId: bank.id,
         source: "reconcile_link",
         // createdAt + updatedAt + enteredAt all default to NOW() via the

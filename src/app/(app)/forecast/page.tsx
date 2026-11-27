@@ -28,6 +28,7 @@ import { runForecast, yearlyView } from "@/lib/forecast/engine";
 import { traceCell } from "@/lib/forecast/layers";
 import { HORIZON_CHOICES, scenarioConfigSchema, type ScenarioConfig } from "@/lib/forecast/config";
 import { compareResults, planVsActual } from "@/lib/forecast/compare";
+import { explainBlankLines } from "@/lib/forecast/blank-lines";
 import { hasHistoryFill, isMostlyBlank, quickFillPreview, valueableLines, withHistoryFill } from "@/lib/forecast/quick-fill";
 import type { ForecastInputs, ForecastResult } from "@/lib/forecast/types";
 import { BalancesChart, CashFlowChart, type BalancePoint, type ChartMarker, type FlowPoint } from "./_components/forecast-charts";
@@ -453,6 +454,7 @@ export default function ForecastPage() {
 
       {mostlyBlank && !firstRunDismissed && (
         <FirstRunCard
+          startMonth={result.startMonth}
           blankCount={result.blankLines.length}
           lineCount={valueableLines(data.inputs).length}
           preview={fillPreview}
@@ -504,6 +506,7 @@ export default function ForecastPage() {
 
           <NotesStrip
             blank={config.layers.some((l) => l.kind === "budget" && l.enabled) ? result.blankLines : []}
+            explain={explainBlankLines(result.blankLines, data.inputs, config)}
             canFillFromHistory={!hasHistoryFill(config)}
             onFillFromHistory={fillFromHistory}
             notes={notes}

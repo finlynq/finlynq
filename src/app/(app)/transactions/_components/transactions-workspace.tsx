@@ -14,7 +14,7 @@ import { useDropdownOrder } from "@/components/dropdown-order-provider";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { OnboardingTips } from "@/components/onboarding-tips";
 import { Badge } from "@/components/ui/badge";
-import { Plus, SlidersHorizontal, ChevronDown, Receipt, Search, X, AlertTriangle, ArrowRightLeft, Columns3, TrendingUp, Download, List, CalendarDays } from "lucide-react";
+import { Plus, SlidersHorizontal, ChevronDown, Receipt, Search, X, AlertTriangle, ArrowRightLeft, Columns3, TrendingUp, Download, List, CalendarDays, Rows3 } from "lucide-react";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { periodRange, shiftAnchor, type CalendarMode } from "@/lib/transactions/calendar";
 import { Pagination } from "@/components/ui/pagination";
@@ -43,6 +43,8 @@ import {
 import { useTransactions } from "../_hooks/use-transactions";
 import { TransactionTable } from "./transaction-table";
 import { TransactionsCalendar, describeCalendarSelection, refreshTransactionsCalendar } from "./transactions-calendar";
+import { TransactionsByDay } from "./transactions-by-day";
+import { byDaySort } from "@/lib/transactions/by-day";
 import { buildTransactionQuery } from "@/lib/transactions/build-query";
 import { buildTxDrillUrl } from "@/lib/transactions/drill-url";
 import { exportCsv, type CsvColumn } from "@/lib/csv-export";
@@ -161,9 +163,12 @@ export function TransactionsWorkspace({
   // range: the list shows the selected day, or the whole month when no day is
   // selected, layered over every other filter via `listFilters` — `filters`
   // itself (and so the URL-driven state) is left untouched.
-  const [view, setView] = useState<"list" | "calendar">(() =>
-    !locked && urlParams.get("view") === "calendar" ? "calendar" : "list",
-  );
+  // GH #465 adds a third view, "By day" (`?view=day`): the list's own rows
+  // and paging, grouped under one header per day with that day's totals.
+  const [view, setView] = useState<"list" | "calendar" | "day">(() => {
+    const v = locked ? null : urlParams.get("view");
+    return v === "calendar" || v === "day" ? v : "list";
+  });
   // Week / month / year (in-app feedback asked for all three); `calAnchor` is
   // any date inside the visible period, `calDay` the selected day if any.
   const [calMode, setCalMode] = useState<CalendarMode>("month");
@@ -290,12 +295,17 @@ export function TransactionsWorkspace({
   // Main list (txns / total / loading) + loadTxns — extracted to
   // useTransactions (FINLYNQ-111 Phase 2). Same deps, fetch URL, {data,total}
   // unwrap, and driving effect; `page` is owned by the page-level state above.
-  const { txns, total, loading, limit, loadTxns } = useTransactions(
+  // The By day view needs rows in date order: a non-date column sort is set
+  // aside there (and the view says so); a date sort is kept either way.
+  const dayView = byDaySort(sortPref);
+  const listSort = view === "day" ? dayView.sort : sortPref;
+  const { txns, total, loading, limit, loadTxns, dayTotals } = useTransactions(
     listFilters,
-    sortPref,
+    listSort,
     colFilters,
     accounts,
     page,
+    { dayTotals: view === "day" },
   );
 
   // Post-mutation refresh: reload the list AND notify the embedding page so it
@@ -423,7 +433,7 @@ export function TransactionsWorkspace({
     try {
       // Same builder + filter/sort state the table uses; page 0 + high limit
       // pulls the entire filtered view in one shot.
-      const params = buildTransactionQuery(listFilters, sortPref, colFilters, accounts, {
+      const params = buildTransactionQuery(listFilters, listSort, colFilters, accounts, {
         page: 0,
         limit: 100000,
       });
@@ -883,13 +893,14 @@ export function TransactionsWorkspace({
         <Tabs
           value={view}
           onValueChange={(v) => {
-            setView(v === "calendar" ? "calendar" : "list");
+            setView(v === "calendar" || v === "day" ? v : "list");
             setPage(0);
           }}
         >
           <TabsList>
             <TabsTrigger value="list" className="px-3"><List className="h-4 w-4" /> List</TabsTrigger>
             <TabsTrigger value="calendar" className="px-3"><CalendarDays className="h-4 w-4" /> Calendar</TabsTrigger>
+            <TabsTrigger value="day" className="px-3"><Rows3 className="h-4 w-4" /> By day</TabsTrigger>
           </TabsList>
         </Tabs>
         {/* Saved views (GH #427). Not on the account-scoped embed, whose
@@ -930,7 +941,7 @@ export function TransactionsWorkspace({
           <div className="flex flex-wrap gap-2 items-center">
             <SlidersHorizontal className="h-3.5 w-3.5 text-muted-foreground shrink-0" />
             {/* In calendar view the calendar sets the dates (see listFilters). */}
-            {view === "list" && (
+            {view !== "calendar" && (
               <>
                 <Input type="date" className="w-36 h-8 text-xs" value={filters.startDate} onChange={(e) => { setFilters({ ...filters, startDate: e.target.value }); setPage(0); }} />
                 <span className="text-xs text-muted-foreground">to</span>
@@ -1257,7 +1268,17 @@ export function TransactionsWorkspace({
         </div>
       )}
 
-      {/* Table — extracted to <TransactionTable> (FINLYNQ-111 Phase 2). */}
+      {view === "day" ? (
+        <TransactionsByDay
+          loading={loading}
+          txns={txns}
+          dayTotals={dayTotals}
+          sortAscending={dayView.sort.columnId === "date" && dayView.sort.direction === "asc"}
+          sortOverridden={dayView.overridden}
+          onEdit={startEdit}
+        />
+      ) : (
+      /* Table — extracted to <TransactionTable> (FINLYNQ-111 Phase 2). */
       <Card>
         <CardContent className="p-0">
           <TransactionTable
@@ -1288,6 +1309,7 @@ export function TransactionsWorkspace({
           />
         </CardContent>
       </Card>
+      )}
 
       {/* Pagination */}
       <Pagination page={page} limit={limit} total={total} onPageChange={setPage} />

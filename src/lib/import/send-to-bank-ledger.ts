@@ -374,6 +374,7 @@ export async function sendStagedRowsToBankLedger(
         importHash: r.importHash,
         occurrenceIndex: occ,
         fitId: r.staged.fitId ?? null,
+        merchantCategoryCode: r.staged.merchantCategoryCode ?? null,
         date: r.staged.date,
         amount: r.staged.amount,
         currency: (r.staged.currency ?? "CAD").toUpperCase(),

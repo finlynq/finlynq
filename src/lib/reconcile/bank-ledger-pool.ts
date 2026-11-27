@@ -48,6 +48,9 @@ export interface BankCandidateRow {
   /** Share/unit count for an investment row; null for cash rows. Numeric —
    *  never encrypted. */
   quantity: number | null;
+  /** GH #464 — merchant category code (plain text, 4 digits); null/absent
+   *  when the feed sent none. Used by rule matching only. */
+  merchantCategoryCode?: string | null;
 }
 
 export interface BankCandidatePool {
@@ -94,6 +97,7 @@ export async function buildBankLedgerCandidatePool(
       ticker: schema.bankTransactions.ticker,
       securityName: schema.bankTransactions.securityName,
       quantity: schema.bankTransactions.quantity,
+      merchantCategoryCode: schema.bankTransactions.merchantCategoryCode,
       encryptionTier: schema.bankTransactions.encryptionTier,
     })
     .from(schema.bankTransactions)
@@ -143,6 +147,7 @@ export async function buildBankLedgerCandidatePool(
       securityNamePlain,
       // Numeric — never encrypted. NULL for cash rows.
       quantity: r.quantity ?? null,
+      merchantCategoryCode: r.merchantCategoryCode ?? null,
     };
     const arr = pool.byAccount.get(r.accountId) ?? [];
     arr.push(row);

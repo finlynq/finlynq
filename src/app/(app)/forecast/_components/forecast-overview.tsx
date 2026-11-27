@@ -14,10 +14,12 @@ import { formatCurrency } from "@/lib/currency";
 import { cn } from "@/lib/utils";
 import type { ForecastResult } from "@/lib/forecast/types";
 import type { QuickFillPreview } from "@/lib/forecast/quick-fill";
+import type { BlankExplanation } from "@/lib/forecast/blank-lines";
 import { AlertTriangle, Info, X } from "lucide-react";
 
 const MONTH_NAMES = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
 export const monthLong = (ym: string) => `${MONTH_NAMES[Number(ym.slice(5, 7)) - 1]} ${ym.slice(0, 4)}`;
+const monthShort = (ym: string) => MONTH_NAMES[Number(ym.slice(5, 7)) - 1];
 
 function listNames(names: string[], max = 3): string {
   const shown = names.slice(0, max);
@@ -126,12 +128,15 @@ export type ForecastNote = { tone: "warn" | "info"; text: React.ReactNode };
 /** Every note on one strip: the first shown, the rest behind "N more notes". */
 export function NotesStrip({
   blank,
+  explain,
   canFillFromHistory,
   onFillFromHistory,
   notes,
 }: {
   /** Income/spending lines with no value at all. */
   blank: Array<{ label: string; type: string }>;
+  /** Why they are blank (GH #463): the banner names the real reason and links to the first forecast month. */
+  explain: BlankExplanation;
   canFillFromHistory: boolean;
   onFillFromHistory: () => void;
   notes: ForecastNote[];
@@ -154,25 +159,54 @@ export function NotesStrip({
         <span className="flex-[1_1_280px]">
           {hasBlank ? (
             <>
-              {blank.length} {blank.length === 1 ? "line has" : "lines have"} no budget, so {blank.length === 1 ? "it stays" : "they stay"} blank: {listNames(blank.map((b) => b.label))}.
+              <span className="font-medium">
+                {blank.length} {blank.length === 1 ? "line has" : "lines have"} nothing to forecast from {monthLong(explain.startMonth)} on, so{" "}
+                {blank.length === 1 ? "it stays" : "they stay"} blank:
+              </span>{" "}
+              {listNames(blank.map((b) => b.label))}.
             </>
           ) : (
             first?.text
           )}
         </span>
-        {hasBlank && (canFillFromHistory ? (
+        {hasBlank && canFillFromHistory && (
           <Button size="sm" variant="outline" className="h-8 border-amber-400/70 bg-transparent dark:border-amber-700" onClick={onFillFromHistory}>
             Fill blanks from my history
           </Button>
-        ) : (
-          <Link href="/budgets" className="text-xs underline">Add budgets</Link>
-        ))}
+        )}
+        {hasBlank && (
+          <Link href={`/budgets?month=${explain.startMonth}`} className="text-xs underline">
+            Budget {monthShort(explain.startMonth)} onward
+          </Link>
+        )}
         {rest.length > 0 && (
           <button type="button" className="text-xs underline-offset-2 hover:underline" aria-expanded={open} onClick={() => setOpen((o) => !o)}>
             {open ? "Hide notes" : `${rest.length} more ${rest.length === 1 ? "note" : "notes"}`}
           </button>
         )}
       </div>
+      {hasBlank && (
+        <ul className="space-y-1 pl-7 text-xs opacity-90">
+          {explain.thisMonthOnly.length > 0 && (
+            <li>
+              {listNames(explain.thisMonthOnly)} {explain.thisMonthOnly.length === 1 ? "has" : "have"} a budget for{" "}
+              {monthLong(explain.currentMonth)} only, and the forecast starts in {monthLong(explain.startMonth)}. On Budgets, use{" "}
+              <span className="font-medium">Fill this and later months</span> or a <span className="font-medium">rule</span> on the line.
+            </li>
+          )}
+          {explain.historyLookback != null ? (
+            <li>
+              Your history layer found no spending for {blank.length === 1 ? "it" : "them"} in the last {explain.historyLookback} complete{" "}
+              {explain.historyLookback === 1 ? "month" : "months"}. Look back further in <span className="font-medium">Where amounts come from</span>, or budget{" "}
+              {blank.length === 1 ? "it" : "them"} from {monthLong(explain.startMonth)} on.
+            </li>
+          ) : (
+            explain.thisMonthOnly.length < blank.length && (
+              <li>Give {blank.length === 1 ? "it" : "them"} a budget from {monthLong(explain.startMonth)} on, or fill blanks from your history.</li>
+            )
+          )}
+        </ul>
+      )}
       {open && rest.length > 0 && (
         <ul className="space-y-1.5 pl-6 text-sm">
           {rest.map((n, i) => (
@@ -186,6 +220,7 @@ export function NotesStrip({
 
 /** Shown when most lines have no budget: how to fill the months ahead. */
 export function FirstRunCard({
+  startMonth,
   blankCount,
   lineCount,
   preview,
@@ -193,6 +228,8 @@ export function FirstRunCard({
   onUseHistory,
   onDismiss,
 }: {
+  /** First forecast month: the Budgets link opens it (GH #463). */
+  startMonth: string;
   blankCount: number;
   lineCount: number;
   preview: QuickFillPreview | null;
@@ -209,7 +246,7 @@ export function FirstRunCard({
           <div className="space-y-1">
             <h2 className="text-base font-semibold">How should we fill in the months ahead?</h2>
             <p className="text-sm text-muted-foreground">
-              Your forecast starts from today&apos;s balances and your loans, but {blankCount} of {lineCount} income and spending lines have no budget, so they are blank.
+              Your forecast starts from today&apos;s balances and your loans, but {blankCount} of {lineCount} income and spending lines have no budget from next month on (when the forecast starts), so they are blank.
             </p>
           </div>
           <Button variant="ghost" size="icon" className="h-8 w-8 shrink-0" aria-label="Hide this" onClick={onDismiss}>
@@ -235,11 +272,13 @@ export function FirstRunCard({
             </span>
           </button>
           <Link
-            href="/budgets"
+            href={`/budgets?month=${startMonth}`}
             className="flex flex-col items-start gap-1.5 rounded-lg border p-4 text-left transition-colors hover:bg-muted/50"
           >
             <span className="font-semibold">Set budgets first</span>
-            <span className="text-sm text-muted-foreground">Plan each category on the Budgets page, then come back. Best if your recent months were unusual.</span>
+            <span className="text-sm text-muted-foreground">
+              Plan each category from {monthLong(startMonth)} on (Fill this and later months, or a rule), then come back. Best if your recent months were unusual.
+            </span>
           </Link>
           <button
             type="button"

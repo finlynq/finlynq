@@ -4,6 +4,9 @@
  *   GET  → { tags: TagUsage[], groups: string[][] (tag names), locked }
  *   POST { sources: string[], target: string | null }
  *        → { updated }   (merge or rename into `target`; null removes them)
+ *   POST { action: "move_merchant_codes" }
+ *        → { updated, codesSaved, splitsUpdated }   (GH #464: `mcc:<code>`
+ *          tags move into transactions.merchant_category_code)
  *
  * Changes tags on transactions and their split rows, never on bank rows or
  * pending statement files. Store: src/lib/names/manage.ts.
@@ -15,6 +18,7 @@ import {
   MAX_MERGE_SOURCES,
   NameCleanupError,
   listTagUsage,
+  moveMerchantCodesOutOfTags,
   replaceTags,
   tagDuplicateGroups,
 } from "@/lib/names/manage";
@@ -37,7 +41,12 @@ const replaceSchema = z.object({
   target: z.string().max(100).nullable(),
 });
 
+const moveMerchantCodesSchema = z.object({ action: z.literal("move_merchant_codes") });
+
 export const POST = apiHandler(
-  { auth: "encryption", body: replaceSchema, mapError },
-  async ({ userId, dek, body }) => replaceTags(userId, dek!, body.sources, body.target),
+  { auth: "encryption", body: z.union([moveMerchantCodesSchema, replaceSchema]), mapError },
+  async ({ userId, dek, body }) =>
+    "action" in body
+      ? moveMerchantCodesOutOfTags(userId, dek!)
+      : replaceTags(userId, dek!, body.sources, body.target),
 );

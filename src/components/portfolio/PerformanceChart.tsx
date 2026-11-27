@@ -32,7 +32,7 @@ import {
 } from "recharts";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
-import { Badge } from "@/components/ui/badge";
+import { AlertTriangle, Info } from "lucide-react";
 import { formatCurrency } from "@/lib/currency";
 import { formatCompactNumber } from "@/lib/utils/number";
 import { prepareTimeSeries } from "@/lib/chart-series";
@@ -101,6 +101,7 @@ export interface PerformanceChartProps {
 export function PerformanceChart({ accountId }: PerformanceChartProps) {
   const [period, setPeriod] = useState<Period>("1y");
   const [lines, setLines] = useState<Lines>("both");
+  const [showHelp, setShowHelp] = useState(false);
   const [data, setData] = useState<ApiResponse["data"] | null>(null);
   const [loading, setLoading] = useState(true);
   // FINLYNQ-129/172 — component-only stacked grouping toggle (resets on reload).
@@ -156,6 +157,24 @@ export function PerformanceChart({ accountId }: PerformanceChartProps) {
   }, [groupMode, period, accountId]);
 
   const fmtPct = (v: number) => `${(v * 100).toFixed(2)}%`;
+  /** The return figures above the chart, each with a one-line explanation (GH #466). */
+  const stats: Array<{ key: string; label: string; value: string; help: string }> = data
+    ? [
+        { key: "twrr", label: "TWRR (period)", value: fmtPct(data.twrr.period), help: "Return over this period, ignoring when money was added or taken out." },
+        { key: "twrra", label: "TWRR (annualized)", value: fmtPct(data.twrr.annualized), help: "The same return, expressed per year." },
+        ...(data.mwrr.converged
+          ? [{ key: "mwrr", label: "MWRR (XIRR)", value: fmtPct(data.mwrr.irr), help: "Your personal return: it counts when you put money in or took it out." }]
+          : []),
+        ...(data.netNewMoney != null && Math.abs(data.netNewMoney) >= 0.5
+          ? [{
+              key: "nnm",
+              label: "Net new money",
+              value: `${data.netNewMoney > 0 ? "+" : ""}${formatCurrency(data.netNewMoney, data.currency)}`,
+              help: "Money put in or taken out in this period (deposits, withdrawals, transfers, plan contributions). It is not counted as return.",
+            }]
+          : []),
+      ]
+    : [];
 
   const rawChartData = useMemo(() => data?.series ?? [], [data]);
   const { data: chartData, domain, spansZero } = useMemo(
@@ -233,32 +252,43 @@ export function PerformanceChart({ accountId }: PerformanceChartProps) {
           </p>
         ) : (
           <>
-            <div className="mb-4 flex flex-wrap gap-3">
-              <Badge variant="default" className="px-3 py-1">
-                TWRR (period): {fmtPct(data.twrr.period)}
-              </Badge>
-              <Badge variant="secondary" className="px-3 py-1">
-                TWRR (annualized): {fmtPct(data.twrr.annualized)}
-              </Badge>
-              {data.mwrr.converged && (
-                <Badge variant="secondary" className="px-3 py-1">
-                  MWRR (XIRR): {fmtPct(data.mwrr.irr)}
-                </Badge>
-              )}
-              {data.netNewMoney != null && Math.abs(data.netNewMoney) >= 0.5 && (
-                <Badge
-                  variant="outline"
-                  className="px-3 py-1"
-                  title="Money put in or taken out in this period (deposits, withdrawals, transfers, plan contributions). It is not counted as return."
+            {/* Return figures (GH #466): plain stats, not pills. They used to be
+                Badges with the first one filled, which read as a selected toggle
+                although nothing was clickable. */}
+            <div className="mb-4 space-y-2">
+              <dl className="grid grid-cols-2 gap-x-6 gap-y-3 sm:flex sm:flex-wrap sm:gap-x-8">
+                {stats.map((st) => (
+                  <div key={st.key} className="min-w-0">
+                    <dt className="text-xs text-muted-foreground" title={st.help}>{st.label}</dt>
+                    <dd className="font-mono text-base font-semibold tabular-nums">{st.value}</dd>
+                  </div>
+                ))}
+              </dl>
+              <div className="flex flex-wrap items-center gap-x-4 gap-y-1">
+                <button
+                  type="button"
+                  className="inline-flex items-center gap-1 text-xs text-muted-foreground underline-offset-2 hover:underline"
+                  aria-expanded={showHelp}
+                  onClick={() => setShowHelp((v) => !v)}
                 >
-                  Net new money: {data.netNewMoney > 0 ? "+" : ""}
-                  {formatCurrency(data.netNewMoney, data.currency)}
-                </Badge>
-              )}
-              {data.gapsFilledDays > 0 && (
-                <Badge variant="destructive" className="px-3 py-1">
-                  Incomplete history: {data.gapsFilledDays} day{data.gapsFilledDays === 1 ? "" : "s"} filled
-                </Badge>
+                  <Info className="h-3.5 w-3.5" aria-hidden="true" />
+                  {showHelp ? "Hide what these mean" : "What do these mean?"}
+                </button>
+                {data.gapsFilledDays > 0 && (
+                  <span className="inline-flex items-center gap-1 text-xs text-amber-700 dark:text-amber-400">
+                    <AlertTriangle className="h-3.5 w-3.5" aria-hidden="true" />
+                    Incomplete history: {data.gapsFilledDays} day{data.gapsFilledDays === 1 ? "" : "s"} filled
+                  </span>
+                )}
+              </div>
+              {showHelp && (
+                <ul className="space-y-1 rounded-md bg-muted/50 p-3 text-xs text-muted-foreground">
+                  {stats.map((st) => (
+                    <li key={st.key}>
+                      <span className="font-medium text-foreground">{st.label}:</span> {st.help}
+                    </li>
+                  ))}
+                </ul>
               )}
             </div>
             {/* Axis-unit label — flips from the TWRR/value line to a per-holding

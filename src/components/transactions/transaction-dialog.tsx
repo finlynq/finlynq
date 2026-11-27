@@ -76,6 +76,7 @@ import {
 import { buildPayeeCategoryRule } from "@/lib/rules/build-payee-category-rule";
 import { parseSaveError } from "@/lib/save-error";
 import { SPLIT_SUM_TOLERANCE, splitMismatch } from "@/lib/transactions/split-balance";
+import { formatMerchantCategory } from "@/lib/transactions/merchant-category-names";
 import type { Condition, Action } from "@/lib/rules/schema";
 import { LotReallocationNotice } from "@/components/portfolio/lot-reallocation-notice";
 import type { LotReallocationPreview } from "@/lib/portfolio/lots/types";
@@ -134,6 +135,8 @@ export interface DialogTransaction {
   source?: TransactionSource | null;
   /** GH #450: the id another system gave this charge. Read-only here. */
   externalId?: string | null;
+  /** GH #464: the bank's merchant category code (4 digits). Read-only. */
+  merchantCategoryCode?: string | null;
 }
 
 export interface DialogLinkedSibling {
@@ -1707,7 +1710,8 @@ export function TransactionDialog({
               const updated = editingTx.updatedAt ? new Date(editingTx.updatedAt).toLocaleString() : null;
               const sourceLabel = editingTx.source ? labelForSource(editingTx.source) : null;
               const externalId = editingTx.externalId || null;
-              if (!created && !updated && !sourceLabel && !externalId) return null;
+              const merchantCategory = formatMerchantCategory(editingTx.merchantCategoryCode);
+              if (!created && !updated && !sourceLabel && !externalId && !merchantCategory) return null;
               return (
                 <div className="text-[11px] text-muted-foreground border-t pt-2 flex flex-wrap items-center gap-x-2 gap-y-1">
                   {created && <span>Created {created}</span>}
@@ -1720,6 +1724,11 @@ export function TransactionDialog({
                   {externalId && (
                     <span className="basis-full break-all" title="The id another system gave this transaction">
                       External ID: <span className="font-mono">{externalId}</span>
+                    </span>
+                  )}
+                  {merchantCategory && (
+                    <span className="basis-full" title="The merchant category code your bank sent with this charge">
+                      Merchant category: {merchantCategory}
                     </span>
                   )}
                 </div>

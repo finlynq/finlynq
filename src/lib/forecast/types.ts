@@ -71,6 +71,8 @@ export type ForecastInputs = {
   budgetHorizonEnd: string;
   lines: ForecastLineDef[];
   budget: Record<string, BudgetSeries>;
+  /** Budget per line for the CURRENT month (the month before the forecast). Only used to explain blank lines (GH #463). */
+  currentMonthBudget?: Record<string, number>;
   loans: LoanInput[];
   accounts: PoolAccount[];
   /** Complete months before the forecast (oldest first) that `history` / `pastBudget` cover. */

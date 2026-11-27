@@ -31,6 +31,11 @@ import {
   decryptRuleFields,
 } from "../../src/lib/rules/crypto";
 import {
+  matchesMerchantCodeCondition,
+  tagsWithMerchantCodeTag,
+  type MerchantCodeOp,
+} from "../../src/lib/transactions/merchant-category-code";
+import {
   ConditionGroup,
   Action,
   collectActionFKs,
@@ -142,7 +147,7 @@ export function registerRulesTools(server: McpServer, ctx: PgToolContext) {
     async ({ dry_run, limit }) => {
       const maxRows = limit ?? 500;
       const txns = await q(db, sql`
-        SELECT id, payee, amount, tags, account_id, date FROM transactions
+        SELECT id, payee, amount, tags, account_id, date, merchant_category_code FROM transactions
         WHERE user_id = ${userId} AND (category_id IS NULL OR category_id = 0)
           -- Trades must keep category_id NULL and transfer / brokerage / swap
           -- legs take their category from the pair, so neither is "waiting
@@ -196,7 +201,7 @@ export function registerRulesTools(server: McpServer, ctx: PgToolContext) {
       });
 
       // Inline matcher — supports payee/note/tags/amount/account/currency/date predicates.
-      function matchesProbe(probe: { payee: string; tags: string; amount: number; accountId: number | null; date: string }, conds: ParsedRule["conditions"]): boolean {
+      function matchesProbe(probe: { payee: string; tags: string; amount: number; accountId: number | null; date: string; merchantCategoryCode: string | null }, conds: ParsedRule["conditions"]): boolean {
         const all = conds.all ?? [];
         if (all.length === 0) return false;
         return all.every((c) => {
@@ -214,6 +219,14 @@ export function registerRulesTools(server: McpServer, ctx: PgToolContext) {
           if (field === "note") {
             // record_transaction's autoCategory writes don't carry note; skip.
             return false;
+          }
+          if (field === "merchant_category_code") {
+            // GH #464 — same rule as the shared matcher (auto-categorize.ts).
+            return matchesMerchantCodeCondition(
+              probe.merchantCategoryCode,
+              op as MerchantCodeOp,
+              String(c.value ?? ""),
+            );
           }
           if (field === "amount") {
             if (op === "between") return probe.amount >= (c.min ?? -Infinity) && probe.amount <= (c.max ?? Infinity);
@@ -252,12 +265,16 @@ export function registerRulesTools(server: McpServer, ctx: PgToolContext) {
       for (const txn of txns) {
         const plainPayee = dek ? (decryptField(dek, String(txn.payee ?? "")) ?? "") : String(txn.payee ?? "");
         const plainTags = dek ? (decryptField(dek, String(txn.tags ?? "")) ?? "") : String(txn.tags ?? "");
+        const mcc = txn.merchant_category_code == null ? null : String(txn.merchant_category_code);
         const probe = {
           payee: plainPayee,
-          tags: plainTags,
+          // GH #464 — a stored merchant code joins the tags as a virtual
+          // `mcc:<code>` tag so older "tags contains mcc:5812" rules match.
+          tags: tagsWithMerchantCodeTag(plainTags, mcc),
           amount: Number(txn.amount),
           accountId: txn.account_id == null ? null : Number(txn.account_id),
           date: String(txn.date ?? ""),
+          merchantCategoryCode: mcc,
         };
         for (const rule of rules) {
           if (!matchesProbe(probe, rule.conditions)) continue;
@@ -584,6 +601,7 @@ export function registerRulesTools(server: McpServer, ctx: PgToolContext) {
       // Stream D Phase 4: c.name + a.name dropped — read *_ct only.
       const rawTxns = await q(db, sql`
         SELECT t.id, t.date, t.payee, t.tags, t.amount, t.category_id,
+               t.merchant_category_code,
                c.name_ct AS category_name_ct,
                t.account_id, a.name_ct AS account_name_ct
         FROM transactions t
@@ -615,6 +633,12 @@ export function registerRulesTools(server: McpServer, ctx: PgToolContext) {
       for (const r of raw) {
         const plainPayee = dek ? (decryptField(dek, String(r.payee ?? "")) ?? "") : String(r.payee ?? "");
         const plainTags = dek ? (decryptField(dek, String(r.tags ?? "")) ?? "") : String(r.tags ?? "");
+        // GH #464 — match tags the way rules do: with the merchant code as a
+        // virtual `mcc:<code>` tag.
+        const matchTags = tagsWithMerchantCodeTag(
+          plainTags,
+          r.merchant_category_code == null ? null : String(r.merchant_category_code),
+        );
         let hit = false;
         if (field === "amount") {
           if (isNaN(ruleAmount)) continue;
@@ -623,10 +647,10 @@ export function registerRulesTools(server: McpServer, ctx: PgToolContext) {
           else if (type === "less_than") hit = amt < ruleAmount;
           else if (type === "exact") hit = Math.abs(amt - ruleAmount) < 0.01;
         } else {
-          const fieldVal = (field === "payee" ? plainPayee : plainTags).toLowerCase();
+          const fieldVal = (field === "payee" ? plainPayee : matchTags).toLowerCase();
           if (type === "contains") hit = fieldVal.includes(valueLower);
           else if (type === "exact") hit = fieldVal === valueLower;
-          else if (type === "regex" && regex) hit = regex.test(field === "payee" ? plainPayee : plainTags);
+          else if (type === "regex" && regex) hit = regex.test(field === "payee" ? plainPayee : matchTags);
         }
         if (hit) {
           matched.push({

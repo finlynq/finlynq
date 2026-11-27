@@ -105,6 +105,7 @@ export async function POST(
       encryptionTier: schema.bankTransactions.encryptionTier,
       importHash: schema.bankTransactions.importHash,
       fitId: schema.bankTransactions.fitId,
+      merchantCategoryCode: schema.bankTransactions.merchantCategoryCode,
     })
     .from(schema.bankTransactions)
     .where(
@@ -194,6 +195,7 @@ export async function POST(
         tags: encryptField(dek, tagsPlain) ?? "",
         importHash: bank.importHash,
         fitId: bank.fitId,
+        merchantCategoryCode: bank.merchantCategoryCode,
         bankTransactionId: bank.id,
         // Auto-pilot UNMATCHED → user manually categorized. Distinct from
         // /approve's 'manual' only by semantic context (the row went

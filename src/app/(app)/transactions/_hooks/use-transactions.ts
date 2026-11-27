@@ -23,13 +23,14 @@ import { useCallback } from "react";
 import useSWR from "swr";
 import { buildTransactionQuery } from "@/lib/transactions/build-query";
 import { jsonFetcher, swrListOptions } from "@/lib/swr";
+import type { DayTotalsPayload } from "@/lib/transactions/by-day";
 import type { Account, ColFilterShape, SortPref, Transaction } from "../_types";
 
 const limit = 50;
 
 export const TX_PAGE_LIMIT = limit;
 
-type TxListResponse = { data?: Transaction[]; total?: number };
+type TxListResponse = { data?: Transaction[]; total?: number; dayTotals?: DayTotalsPayload };
 
 export function useTransactions(
   filters: {
@@ -47,6 +48,9 @@ export function useTransactions(
   colFilters: ColFilterShape[],
   accounts: Account[],
   page: number,
+  // GH #465 — the "By day" view also asks the same request for each day's
+  // whole-day totals (`dayTotals=1`); the rows and their paging are unchanged.
+  opts: { dayTotals?: boolean } = {},
 ) {
   // Issue #59 — the top-bar quick filters are URL-driven (deep links from
   // /portfolio etc. must keep working); per-column filters + sort are persisted
@@ -54,6 +58,7 @@ export function useTransactions(
   // unit-tested buildTransactionQuery (FINLYNQ-111 Phase 1), and its string is
   // the SWR cache key (FINLYNQ-115) — deterministic per filter/sort/page combo.
   const params = buildTransactionQuery(filters, sortPref, colFilters, accounts, { page, limit });
+  if (opts.dayTotals) params.set("dayTotals", "1");
   const key = `/api/transactions?${params}`;
 
   const { data, isLoading, isValidating, mutate } = useSWR<TxListResponse>(
@@ -77,6 +82,7 @@ export function useTransactions(
   return {
     txns: data?.data ?? [],
     total: data?.total ?? 0,
+    dayTotals: data?.dayTotals ?? null,
     loading,
     limit,
     loadTxns,

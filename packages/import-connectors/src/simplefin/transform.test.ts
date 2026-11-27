@@ -3,6 +3,7 @@ import {
   simplefinToRawTransactions,
   epochToISODate,
   isPendingTransaction,
+  normalizeMerchantCategoryCode,
   type SimpleFinAccountsResponse,
 } from "./transform";
 
@@ -135,11 +136,47 @@ describe("simplefinToRawTransactions", () => {
     expect(tx1.currency).toBe("USD");
   });
 
-  it("maps mcc to a rule-matchable tag", () => {
+  it("puts mcc in its own field, never in tags (GH #464)", () => {
     const tx1 = result.accounts[0].rows.find((r) => r.fitId === "TX-1")!;
-    expect(tx1.tags).toBe("mcc:5812");
+    expect(tx1.merchantCategoryCode).toBe("5812");
+    expect(tx1.tags).toBeUndefined();
     const tx2 = result.accounts[0].rows.find((r) => r.fitId === "TX-2")!;
-    expect(tx2.tags).toBeUndefined(); // no mcc → no tag
+    expect(tx2.merchantCategoryCode).toBeUndefined(); // no mcc → no field
+    expect(tx2.tags).toBeUndefined();
+  });
+
+  it("drops 0000 and malformed merchant codes (GH #464)", () => {
+    const resp: SimpleFinAccountsResponse = {
+      accounts: [
+        {
+          id: "A",
+          name: "Visa",
+          currency: "USD",
+          transactions: [
+            { id: "p", posted: 1704153600, amount: "500.00", description: "Payment", mcc: "0000" },
+            { id: "x", posted: 1704153600, amount: "-1.00", description: "Odd", mcc: "58" },
+            { id: "s", posted: 1704153600, amount: "-2.00", description: "Spaced", mcc: " 5411 " },
+          ],
+        },
+      ],
+    };
+    const rows = simplefinToRawTransactions(resp).accounts[0].rows;
+    const by = (id: string) => rows.find((r) => r.fitId === id)!;
+    expect(by("p").merchantCategoryCode).toBeUndefined();
+    expect(by("p").tags).toBeUndefined();
+    expect(by("x").merchantCategoryCode).toBeUndefined();
+    expect(by("s").merchantCategoryCode).toBe("5411");
+  });
+
+  it("normalizeMerchantCategoryCode matches the app's copy", () => {
+    expect(normalizeMerchantCategoryCode("5812")).toBe("5812");
+    expect(normalizeMerchantCategoryCode(" 5812 ")).toBe("5812");
+    expect(normalizeMerchantCategoryCode("0000")).toBeNull();
+    expect(normalizeMerchantCategoryCode("581")).toBeNull();
+    expect(normalizeMerchantCategoryCode("58120")).toBeNull();
+    expect(normalizeMerchantCategoryCode("58a2")).toBeNull();
+    expect(normalizeMerchantCategoryCode(undefined)).toBeNull();
+    expect(normalizeMerchantCategoryCode(5812)).toBe("5812");
   });
 
   it("falls back to defaultCurrency for non-ISO (URL) currencies", () => {
