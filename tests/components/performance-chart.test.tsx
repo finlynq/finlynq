@@ -73,7 +73,9 @@ describe("PerformanceChart", () => {
     expect(twrr.tagName).toBe("DT");
     expect(twrr.closest("button")).toBeNull();
     expect(screen.queryByText(/Return over this period/)).toBeNull();
-    fireEvent.click(screen.getByText("What do these mean?"));
+    expect(screen.queryByText("What do these mean?")).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "What do these figures mean?" }));
+    expect(await screen.findByText("What these figures mean")).toBeTruthy();
     expect(screen.getByText(/Return over this period/)).toBeTruthy();
   });
 

@@ -33,6 +33,7 @@ import {
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { AlertTriangle, Info } from "lucide-react";
+import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { formatCurrency } from "@/lib/currency";
 import { formatCompactNumber } from "@/lib/utils/number";
 import { prepareTimeSeries } from "@/lib/chart-series";
@@ -256,40 +257,46 @@ export function PerformanceChart({ accountId }: PerformanceChartProps) {
                 Badges with the first one filled, which read as a selected toggle
                 although nothing was clickable. */}
             <div className="mb-4 space-y-2">
-              <dl className="grid grid-cols-2 gap-x-6 gap-y-3 sm:flex sm:flex-wrap sm:gap-x-8">
-                {stats.map((st) => (
-                  <div key={st.key} className="min-w-0">
-                    <dt className="text-xs text-muted-foreground" title={st.help}>{st.label}</dt>
-                    <dd className="font-mono text-base font-semibold tabular-nums">{st.value}</dd>
-                  </div>
-                ))}
-              </dl>
-              <div className="flex flex-wrap items-center gap-x-4 gap-y-1">
+              <div className="flex items-start gap-2">
+                <dl className="grid flex-1 grid-cols-2 gap-x-6 gap-y-3 sm:flex sm:flex-wrap sm:gap-x-8">
+                  {stats.map((st) => (
+                    <div key={st.key} className="min-w-0">
+                      <dt className="text-xs text-muted-foreground" title={st.help}>{st.label}</dt>
+                      <dd className="font-mono text-base font-semibold tabular-nums">{st.value}</dd>
+                    </div>
+                  ))}
+                </dl>
                 <button
                   type="button"
-                  className="inline-flex items-center gap-1 text-xs text-muted-foreground underline-offset-2 hover:underline"
-                  aria-expanded={showHelp}
-                  onClick={() => setShowHelp((v) => !v)}
+                  className="mt-0.5 rounded-full p-1 text-muted-foreground hover:bg-muted hover:text-foreground"
+                  aria-label="What do these figures mean?"
+                  title="What do these figures mean?"
+                  onClick={() => setShowHelp(true)}
                 >
-                  <Info className="h-3.5 w-3.5" aria-hidden="true" />
-                  {showHelp ? "Hide what these mean" : "What do these mean?"}
+                  <Info className="h-4 w-4" aria-hidden="true" />
                 </button>
-                {data.gapsFilledDays > 0 && (
-                  <span className="inline-flex items-center gap-1 text-xs text-amber-700 dark:text-amber-400">
-                    <AlertTriangle className="h-3.5 w-3.5" aria-hidden="true" />
-                    Incomplete history: {data.gapsFilledDays} day{data.gapsFilledDays === 1 ? "" : "s"} filled
-                  </span>
-                )}
               </div>
-              {showHelp && (
-                <ul className="space-y-1 rounded-md bg-muted/50 p-3 text-xs text-muted-foreground">
-                  {stats.map((st) => (
-                    <li key={st.key}>
-                      <span className="font-medium text-foreground">{st.label}:</span> {st.help}
-                    </li>
-                  ))}
-                </ul>
+              {data.gapsFilledDays > 0 && (
+                <p className="inline-flex items-center gap-1 text-xs text-amber-700 dark:text-amber-400">
+                  <AlertTriangle className="h-3.5 w-3.5" aria-hidden="true" />
+                  Incomplete history: {data.gapsFilledDays} day{data.gapsFilledDays === 1 ? "" : "s"} filled
+                </p>
               )}
+              <Dialog open={showHelp} onOpenChange={setShowHelp}>
+                <DialogContent className="sm:max-w-md">
+                  <DialogHeader>
+                    <DialogTitle>What these figures mean</DialogTitle>
+                  </DialogHeader>
+                  <dl className="space-y-3 text-sm">
+                    {stats.map((st) => (
+                      <div key={st.key}>
+                        <dt className="font-medium">{st.label}</dt>
+                        <dd className="text-muted-foreground">{st.help}</dd>
+                      </div>
+                    ))}
+                  </dl>
+                </DialogContent>
+              </Dialog>
             </div>
             {/* Axis-unit label — flips from the TWRR/value line to a per-holding
                 dollar stack in stacked mode (tc-2: "y-axis switches to $"). */}
