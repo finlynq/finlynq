@@ -123,7 +123,8 @@ export function AnswerCards({
   );
 }
 
-export type ForecastNote = { tone: "warn" | "info"; text: React.ReactNode };
+/** `key` identifies the note for dismissing (GH #469): change it when the note says something new. */
+export type ForecastNote = { key: string; tone: "warn" | "info"; text: React.ReactNode };
 
 /** Every note on one strip: the first shown, the rest behind "N more notes". */
 export function NotesStrip({
@@ -131,7 +132,9 @@ export function NotesStrip({
   explain,
   canFillFromHistory,
   onFillFromHistory,
-  onDismissBlank,
+  onDismiss,
+  hiddenCount,
+  onShowHidden,
   notes,
 }: {
   /** Income/spending lines with no value at all. */
@@ -140,11 +143,25 @@ export function NotesStrip({
   explain: BlankExplanation;
   canFillFromHistory: boolean;
   onFillFromHistory: () => void;
-  /** Hide the blank-lines part until another line turns blank (GH #469). */
-  onDismissBlank?: () => void;
+  /** Hide the whole strip until a note appears that was not dismissed (GH #469). */
+  onDismiss?: () => void;
+  /** When the strip is dismissed: how many notes it hides, and how to show them again. */
+  hiddenCount?: number;
+  onShowHidden?: () => void;
   notes: ForecastNote[];
 }) {
   const [open, setOpen] = useState(false);
+  if (hiddenCount && hiddenCount > 0) {
+    // Dismissed: no banner, just a quiet way back.
+    return (
+      <p className="text-xs text-muted-foreground">
+        {hiddenCount} forecast {hiddenCount === 1 ? "note is" : "notes are"} hidden.{" "}
+        <button type="button" className="underline underline-offset-2" onClick={onShowHidden}>
+          Show
+        </button>
+      </p>
+    );
+  }
   const hasBlank = blank.length > 0;
   const first: ForecastNote | null = hasBlank ? null : notes[0] ?? null;
   const rest = hasBlank ? notes : notes.slice(1);
@@ -187,14 +204,14 @@ export function NotesStrip({
             {open ? "Hide notes" : `${rest.length} more ${rest.length === 1 ? "note" : "notes"}`}
           </button>
         )}
-        {hasBlank && onDismissBlank && (
+        {onDismiss && (
           <Button
             variant="ghost"
             size="icon"
-            className="ml-auto h-7 w-7 shrink-0 hover:bg-amber-100 dark:hover:bg-amber-900/40"
-            aria-label="Dismiss this note"
-            title="Dismiss: these lines stay blank on purpose"
-            onClick={onDismissBlank}
+            className={cn("ml-auto h-7 w-7 shrink-0", warn && "hover:bg-amber-100 dark:hover:bg-amber-900/40")}
+            aria-label="Dismiss these notes"
+            title="Dismiss: hidden until something new comes up"
+            onClick={onDismiss}
           >
             <X className="h-4 w-4" />
           </Button>

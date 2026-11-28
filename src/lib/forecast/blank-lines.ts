@@ -43,22 +43,28 @@ export function explainBlankLines(
 }
 
 /**
- * Dismissing the blank-lines note (GH #469). The user can hide the note for
- * the lines it names; it comes back when a line that was not dismissed turns
- * blank, so a newly blank line is never hidden by an old dismissal. Stored in
- * this browser as the dismissed line keys.
+ * Dismissing the Forecast notes strip (GH #469). The X hides the WHOLE strip:
+ * the blank-lines note and every other note in it (warnings, lines left out).
+ * Each note has a key; dismissing remembers the keys shown, and the strip
+ * comes back as soon as a key appears that was not dismissed (a new blank
+ * line, a new warning, a warning whose wording changed), so new information
+ * is never hidden by an old dismissal. Stored in this browser only.
  */
-export const BLANK_NOTE_DISMISSED_KEY = "pf-forecast-blank-note-dismissed";
+export const FORECAST_NOTES_DISMISSED_KEY = "pf-forecast-notes-dismissed";
 
-export function isBlankNoteDismissed(blank: readonly Pick<BlankLine, "key">[], dismissedKeys: readonly string[]): boolean {
-  if (blank.length === 0) return false;
-  const dismissed = new Set(dismissedKeys);
-  return blank.every((b) => dismissed.has(b.key));
+/** Every key the strip would show now: blank lines (`blank:<line key>`) plus each note's key. */
+export function forecastNoteKeys(
+  blank: readonly Pick<BlankLine, "key">[],
+  notes: readonly { key: string }[],
+): string[] {
+  return [...new Set([...blank.map((b) => `blank:${b.key}`), ...notes.map((n) => n.key)])].sort();
 }
 
-/** The keys to remember when the note is dismissed: the ones it names now. */
-export function blankNoteKeys(blank: readonly Pick<BlankLine, "key">[]): string[] {
-  return [...new Set(blank.map((b) => b.key))].sort();
+/** Hidden while there is something to show and all of it was dismissed. */
+export function areNotesDismissed(keys: readonly string[], dismissedKeys: readonly string[]): boolean {
+  if (keys.length === 0) return false;
+  const dismissed = new Set(dismissedKeys);
+  return keys.every((k) => dismissed.has(k));
 }
 
 /** Read the stored keys; anything unreadable counts as nothing dismissed. */

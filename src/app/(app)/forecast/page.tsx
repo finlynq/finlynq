@@ -29,10 +29,10 @@ import { traceCell } from "@/lib/forecast/layers";
 import { HORIZON_CHOICES, scenarioConfigSchema, type ScenarioConfig } from "@/lib/forecast/config";
 import { compareResults, planVsActual } from "@/lib/forecast/compare";
 import {
-  BLANK_NOTE_DISMISSED_KEY,
-  blankNoteKeys,
+  FORECAST_NOTES_DISMISSED_KEY,
+  areNotesDismissed,
   explainBlankLines,
-  isBlankNoteDismissed,
+  forecastNoteKeys,
   parseDismissedKeys,
 } from "@/lib/forecast/blank-lines";
 import { hasHistoryFill, isMostlyBlank, quickFillPreview, valueableLines, withHistoryFill } from "@/lib/forecast/quick-fill";
@@ -101,20 +101,20 @@ export default function ForecastPage() {
       setFirstRunDismissed(false);
     }
   }, []);
-  // Blank lines the user dismissed from the notes strip (GH #469, this browser only).
-  const [dismissedBlankKeys, setDismissedBlankKeys] = useState<string[]>([]);
+  // Notes the user dismissed from the notes strip (GH #469, this browser only).
+  const [dismissedNoteKeys, setDismissedNoteKeys] = useState<string[]>([]);
   useEffect(() => {
     try {
-      setDismissedBlankKeys(parseDismissedKeys(localStorage.getItem(BLANK_NOTE_DISMISSED_KEY)));
+      setDismissedNoteKeys(parseDismissedKeys(localStorage.getItem(FORECAST_NOTES_DISMISSED_KEY)));
     } catch {
       /* storage blocked: nothing dismissed */
     }
   }, []);
-  const saveDismissedBlankKeys = (keys: string[]) => {
-    setDismissedBlankKeys(keys);
+  const saveDismissedNoteKeys = (keys: string[]) => {
+    setDismissedNoteKeys(keys);
     try {
-      if (keys.length) localStorage.setItem(BLANK_NOTE_DISMISSED_KEY, JSON.stringify(keys));
-      else localStorage.removeItem(BLANK_NOTE_DISMISSED_KEY);
+      if (keys.length) localStorage.setItem(FORECAST_NOTES_DISMISSED_KEY, JSON.stringify(keys));
+      else localStorage.removeItem(FORECAST_NOTES_DISMISSED_KEY);
     } catch {
       /* private window: for this visit only */
     }
@@ -416,26 +416,16 @@ export default function ForecastPage() {
     .map((e) => ({ date: `${e.month}-01`, text: e.label || EVENT_LABEL[e.kind] }));
 
   const blankShown = config.layers.some((l) => l.kind === "budget" && l.enabled) ? result.blankLines : [];
-  const blankDismissed = isBlankNoteDismissed(blankShown, dismissedBlankKeys);
   const notes: ForecastNote[] = [
-    ...result.warnings.map((w) => ({ tone: "warn" as const, text: w.message })),
-    ...data.inputs.leftOut.map((l) => ({ tone: "info" as const, text: <><span className="font-medium">{l.label}</span>: {l.reason}</> })),
-    ...(blankDismissed
-      ? [
-          {
-            tone: "info" as const,
-            text: (
-              <>
-                {blankShown.length} blank {blankShown.length === 1 ? "line is" : "lines are"} hidden from this note.{" "}
-                <button type="button" className="underline underline-offset-2" onClick={() => saveDismissedBlankKeys([])}>
-                  Show
-                </button>
-              </>
-            ),
-          },
-        ]
-      : []),
+    ...result.warnings.map((w) => ({ key: `warn:${w.code}:${w.ref ?? ""}:${w.message}`, tone: "warn" as const, text: w.message })),
+    ...data.inputs.leftOut.map((l) => ({
+      key: `left:${l.key}:${l.reason}`,
+      tone: "info" as const,
+      text: <><span className="font-medium">{l.label}</span>: {l.reason}</>,
+    })),
   ];
+  const noteKeys = forecastNoteKeys(blankShown, notes);
+  const notesDismissed = areNotesDismissed(noteKeys, dismissedNoteKeys);
 
   const compareSelect = (
     <CompareSelect
@@ -546,11 +536,13 @@ export default function ForecastPage() {
           </Card>
 
           <NotesStrip
-            blank={blankDismissed ? [] : blankShown}
+            blank={blankShown}
             explain={explainBlankLines(result.blankLines, data.inputs, config)}
             canFillFromHistory={!hasHistoryFill(config)}
             onFillFromHistory={fillFromHistory}
-            onDismissBlank={() => saveDismissedBlankKeys(blankNoteKeys([...blankShown, ...dismissedBlankKeys.map((key) => ({ key }))]))}
+            onDismiss={() => saveDismissedNoteKeys(noteKeys)}
+            hiddenCount={notesDismissed ? notes.length + (blankShown.length > 0 ? 1 : 0) : 0}
+            onShowHidden={() => saveDismissedNoteKeys([])}
             notes={notes}
           />
 
