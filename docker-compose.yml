@@ -37,6 +37,9 @@ services:
       # Set ALLOW_REGISTRATION=false in .env to turn off sign-up once your own
       # account exists (unset = sign-up open). Existing users still sign in.
       ALLOW_REGISTRATION: ${ALLOW_REGISTRATION:-true}
+      # What's New checks GitHub for a newer release (at most every 6 hours).
+      # Set PF_UPDATE_CHECK=false in .env for an offline server.
+      PF_UPDATE_CHECK: ${PF_UPDATE_CHECK:-true}
       NODE_ENV: production
     depends_on:
       db:

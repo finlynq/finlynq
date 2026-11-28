@@ -131,6 +131,7 @@ export function NotesStrip({
   explain,
   canFillFromHistory,
   onFillFromHistory,
+  onDismissBlank,
   notes,
 }: {
   /** Income/spending lines with no value at all. */
@@ -139,6 +140,8 @@ export function NotesStrip({
   explain: BlankExplanation;
   canFillFromHistory: boolean;
   onFillFromHistory: () => void;
+  /** Hide the blank-lines part until another line turns blank (GH #469). */
+  onDismissBlank?: () => void;
   notes: ForecastNote[];
 }) {
   const [open, setOpen] = useState(false);
@@ -183,6 +186,18 @@ export function NotesStrip({
           <button type="button" className="text-xs underline-offset-2 hover:underline" aria-expanded={open} onClick={() => setOpen((o) => !o)}>
             {open ? "Hide notes" : `${rest.length} more ${rest.length === 1 ? "note" : "notes"}`}
           </button>
+        )}
+        {hasBlank && onDismissBlank && (
+          <Button
+            variant="ghost"
+            size="icon"
+            className="ml-auto h-7 w-7 shrink-0 hover:bg-amber-100 dark:hover:bg-amber-900/40"
+            aria-label="Dismiss this note"
+            title="Dismiss: these lines stay blank on purpose"
+            onClick={onDismissBlank}
+          >
+            <X className="h-4 w-4" />
+          </Button>
         )}
       </div>
       {hasBlank && (

@@ -44,6 +44,9 @@ export interface ConfirmDialogProps {
   busy?: boolean;
   /** Busy label shown on the confirm button. Defaults to "Deleting…". */
   busyLabel?: string;
+  /** "destructive" (default: red title, warning icon, red button) or
+   *  "default" for a confirm that loses nothing (GH #470: completing a goal). */
+  tone?: "destructive" | "default";
 }
 
 export function ConfirmDialog({
@@ -56,7 +59,9 @@ export function ConfirmDialog({
   onConfirm,
   busy = false,
   busyLabel = "Deleting…",
+  tone = "destructive",
 }: ConfirmDialogProps) {
+  const destructive = tone === "destructive";
   return (
     <Dialog
       open={open}
@@ -68,8 +73,8 @@ export function ConfirmDialog({
     >
       <DialogContent className="sm:max-w-sm">
         <DialogHeader>
-          <DialogTitle className="flex items-center gap-2 text-destructive">
-            <AlertTriangle className="h-4 w-4" />
+          <DialogTitle className={destructive ? "flex items-center gap-2 text-destructive" : "flex items-center gap-2"}>
+            {destructive && <AlertTriangle className="h-4 w-4" />}
             {title}
           </DialogTitle>
         </DialogHeader>
@@ -84,7 +89,7 @@ export function ConfirmDialog({
             {cancelLabel}
           </Button>
           <Button
-            variant="destructive"
+            variant={destructive ? "destructive" : "default"}
             className="flex-1"
             disabled={busy}
             onClick={onConfirm}

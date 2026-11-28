@@ -468,7 +468,12 @@ export async function loadDebtLines(ctx: BudgetContext, month: string): Promise<
       interest += convertWithRateMap(s.interest, loanCurrency, ctx.rateMap);
       dueDates.push(...s.dueDates);
     }
-    if (source === "none" && a.paymentAmount != null && a.paymentAmount > 0) {
+    // The saved fixed payment is only for a debt account with NO linked loan
+    // (GH #468). A linked loan's schedule decides: a month it has no payment
+    // in (after payoff, before the start) plans nothing. The settings dialog
+    // hides the field once a loan is linked, so an amount saved earlier could
+    // otherwise never be cleared and kept planning a payment forever.
+    if (source === "none" && loans.length === 0 && a.paymentAmount != null && a.paymentAmount > 0) {
       planned = convertWithRateMap(a.paymentAmount, a.currency, ctx.rateMap);
       source = "fixed";
     }

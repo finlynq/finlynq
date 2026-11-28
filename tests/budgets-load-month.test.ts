@@ -235,4 +235,18 @@ describeDb("budget month loader", () => {
     const visa = m.debt.find((d) => d.accountId === ids.card)!;
     expect(visa).toMatchObject({ planned: 400, paid: 400, source: "fixed", status: "paid" });
   });
+
+  it("plans nothing for a loan-linked account once the loan is paid off, even with a saved fixed payment (GH #468)", async () => {
+    // A fixed payment saved on the account (e.g. before the loan was linked).
+    await setAccountBudgetRole(userId, ids.carLoanAcct, null, 500);
+    // October: the schedule decides, not the 500.
+    let m = await loadBudgetMonth(userId, TEST_DEK, M);
+    let car = m.debt.find((d) => d.accountId === ids.carLoanAcct)!;
+    expect(car.source).toBe("schedule");
+    expect(car.planned).not.toBe(500);
+    // The 60-month loan from 2026-01 ends in 2030: nothing planned after.
+    m = await loadBudgetMonth(userId, TEST_DEK, "2031-03");
+    car = m.debt.find((d) => d.accountId === ids.carLoanAcct)!;
+    expect(car).toMatchObject({ planned: 0, source: "none" });
+  });
 });
