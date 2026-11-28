@@ -308,6 +308,12 @@ if [ "$SKIP_BUILD" = false ]; then
   # None of these is the live tree, so nothing is writing into them.
   echo "==> Clearing leftovers from earlier deploys..."
   run_as "rm -rf $BUILD_DIR .next.old.*"
+  # The live tree's generated route types (.next/types, .next/dev/types) are
+  # listed in tsconfig.json, so the build below would type-check the PREVIOUS
+  # build's route list: deleting an API route then failed every box build with
+  # "Cannot find module '.../route.js'" (2026-11-27, /api/onboarding/sample-data).
+  # They are build-time only; the running server never reads them.
+  run_as "rm -rf .next/types .next/dev/types"
 
   # One retry. The runner's "Typecheck & Build" job has already built this
   # commit before the deploy job starts, so a failure here is almost always the
