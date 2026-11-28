@@ -28,7 +28,7 @@ export const KIND_LABEL: Record<LayerKind, string> = {
 };
 
 const KIND_HELP: Record<LayerKind, string> = {
-  budget: "Your budgets and budget rules. Lines with no budget stay blank.",
+  budget: "Your budgets and budget rules, from next month on. Lines with no budget there stay blank (a budget for this month alone is not carried forward).",
   history: "What you actually spent or received per line in recent months.",
   budget_realism: "Scales a line by what you really spent against its budget lately.",
   scheduled: "Subscriptions and recurring payments on their real dates.",

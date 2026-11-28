@@ -88,7 +88,7 @@ import/staged/[id]/apply-rules, import/staged/[id]/approve, import/staged/[id]/b
 import/staged/[id]/create-rule, import/staged/[id], import/staged/[id]/rows/[rowId],
 import/staging/upload, import/templates/[id], import/templates,
 import/uploads/[batchId], loans, mcp, mcp/upload, net-worth-history,
-oauth/authorize, oauth/register, oauth/token, onboarding/sample-data,
+oauth/authorize, oauth/register, oauth/token,
 portfolio/benchmarks, portfolio/crypto, portfolio/holdings/cash-sleeve,
 portfolio/lots, portfolio/operations/load, portfolio/overview, portfolio,
 portfolio/snapshots/rebuild, portfolio/symbol-info, rebalancing,

@@ -12,6 +12,14 @@ import { todayISO } from "@/lib/utils/date";
 import { getDisplayCurrency, getRateMap, convertWithRateMap } from "@/lib/fx-service";
 import { pickRecordCurrency } from "@/lib/fx/record-currency";
 import { isPgErrorCode, pgErrorConstraint } from "@/lib/db-utils";
+import {
+  GOAL_ALLOCATION_KINDS,
+  allocationRefusal,
+  readAllocation,
+  summarizeAccountClaims,
+  type GoalAllocation,
+  type AccountClaimRow,
+} from "@/lib/goals/allocation";
 
 /**
  * Goal names are unique per user (`goals_user_name_lookup_uniq` over the
@@ -29,16 +37,33 @@ function duplicateNameResponse(error: unknown): NextResponse | null {
   );
 }
 
+// GH #462: one linked account with how much of it the goal counts. No kind =
+// the whole account. Percent 0 < v <= 100, amount > 0 (goal currency).
+const accountLinkSchema = z
+  .object({
+    accountId: z.number().int(),
+    allocationKind: z.enum(GOAL_ALLOCATION_KINDS).nullable().optional(),
+    allocationValue: z.number().nullable().optional(),
+  })
+  .superRefine((l, ctx) => {
+    const refusal = allocationRefusal(l.allocationKind, l.allocationValue);
+    if (refusal) ctx.addIssue({ code: "custom", message: refusal, path: ["allocationValue"] });
+  });
+
 const postSchema = z.object({
   name: z.string(),
   type: z.string(),
   targetAmount: z.number(),
   currency: z.string().regex(/^[A-Z]{3,4}$/, "ISO currency code").optional(),
-  deadline: z.string().optional(),
+  // The goals page sends null for "no deadline"; refusing it made every
+  // web goal without a deadline fail with "expected string, received null".
+  deadline: z.string().nullable().optional(),
   accountId: z.number().optional(),
   // Issue #130 — multi-account linking. When supplied, replaces the legacy
   // single-account `accountId` semantics. Empty array means "unlinked".
   accountIds: z.array(z.number()).optional(),
+  // GH #462: linked accounts WITH allocations. Wins over accountIds/accountId.
+  accountLinks: z.array(accountLinkSchema).optional(),
   priority: z.number().optional(),
   status: z.string().optional(),
   note: z.string().optional(),
@@ -53,9 +78,12 @@ const putSchema = z.object({
   type: z.string().optional(),
   targetAmount: z.number().optional(),
   currency: z.string().regex(/^[A-Z]{3,4}$/, "ISO currency code").optional(),
-  deadline: z.string().optional(),
+  // The goals page sends null for "no deadline"; refusing it made every
+  // web goal without a deadline fail with "expected string, received null".
+  deadline: z.string().nullable().optional(),
   accountId: z.number().optional(),
   accountIds: z.array(z.number()).optional(),
+  accountLinks: z.array(accountLinkSchema).optional(),
   priority: z.number().optional(),
   status: z.string().optional(),
   note: z.string().optional(),
@@ -63,6 +91,8 @@ const putSchema = z.object({
   progressMode: z.enum(GOAL_PROGRESS_MODES).optional(),
   startDate: z.string().nullable().optional(),
 });
+
+type ResolvedLink = { accountId: number; allocation: GoalAllocation | null };
 
 /**
  * Resolve the canonical list of account ids for a goal write. Accepts the
@@ -79,6 +109,45 @@ function resolveAccountIds(
   if (body.accountIds !== undefined) return body.accountIds;
   if (body.accountId != null) return [body.accountId];
   return null;
+}
+
+/**
+ * GH #462: the links to write, with allocations. `accountLinks` wins over
+ * `accountIds` / `accountId` (which link whole accounts, as before). Same
+ * null / [] / list contract as `resolveAccountIds`. Throws AppError on an
+ * account listed twice (the join is unique per goal + account).
+ */
+function resolveLinks(body: {
+  accountId?: number | null | undefined;
+  accountIds?: number[] | undefined;
+  accountLinks?:
+    | Array<{ accountId: number; allocationKind?: GoalAllocation["kind"] | null; allocationValue?: number | null }>
+    | undefined;
+}): ResolvedLink[] | null {
+  if (body.accountLinks !== undefined) {
+    const seen = new Set<number>();
+    for (const l of body.accountLinks) {
+      if (seen.has(l.accountId)) throw new AppError(`Account id ${l.accountId} is listed twice.`);
+      seen.add(l.accountId);
+    }
+    return body.accountLinks.map((l) => ({
+      accountId: l.accountId,
+      allocation: readAllocation(l.allocationKind, l.allocationValue),
+    }));
+  }
+  const ids = resolveAccountIds(body);
+  if (ids === null) return null;
+  return Array.from(new Set(ids)).map((accountId) => ({ accountId, allocation: null }));
+}
+
+function linkRows(userId: string, goalId: number, links: ResolvedLink[]) {
+  return links.map((l) => ({
+    userId,
+    goalId,
+    accountId: l.accountId,
+    allocationKind: l.allocation?.kind ?? null,
+    allocationValue: l.allocation?.value ?? null,
+  }));
 }
 
 /**
@@ -127,13 +196,21 @@ export async function GET(request: NextRequest) {
   // group by goal id so the response carries `accountIds: number[]` and
   // decrypted `accounts: string[]` (issue #130).
   const goalIds = rawGoals.map((g) => g.id);
-  const links: Array<{ goalId: number; accountId: number; accountNameCt: string | null }> =
+  const links: Array<{
+    goalId: number;
+    accountId: number;
+    accountNameCt: string | null;
+    allocationKind: string | null;
+    allocationValue: number | null;
+  }> =
     goalIds.length > 0
       ? await db
           .select({
             goalId: schema.goalAccounts.goalId,
             accountId: schema.goalAccounts.accountId,
             accountNameCt: schema.accounts.nameCt,
+            allocationKind: schema.goalAccounts.allocationKind,
+            allocationValue: schema.goalAccounts.allocationValue,
           })
           .from(schema.goalAccounts)
           .leftJoin(schema.accounts, eq(schema.goalAccounts.accountId, schema.accounts.id))
@@ -149,11 +226,15 @@ export async function GET(request: NextRequest) {
   const linksDecrypted = decryptNamedRows(links, auth.context.dek, {
     accountNameCt: "accountName",
   }) as Array<typeof links[number] & { accountName: string | null }>;
-  const linksByGoal = new Map<number, { ids: number[]; names: string[] }>();
+  const linksByGoal = new Map<
+    number,
+    { ids: number[]; names: string[]; allocations: Record<number, GoalAllocation | null> }
+  >();
   for (const link of linksDecrypted) {
-    const entry = linksByGoal.get(link.goalId) ?? { ids: [], names: [] };
+    const entry = linksByGoal.get(link.goalId) ?? { ids: [], names: [], allocations: {} };
     entry.ids.push(link.accountId);
     entry.names.push(link.accountName ?? "");
+    entry.allocations[link.accountId] = readAllocation(link.allocationKind, link.allocationValue);
     linksByGoal.set(link.goalId, entry);
   }
 
@@ -203,8 +284,28 @@ export async function GET(request: NextRequest) {
       accountIds: g.accountIds,
       progressMode: g.progressMode,
       startDate: g.startDate ?? null,
+      allocations: linksByGoal.get(g.id)?.allocations,
     })),
   );
+
+  // GH #462: per account, what every ACTIVE goal claims of it against what it
+  // holds (account currency). Liabilities are left out: no goal "claims" a
+  // debt. A warning only; a balance can always drop below the claims.
+  const claimRows: AccountClaimRow[] = [];
+  for (const g of goals) {
+    if ((g.status ?? "active") !== "active") continue;
+    for (const l of progressByGoal.get(g.id)?.links ?? []) {
+      if (l.accountIsLiability) continue;
+      claimRows.push({
+        accountId: l.accountId,
+        goalId: g.id,
+        balance: l.accountBalance,
+        claim: l.claim,
+        percent: l.claimPercent,
+      });
+    }
+  }
+  const claimsByAccount = summarizeAccountClaims(claimRows);
 
   // FINLYNQ-123 dual basis: every amount above is in the GOAL's own currency
   // (that is what `computeGoalProgress` measures in). Each row also carries a
@@ -238,6 +339,33 @@ export async function GET(request: NextRequest) {
       displayCurrency,
       targetAmountDisplay: toDisplay(g.targetAmount, g.currency),
       currentAmountDisplay: toDisplay(currentAmount, g.currency),
+      // GH #462: each linked account with its allocation, what it counts toward
+      // this goal (goal currency), and the account-wide claim summary
+      // (account currency; null for a liability or an account no active goal
+      // links). Same account => same `claims` figures on every goal.
+      accountLinks: (p?.links ?? []).map((l) => {
+        const idx = g.accountIds.indexOf(l.accountId);
+        const c = claimsByAccount.get(l.accountId);
+        return {
+          accountId: l.accountId,
+          accountName: idx >= 0 ? g.accounts[idx] ?? "" : "",
+          allocationKind: l.allocationKind,
+          allocationValue: l.allocationValue,
+          allocationApplied: l.allocationApplied,
+          countedAmount: l.countedAmount,
+          accountCurrency: l.accountCurrency,
+          accountBalance: l.accountBalance,
+          claims: c
+            ? {
+                claimed: c.claimed,
+                unallocated: c.unallocated,
+                percentClaimed: c.percentClaimed,
+                overAllocated: c.overAllocated,
+                goalCount: c.goalIds.length,
+              }
+            : null,
+        };
+      }),
     };
   });
 
@@ -255,7 +383,13 @@ export async function POST(request: NextRequest) {
     const parsed = validateBody(body, postSchema);
     if (parsed.error) return parsed.error;
     const d = parsed.data;
-    const accountIds = resolveAccountIds(d) ?? [];
+    let links: ResolvedLink[];
+    try {
+      links = resolveLinks(d) ?? [];
+    } catch (e) {
+      return NextResponse.json({ error: safeErrorMessage(e, "Invalid account links") }, { status: 400 });
+    }
+    const accountIds = links.map((l) => l.accountId);
     try {
       await verifyAccountOwnership(userId, accountIds);
     } catch (e) {
@@ -306,14 +440,8 @@ export async function POST(request: NextRequest) {
         ...enc,
       }).returning({ id: schema.goals.id });
       const id = inserted[0]?.id;
-      if (id && accountIds.length > 0) {
-        await db.insert(schema.goalAccounts).values(
-          accountIds.map((accountId) => ({
-            userId,
-            goalId: id,
-            accountId,
-          })),
-        );
+      if (id && links.length > 0) {
+        await db.insert(schema.goalAccounts).values(linkRows(userId, id, links));
       }
       return id;
     });
@@ -321,7 +449,18 @@ export async function POST(request: NextRequest) {
     const goal = newId
       ? (await db.select().from(schema.goals).where(eq(schema.goals.id, newId)))[0]
       : null;
-    return NextResponse.json({ ...goal, accountIds }, { status: 201 });
+    return NextResponse.json(
+      {
+        ...goal,
+        accountIds,
+        accountLinks: links.map((l) => ({
+          accountId: l.accountId,
+          allocationKind: l.allocation?.kind ?? null,
+          allocationValue: l.allocation?.value ?? null,
+        })),
+      },
+      { status: 201 },
+    );
   } catch (error: unknown) {
     const duplicate = duplicateNameResponse(error);
     if (duplicate) return duplicate;
@@ -338,8 +477,15 @@ export async function PUT(request: NextRequest) {
     const body = await request.json();
     const parsed = validateBody(body, putSchema);
     if (parsed.error) return parsed.error;
-    const { id, name, accountId: _legacyAccountId, accountIds: _newAccountIds, ...data } = parsed.data;
-    void _legacyAccountId; void _newAccountIds;
+    const {
+      id,
+      name,
+      accountId: _legacyAccountId,
+      accountIds: _newAccountIds,
+      accountLinks: _accountLinks,
+      ...data
+    } = parsed.data;
+    void _legacyAccountId; void _newAccountIds; void _accountLinks;
     const toEncrypt: Record<string, string | null | undefined> = {};
     if (name !== undefined) toEncrypt.name = name;
     const enc = buildNameFields(dek, toEncrypt);
@@ -347,7 +493,13 @@ export async function PUT(request: NextRequest) {
 
     // Did the caller intend to change account links? Only touch the join
     // when explicitly supplied — passing neither leaves links alone.
-    const replaceAccountIds = resolveAccountIds(parsed.data);
+    let replaceLinks: ResolvedLink[] | null;
+    try {
+      replaceLinks = resolveLinks(parsed.data);
+    } catch (e) {
+      return NextResponse.json({ error: safeErrorMessage(e, "Invalid account links") }, { status: 400 });
+    }
+    const replaceAccountIds = replaceLinks ? replaceLinks.map((l) => l.accountId) : null;
     if (replaceAccountIds !== null) {
       try {
         await verifyAccountOwnership(userId, replaceAccountIds);
@@ -404,18 +556,12 @@ export async function PUT(request: NextRequest) {
     const goal = await withDbTransaction(async () => {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const goalRows = await db.update(schema.goals).set(updatePayload as any).where(and(eq(schema.goals.id, id), eq(schema.goals.userId, userId))).returning();
-      if (replaceAccountIds !== null) {
+      if (replaceLinks !== null) {
         await db
           .delete(schema.goalAccounts)
           .where(and(eq(schema.goalAccounts.goalId, id), eq(schema.goalAccounts.userId, userId)));
-        if (replaceAccountIds.length > 0) {
-          await db.insert(schema.goalAccounts).values(
-            replaceAccountIds.map((accountId) => ({
-              userId,
-              goalId: id,
-              accountId,
-            })),
-          );
+        if (replaceLinks.length > 0) {
+          await db.insert(schema.goalAccounts).values(linkRows(userId, id, replaceLinks));
         }
       }
       return goalRows[0];

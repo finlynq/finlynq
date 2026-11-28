@@ -174,7 +174,7 @@ export const transactionsViewConfigSchema = z.object({
     .max(COLUMN_IDS.length)
     .nullable()
     .default(null),
-  view: z.enum(["list", "calendar"]).default("list"),
+  view: z.enum(["list", "calendar", "day"]).default("list"),
   calMode: z.enum(["week", "month", "year"]).default("month"),
 });
 

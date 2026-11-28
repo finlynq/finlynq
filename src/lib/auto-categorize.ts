@@ -15,6 +15,10 @@
  *   tags ahead of time and hands a populated TransactionInput.
  */
 import type { Condition, ConditionGroup, Action, Rule as RuleSchema } from "./rules/schema";
+import {
+  matchesMerchantCodeCondition,
+  tagsWithMerchantCodeTag,
+} from "./transactions/merchant-category-code";
 
 export interface TransactionInput {
   payee?: string | null;
@@ -31,6 +35,11 @@ export interface TransactionInput {
   ticker?: string | null;
   securityName?: string | null;
   quantity?: number | null;
+  /** GH #464 — the row's merchant category code (4 digits), from the
+   *  `merchant_category_code` column. Feeds the `merchant_category_code`
+   *  condition AND a virtual `mcc:<code>` tag for `tags` conditions, so rules
+   *  written against the old tag form keep matching. */
+  merchantCategoryCode?: string | null;
 }
 
 /**
@@ -110,9 +119,14 @@ export function evalCondition(txn: TransactionInput, cond: Condition): boolean {
       const value =
         cond.field === "payee" ? (txn.payee ?? "") :
         cond.field === "note" ? (txn.note ?? "") :
-        (txn.tags ?? "");
+        // GH #464 — the merchant code joins the tags as a virtual
+        // `mcc:<code>` tag (never stored), so "tags contains mcc:5812" still
+        // matches a row whose code now lives in its own column.
+        tagsWithMerchantCodeTag(txn.tags, txn.merchantCategoryCode);
       return evalStringOp(value, cond.op, cond.value);
     }
+    case "merchant_category_code":
+      return matchesMerchantCodeCondition(txn.merchantCategoryCode, cond.op, cond.value);
     case "amount": {
       const txAmount = txn.amount ?? 0;
       if (cond.op === "between") {

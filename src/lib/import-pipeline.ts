@@ -36,6 +36,7 @@ import {
   buildLotContext,
 } from "./portfolio/lots/write-hooks";
 import type { TxRowForLots } from "./portfolio/lots/types";
+import { normalizeMerchantCategoryCode } from "./transactions/merchant-category-code";
 
 export interface RawTransaction {
   date: string;
@@ -83,6 +84,9 @@ export interface RawTransaction {
    */
   portfolioHoldingId?: number | null;
   fitId?: string;
+  /** GH #464 — normalized merchant category code (4 digits) from a feed. Its
+   *  own column on staged / bank / ledger rows; never in the import hash. */
+  merchantCategoryCode?: string;
   /** Groups multi-leg rows (transfer, same-account conversion, liquidation)
    *  so the UI can display them as linked siblings. Every row in one group
    *  shares the same linkId; unset for standalone transactions. */
@@ -521,6 +525,8 @@ export async function executeImport(
     tags: string;
     importHash: string;
     fitId: string | null;
+    /** GH #464 — normalized merchant category code; never in importHash. */
+    merchantCategoryCode: string | null;
     linkId: string | null;
     /** Filled in below before INSERT, depending on `bankLedgerMode`. */
     bankTransactionId: string | null;
@@ -610,6 +616,7 @@ export async function executeImport(
       tags: row.tags ?? "",
       importHash: hash,
       fitId: row.fitId ?? null,
+      merchantCategoryCode: normalizeMerchantCategoryCode(row.merchantCategoryCode),
       linkId: row.linkId ?? null,
       bankTransactionId: row.bankTransactionId ?? null,
       payeePlaintext: row.payee ?? "",
@@ -701,6 +708,7 @@ export async function executeImport(
             date: r.date,
             accountId: null,
             enteredCurrency: r.enteredCurrency ?? r.currency ?? null,
+            merchantCategoryCode: r.merchantCategoryCode,
           })),
           activeRules,
         );
@@ -859,6 +867,7 @@ export async function executeImport(
           importHash: row.importHash,
           occurrenceIndex: occurrenceIndices[j],
           fitId: row.fitId,
+          merchantCategoryCode: row.merchantCategoryCode,
           date: row.date,
           amount: row.amount,
           currency: row.currency,

@@ -22,6 +22,10 @@ export interface RawTransaction {
   quantity?: number;
   portfolioHolding?: string;
   fitId?: string;
+  /** GH #464 — card network merchant category code (ISO 18245, 4 digits),
+   *  already normalized (0000 / malformed → unset). Stored in its own
+   *  column, never as a tag and never in the import hash. */
+  merchantCategoryCode?: string;
   /** Shared id for every row in a multi-leg group (transfer, same-account
    *  conversion, liquidation). Lets the UI surface siblings of a transfer
    *  from either leg. Unset for standalone transactions. */

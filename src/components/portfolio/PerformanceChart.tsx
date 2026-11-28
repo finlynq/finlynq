@@ -32,7 +32,8 @@ import {
 } from "recharts";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
-import { Badge } from "@/components/ui/badge";
+import { AlertTriangle, Info } from "lucide-react";
+import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { formatCurrency } from "@/lib/currency";
 import { formatCompactNumber } from "@/lib/utils/number";
 import { prepareTimeSeries } from "@/lib/chart-series";
@@ -101,6 +102,7 @@ export interface PerformanceChartProps {
 export function PerformanceChart({ accountId }: PerformanceChartProps) {
   const [period, setPeriod] = useState<Period>("1y");
   const [lines, setLines] = useState<Lines>("both");
+  const [showHelp, setShowHelp] = useState(false);
   const [data, setData] = useState<ApiResponse["data"] | null>(null);
   const [loading, setLoading] = useState(true);
   // FINLYNQ-129/172 — component-only stacked grouping toggle (resets on reload).
@@ -156,6 +158,24 @@ export function PerformanceChart({ accountId }: PerformanceChartProps) {
   }, [groupMode, period, accountId]);
 
   const fmtPct = (v: number) => `${(v * 100).toFixed(2)}%`;
+  /** The return figures above the chart, each with a one-line explanation (GH #466). */
+  const stats: Array<{ key: string; label: string; value: string; help: string }> = data
+    ? [
+        { key: "twrr", label: "TWRR (period)", value: fmtPct(data.twrr.period), help: "Return over this period, ignoring when money was added or taken out." },
+        { key: "twrra", label: "TWRR (annualized)", value: fmtPct(data.twrr.annualized), help: "The same return, expressed per year." },
+        ...(data.mwrr.converged
+          ? [{ key: "mwrr", label: "MWRR (XIRR)", value: fmtPct(data.mwrr.irr), help: "Your personal return: it counts when you put money in or took it out." }]
+          : []),
+        ...(data.netNewMoney != null && Math.abs(data.netNewMoney) >= 0.5
+          ? [{
+              key: "nnm",
+              label: "Net new money",
+              value: `${data.netNewMoney > 0 ? "+" : ""}${formatCurrency(data.netNewMoney, data.currency)}`,
+              help: "Money put in or taken out in this period (deposits, withdrawals, transfers, plan contributions). It is not counted as return.",
+            }]
+          : []),
+      ]
+    : [];
 
   const rawChartData = useMemo(() => data?.series ?? [], [data]);
   const { data: chartData, domain, spansZero } = useMemo(
@@ -233,33 +253,50 @@ export function PerformanceChart({ accountId }: PerformanceChartProps) {
           </p>
         ) : (
           <>
-            <div className="mb-4 flex flex-wrap gap-3">
-              <Badge variant="default" className="px-3 py-1">
-                TWRR (period): {fmtPct(data.twrr.period)}
-              </Badge>
-              <Badge variant="secondary" className="px-3 py-1">
-                TWRR (annualized): {fmtPct(data.twrr.annualized)}
-              </Badge>
-              {data.mwrr.converged && (
-                <Badge variant="secondary" className="px-3 py-1">
-                  MWRR (XIRR): {fmtPct(data.mwrr.irr)}
-                </Badge>
-              )}
-              {data.netNewMoney != null && Math.abs(data.netNewMoney) >= 0.5 && (
-                <Badge
-                  variant="outline"
-                  className="px-3 py-1"
-                  title="Money put in or taken out in this period (deposits, withdrawals, transfers, plan contributions). It is not counted as return."
+            {/* Return figures (GH #466): plain stats, not pills. They used to be
+                Badges with the first one filled, which read as a selected toggle
+                although nothing was clickable. */}
+            <div className="mb-4 space-y-2">
+              <div className="flex items-start gap-2">
+                <dl className="grid flex-1 grid-cols-2 gap-x-6 gap-y-3 sm:flex sm:flex-wrap sm:gap-x-8">
+                  {stats.map((st) => (
+                    <div key={st.key} className="min-w-0">
+                      <dt className="text-xs text-muted-foreground" title={st.help}>{st.label}</dt>
+                      <dd className="font-mono text-base font-semibold tabular-nums">{st.value}</dd>
+                    </div>
+                  ))}
+                </dl>
+                <button
+                  type="button"
+                  className="mt-0.5 rounded-full p-1 text-muted-foreground hover:bg-muted hover:text-foreground"
+                  aria-label="What do these figures mean?"
+                  title="What do these figures mean?"
+                  onClick={() => setShowHelp(true)}
                 >
-                  Net new money: {data.netNewMoney > 0 ? "+" : ""}
-                  {formatCurrency(data.netNewMoney, data.currency)}
-                </Badge>
-              )}
+                  <Info className="h-4 w-4" aria-hidden="true" />
+                </button>
+              </div>
               {data.gapsFilledDays > 0 && (
-                <Badge variant="destructive" className="px-3 py-1">
+                <p className="inline-flex items-center gap-1 text-xs text-amber-700 dark:text-amber-400">
+                  <AlertTriangle className="h-3.5 w-3.5" aria-hidden="true" />
                   Incomplete history: {data.gapsFilledDays} day{data.gapsFilledDays === 1 ? "" : "s"} filled
-                </Badge>
+                </p>
               )}
+              <Dialog open={showHelp} onOpenChange={setShowHelp}>
+                <DialogContent className="sm:max-w-md">
+                  <DialogHeader>
+                    <DialogTitle>What these figures mean</DialogTitle>
+                  </DialogHeader>
+                  <dl className="space-y-3 text-sm">
+                    {stats.map((st) => (
+                      <div key={st.key}>
+                        <dt className="font-medium">{st.label}</dt>
+                        <dd className="text-muted-foreground">{st.help}</dd>
+                      </div>
+                    ))}
+                  </dl>
+                </DialogContent>
+              </Dialog>
             </div>
             {/* Axis-unit label — flips from the TWRR/value line to a per-holding
                 dollar stack in stacked mode (tc-2: "y-axis switches to $"). */}

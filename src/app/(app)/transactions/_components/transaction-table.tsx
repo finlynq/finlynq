@@ -40,7 +40,7 @@ const categoryColorMap: Record<string, string> = {
   investment: "border-violet-300 bg-violet-50 text-violet-700 dark:border-violet-700 dark:bg-violet-950 dark:text-violet-300",
 };
 
-function getCategoryBadgeClass(categoryType: string): string {
+export function getCategoryBadgeClass(categoryType: string): string {
   const key = categoryType?.toLowerCase() ?? "";
   return categoryColorMap[key] ?? "border-zinc-300 bg-zinc-50 text-zinc-700 dark:border-zinc-700 dark:bg-zinc-950 dark:text-zinc-300";
 }

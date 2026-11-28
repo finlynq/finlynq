@@ -9,6 +9,7 @@ import { getDisplayCurrency, getRateMap, convertWithRateMap } from "@/lib/fx-ser
 import { convertReportingSlice } from "@/lib/fx/reporting-amount";
 import { getAccountBalances, getSpendingByCategoryWithReporting } from "@/lib/queries";
 import { computeGoalProgress } from "@/lib/goals-progress";
+import { readAllocation, type GoalAllocation } from "@/lib/goals/allocation";
 import { getHoldingsValueByAccount, verifyHoldingDecryptHealth } from "@/lib/holdings-value";
 import { applyInvestmentMarketOverlay } from "@/lib/accounts/investment-balance-overlay";
 import { decryptField } from "@/lib/crypto/envelope";
@@ -683,12 +684,24 @@ const handleGoals: IntentHandler = async (_msg, ctx) => {
   // investment accounts at market and converts each into the goal's currency.
   // The old code read only the legacy single `goals.account_id`, at ledger.
   const links = await db
-    .select({ goalId: schema.goalAccounts.goalId, accountId: schema.goalAccounts.accountId })
+    .select({
+      goalId: schema.goalAccounts.goalId,
+      accountId: schema.goalAccounts.accountId,
+      allocationKind: schema.goalAccounts.allocationKind,
+      allocationValue: schema.goalAccounts.allocationValue,
+    })
     .from(schema.goalAccounts)
     .where(eq(schema.goalAccounts.userId, ctx.userId))
     .all();
   const accountsByGoal = new Map<number, number[]>();
-  for (const l of links) accountsByGoal.set(l.goalId, [...(accountsByGoal.get(l.goalId) ?? []), l.accountId]);
+  // GH #462: a link may count only part of its account.
+  const allocationsByGoal = new Map<number, Record<number, GoalAllocation | null>>();
+  for (const l of links) {
+    accountsByGoal.set(l.goalId, [...(accountsByGoal.get(l.goalId) ?? []), l.accountId]);
+    const allocs = allocationsByGoal.get(l.goalId) ?? {};
+    allocs[l.accountId] = readAllocation(l.allocationKind, l.allocationValue);
+    allocationsByGoal.set(l.goalId, allocs);
+  }
   const progressByGoal = await computeGoalProgress(
     ctx.userId,
     ctx.dek,
@@ -701,6 +714,7 @@ const handleGoals: IntentHandler = async (_msg, ctx) => {
       accountIds: accountsByGoal.get(g.id) ?? [],
       progressMode: g.progressMode,
       startDate: g.startDate ?? null,
+      allocations: allocationsByGoal.get(g.id),
     })),
   );
   const displayCurrency = await getDisplayCurrency(ctx.userId);

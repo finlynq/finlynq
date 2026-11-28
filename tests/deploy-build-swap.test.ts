@@ -119,6 +119,14 @@ describe("the build directory is wired through", () => {
     expect(include).toContain(`${buildDir}/dev/types/**/*.ts`);
   });
 
+  it("removes the live tree's route types before building, so a deleted route can deploy", () => {
+    const script = code(DEPLOY_SH);
+    const clear = script.indexOf('run_as "rm -rf .next/types .next/dev/types"');
+    const build = script.indexOf("NEXT_DIST_DIR=$BUILD_DIR npm run build");
+    expect(clear).toBeGreaterThan(-1);
+    expect(build).toBeGreaterThan(clear);
+  });
+
   it("git ignores the build dir and detached old trees", () => {
     const gi = read(".gitignore");
     expect(gi).toContain(`/${buildDir}/`);

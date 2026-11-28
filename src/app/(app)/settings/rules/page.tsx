@@ -90,6 +90,8 @@ function describeCondition(c: Condition, fkNames?: RuleRow["actionFKNames"]): st
     case "quantity":
       if (c.op === "between") return `quantity between ${c.min}-${c.max}`;
       return `quantity ${c.op} ${c.value}`;
+    case "merchant_category_code":
+      return `merchant category ${c.op === "starts_with" ? "starts with" : c.op === "in" ? "is one of" : "is"} ${c.value}`;
   }
 }
 

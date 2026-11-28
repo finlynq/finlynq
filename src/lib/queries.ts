@@ -357,6 +357,8 @@ export async function getTransactions(userId: string, filters?: TxSortFilter) {
       tags: transactions.tags,
       // GH #450: shown read-only in the edit dialog.
       externalId: transactions.externalId,
+      // GH #464: the bank's merchant category code, read-only in the dialog.
+      merchantCategoryCode: transactions.merchantCategoryCode,
       linkId: transactions.linkId,
       // Audit-trio (issue #28). Surface for the edit dialog footer + the
       // future "recently modified" sort. Pre-migration rows backfill to
@@ -419,6 +421,27 @@ export async function getTransactionCount(userId: string, filters?: TxSortFilter
     .get();
 
   return result?.count ?? 0;
+}
+
+/**
+ * Id + date of EVERY transaction the list filters allow on the given days
+ * (limit / offset / sort ignored). The Transactions "By day" view
+ * (transactions/day-totals.ts) totals whole days from these, so a day whose
+ * rows run onto the next page still shows its full total.
+ */
+export async function getTransactionIdsOnDates(
+  userId: string,
+  filters: TxSortFilter | undefined,
+  dates: string[],
+): Promise<Array<{ id: number; date: string }>> {
+  if (dates.length === 0) return [];
+  const conditions = buildTxFilterConditions(userId, filters);
+  conditions.push(inArray(transactions.date, dates));
+  return db
+    .select({ id: transactions.id, date: transactions.date })
+    .from(transactions)
+    .where(and(...conditions))
+    .all();
 }
 
 export async function createTransaction(userId: string, data: {

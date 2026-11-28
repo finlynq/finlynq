@@ -55,6 +55,7 @@ import {
   checkFitIdDuplicatesForAccount,
 } from "@/lib/import-hash";
 import { normalizeDate } from "@/lib/csv-parser";
+import { normalizeMerchantCategoryCode } from "@/lib/transactions/merchant-category-code";
 import { parseOfx } from "@/lib/ofx-parser";
 import {
   parseCsvWithFallback,
@@ -509,6 +510,7 @@ export async function writeStagedImport(
     portfolioHolding?: string;
     ticker?: string;
     fitId?: string;
+    merchantCategoryCode: string | null;
     hash: string;
     dedupStatus: "new" | "existing" | "probable_duplicate";
   };
@@ -562,6 +564,8 @@ export async function writeStagedImport(
       portfolioHolding: row.portfolioHolding,
       ticker: row.ticker,
       fitId: row.fitId,
+      // GH #464 — plain text, NOT in `hash` (date/account/amount/payee only).
+      merchantCategoryCode: normalizeMerchantCategoryCode(row.merchantCategoryCode),
       hash,
       dedupStatus: "new",
     });
@@ -731,6 +735,7 @@ export async function writeStagedImport(
     enteredCurrency: r.enteredCurrency ?? knobs.defaultCurrency ?? null,
     tags: r.tags ?? null,
     fitId: r.fitId ?? null,
+    merchantCategoryCode: r.merchantCategoryCode,
     peerStagedId: null,
     targetAccountId: null,
     dedupStatus: r.dedupStatus,

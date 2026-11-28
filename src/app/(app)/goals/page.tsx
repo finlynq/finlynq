@@ -14,7 +14,7 @@ import { formatCurrency } from "@/lib/currency";
 import { useDisplayCurrency } from "@/components/currency-provider";
 import { useDropdownOrder } from "@/components/dropdown-order-provider";
 import { useActiveCurrencies } from "@/lib/hooks/useActiveCurrencies";
-import { Plus, Trash2, Target, CheckCircle2, TrendingUp, Calendar, Pencil, X } from "lucide-react";
+import { Plus, Trash2, Target, CheckCircle2, TrendingUp, Calendar, Pencil, X, AlertTriangle } from "lucide-react";
 import { ConfirmDialog } from "@/components/ui/confirm-dialog";
 import { ErrorState } from "@/components/error-state";
 import { PageSkeleton } from "@/components/page-skeleton";
@@ -38,8 +38,40 @@ type Goal = {
   // balanceNow are the linked balance then and now (goal currency).
   progressMode?: "balance" | "growth"; startDate?: string | null;
   startAmount?: number | null; balanceNow?: number;
+  // GH #462: each linked account with how much of it this goal counts.
+  accountLinks?: GoalAccountLink[];
+};
+type GoalAccountLink = {
+  accountId: number;
+  accountName: string;
+  allocationKind: "amount" | "percent" | null;
+  allocationValue: number | null;
+  allocationApplied?: boolean;
+  /** What the link counts toward the goal, goal currency. */
+  countedAmount: number;
+  accountCurrency: string;
+  accountBalance: number;
+  /** Account-wide: what every active goal claims of it (account currency). */
+  claims: {
+    claimed: number;
+    unallocated: number;
+    percentClaimed: number;
+    overAllocated: boolean;
+    goalCount: number;
+  } | null;
 };
 type Account = { id: number; name: string };
+
+/** Per account, from the goals list: what the active goals claim of it. */
+type AccountClaimView = NonNullable<GoalAccountLink["claims"]> & {
+  accountId: number;
+  accountName: string;
+  accountCurrency: string;
+  accountBalance: number;
+};
+
+type AllocationChoice = "whole" | "amount" | "percent";
+type LinkForm = { accountId: number; kind: AllocationChoice; value: string };
 
 type FormState = {
   name: string;
@@ -47,12 +79,58 @@ type FormState = {
   targetAmount: string;
   currency: string;
   deadline: string;
-  accountIds: number[]; // issue #130 — multi-account
+  // issue #130 — multi-account; GH #462 — each link with its allocation.
+  links: LinkForm[];
   priority: string;
   note: string;
   progressMode: "balance" | "growth";
   startDate: string;
 };
+
+const ALLOCATION_LABELS: Record<AllocationChoice, string> = {
+  whole: "Whole account",
+  amount: "Amount",
+  percent: "Percent",
+};
+
+/** "C$1,500.00 of Savings", "30% of Savings", or just "Savings". */
+function linkLabel(l: GoalAccountLink, goalCurrency: string): string {
+  const name = l.accountName || `#${l.accountId}`;
+  if (l.allocationKind === "amount" && l.allocationValue != null) {
+    return `${formatCurrency(l.allocationValue, goalCurrency)} of ${name}`;
+  }
+  if (l.allocationKind === "percent" && l.allocationValue != null) {
+    return `${Number(l.allocationValue.toFixed(2))}% of ${name}`;
+  }
+  return name;
+}
+
+/** One entry per account any goal links, carrying its claim summary. */
+function accountClaimViews(goals: Goal[]): Map<number, AccountClaimView> {
+  const out = new Map<number, AccountClaimView>();
+  for (const g of goals) {
+    for (const l of g.accountLinks ?? []) {
+      if (!l.claims || out.has(l.accountId)) continue;
+      out.set(l.accountId, {
+        ...l.claims,
+        accountId: l.accountId,
+        accountName: l.accountName,
+        accountCurrency: l.accountCurrency,
+        accountBalance: l.accountBalance,
+      });
+    }
+  }
+  return out;
+}
+
+/** "Savings: goals claim $6,000.00 of $5,000.00" (or 130% of it). */
+function overAllocationText(c: AccountClaimView): string {
+  const name = c.accountName || `#${c.accountId}`;
+  if (c.percentClaimed > 100 && c.claimed <= Math.max(c.accountBalance, 0) + 0.005) {
+    return `${name}: goals claim ${Number(c.percentClaimed.toFixed(2))}% of it`;
+  }
+  return `${name}: goals claim ${formatCurrency(c.claimed, c.accountCurrency)} of ${formatCurrency(Math.max(c.accountBalance, 0), c.accountCurrency)}`;
+}
 
 const PROGRESS_MODE_LABELS: Record<string, string> = {
   balance: "Reach a balance",
@@ -98,7 +176,7 @@ function emptyForm(displayCurrency: string): FormState {
     targetAmount: "",
     currency: displayCurrency,
     deadline: "",
-    accountIds: [],
+    links: [],
     priority: "1",
     note: "",
     progressMode: "balance",
@@ -113,7 +191,12 @@ function goalToForm(g: Goal, displayCurrency: string): FormState {
     targetAmount: String(g.targetAmount),
     currency: g.currency || displayCurrency,
     deadline: g.deadline ?? "",
-    accountIds: g.accountIds ?? [],
+    links: (g.accountIds ?? []).map((accountId): LinkForm => {
+      const l = (g.accountLinks ?? []).find((x) => x.accountId === accountId);
+      return l?.allocationKind && l.allocationValue != null
+        ? { accountId, kind: l.allocationKind, value: String(l.allocationValue) }
+        : { accountId, kind: "whole", value: "" };
+    }),
     priority: String(g.priority ?? 1),
     note: g.note ?? "",
     progressMode: g.progressMode === "growth" ? "growth" : "balance",
@@ -136,6 +219,7 @@ function GoalEditForm({
   onSave,
   onCancel,
   displayCurrency,
+  claims,
 }: {
   mode: "add" | "edit";
   goalId?: number;
@@ -144,6 +228,8 @@ function GoalEditForm({
   onSave: () => void;
   onCancel: () => void;
   displayCurrency: string;
+  /** GH #462: what the active goals already claim of each account. */
+  claims: Map<number, AccountClaimView>;
 }) {
   const [form, setForm] = useState<FormState>(initial);
   const [errors, setErrors] = useState<Record<string, string>>({});
@@ -159,7 +245,17 @@ function GoalEditForm({
     if (form.progressMode === "growth") {
       if (!form.startDate) e.startDate = "Pick the date to count growth from";
       else if (form.startDate > todayISO()) e.startDate = "The start date can't be in the future";
-      if (form.accountIds.length === 0) e.accounts = "Link at least one account to measure its growth";
+      if (form.links.length === 0) e.accounts = "Link at least one account to measure its growth";
+    }
+    // GH #462: same rules as the server (lib/goals/allocation.ts).
+    for (const l of form.links) {
+      if (l.kind === "whole") continue;
+      const v = parseFloat(l.value);
+      if (!Number.isFinite(v) || v <= 0) {
+        e[`link-${l.accountId}`] = l.kind === "percent" ? "Enter a percentage above 0" : "Enter an amount above 0";
+      } else if (l.kind === "percent" && v > 100) {
+        e[`link-${l.accountId}`] = "A percentage can't be more than 100";
+      }
     }
     setErrors(e);
     return Object.keys(e).length === 0;
@@ -170,7 +266,7 @@ function GoalEditForm({
   // Account chip selector — pick from the unselected pool, remove via the X
   // on each chip. Single-select Combobox is reused as the picker; the
   // selected ids drive the chip row.
-  const selectedSet = new Set(form.accountIds);
+  const selectedSet = new Set(form.links.map((l) => l.accountId));
   const availableAccounts = accounts.filter((a) => !selectedSet.has(a.id));
 
   function addAccount(idStr: string) {
@@ -178,11 +274,17 @@ function GoalEditForm({
     const id = parseInt(idStr);
     if (Number.isNaN(id)) return;
     if (selectedSet.has(id)) return;
-    setForm({ ...form, accountIds: [...form.accountIds, id] });
+    setForm({ ...form, links: [...form.links, { accountId: id, kind: "whole", value: "" }] });
   }
 
   function removeAccount(id: number) {
-    setForm({ ...form, accountIds: form.accountIds.filter((x) => x !== id) });
+    setForm({ ...form, links: form.links.filter((l) => l.accountId !== id) });
+    setErrors({ ...errors, [`link-${id}`]: "" });
+  }
+
+  function updateLink(id: number, patch: Partial<LinkForm>) {
+    setForm({ ...form, links: form.links.map((l) => (l.accountId === id ? { ...l, ...patch } : l)) });
+    setErrors({ ...errors, [`link-${id}`]: "" });
   }
 
   async function handleSubmit(e: React.FormEvent) {
@@ -196,7 +298,13 @@ function GoalEditForm({
         targetAmount: parseFloat(form.targetAmount),
         currency: form.currency || displayCurrency,
         deadline: form.deadline || null,
-        accountIds: form.accountIds,
+        // GH #462: links with allocations (the server's accountLinks wins
+        // over accountIds; whole-account links send no kind).
+        accountLinks: form.links.map((l) =>
+          l.kind === "whole"
+            ? { accountId: l.accountId, allocationKind: null, allocationValue: null }
+            : { accountId: l.accountId, allocationKind: l.kind, allocationValue: parseFloat(l.value) },
+        ),
         priority: parseInt(form.priority),
         note: form.note,
         progressMode: form.progressMode,
@@ -315,22 +423,70 @@ function GoalEditForm({
       </div>
       <div>
         <Label>Linked Accounts</Label>
-        {form.accountIds.length > 0 && (
-          <div className="flex flex-wrap gap-1.5 mb-2">
-            {form.accountIds.map((id) => {
-              const a = accounts.find((x) => x.id === id);
+        {form.links.length > 0 && (
+          <div className="space-y-2 mb-2">
+            {form.links.map((l) => {
+              const a = accounts.find((x) => x.id === l.accountId);
+              const name = a?.name ?? `#${l.accountId}`;
+              const c = claims.get(l.accountId);
+              const err = errors[`link-${l.accountId}`];
               return (
-                <span key={id} className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md bg-muted text-xs font-medium border border-border/60">
-                  {a?.name ?? `#${id}`}
-                  <button
-                    type="button"
-                    aria-label={`Remove ${a?.name ?? `#${id}`}`}
-                    onClick={() => removeAccount(id)}
-                    className="hover:text-destructive"
-                  >
-                    <X className="h-3 w-3" />
-                  </button>
-                </span>
+                <div key={l.accountId} className="rounded-md border border-border/60 bg-muted/30 px-2.5 py-2">
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="text-sm font-medium truncate">{name}</span>
+                    <button
+                      type="button"
+                      aria-label={`Remove ${name}`}
+                      onClick={() => removeAccount(l.accountId)}
+                      className="text-muted-foreground hover:text-destructive shrink-0"
+                    >
+                      <X className="h-3.5 w-3.5" />
+                    </button>
+                  </div>
+                  <div className="mt-1.5 flex items-center gap-2">
+                    <span className="text-xs text-muted-foreground shrink-0">Counts</span>
+                    <Select
+                      items={ALLOCATION_LABELS}
+                      value={l.kind}
+                      onValueChange={(v) => {
+                        const kind: AllocationChoice = v === "amount" || v === "percent" ? v : "whole";
+                        updateLink(l.accountId, { kind, value: kind === l.kind ? l.value : "" });
+                      }}
+                    >
+                      <SelectTrigger className="h-8 w-[9.5rem]" aria-label={`How much of ${name} this goal counts`}><SelectValue /></SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="whole">Whole account</SelectItem>
+                        <SelectItem value="amount">Amount</SelectItem>
+                        <SelectItem value="percent">Percent</SelectItem>
+                      </SelectContent>
+                    </Select>
+                    {l.kind !== "whole" && (
+                      <div className="flex items-center gap-1 min-w-0 flex-1">
+                        <Input
+                          type="number"
+                          step={l.kind === "percent" ? "1" : "0.01"}
+                          min="0"
+                          max={l.kind === "percent" ? "100" : undefined}
+                          className="h-8 min-w-0"
+                          aria-label={l.kind === "percent" ? `Percent of ${name}` : `Amount of ${name}`}
+                          value={l.value}
+                          onChange={(e) => updateLink(l.accountId, { value: e.target.value })}
+                        />
+                        <span className="text-xs text-muted-foreground shrink-0">
+                          {l.kind === "percent" ? "%" : form.currency || displayCurrency}
+                        </span>
+                      </div>
+                    )}
+                  </div>
+                  {err && <p className="text-xs text-destructive mt-1">{err}</p>}
+                  {c && (
+                    <p className={`text-xs mt-1 ${c.overAllocated ? "text-amber-600 dark:text-amber-400" : "text-muted-foreground"}`}>
+                      {c.overAllocated
+                        ? `${overAllocationText(c)} (${c.goalCount} goal${c.goalCount === 1 ? "" : "s"})`
+                        : `Balance ${formatCurrency(c.accountBalance, c.accountCurrency)} · not counted by any goal: ${formatCurrency(Math.max(c.unallocated, 0), c.accountCurrency)}`}
+                    </p>
+                  )}
+                </div>
               );
             })}
           </div>
@@ -343,7 +499,7 @@ function GoalEditForm({
             (a) => Number(a.value),
             (a, z) => (a.label ?? "").localeCompare(z.label ?? ""),
           )}
-          placeholder={form.accountIds.length === 0 ? "Add an account…" : "Add another…"}
+          placeholder={form.links.length === 0 ? "Add an account…" : "Add another…"}
           searchPlaceholder="Search accounts…"
           emptyMessage="No matches"
           className="w-full"
@@ -353,6 +509,7 @@ function GoalEditForm({
           {form.progressMode === "growth"
             ? "Growth is measured across every linked account, from their balance the day before the start date."
             : "Goal progress sums transactions across every linked account. Leave empty for manual tracking."}
+          {form.links.length > 0 && " When goals share an account, count an amount or a percent of it so its money isn't counted twice."}
         </p>
       </div>
       <div>
@@ -428,6 +585,10 @@ export default function GoalsPage() {
   const totalTarget = active.reduce((s, g) => s + (g.targetAmountDisplay ?? g.targetAmount), 0);
   const totalCurrent = active.reduce((s, g) => s + (g.currentAmountDisplay ?? g.currentAmount), 0);
   const hasForeignGoal = active.some((g) => g.currency && g.currency !== displayCurrency);
+  // GH #462: per account, what the active goals claim of it; warn when more
+  // than it holds (a warning only: a balance can drop below the claims).
+  const claims = accountClaimViews(goals);
+  const overAllocated = [...claims.values()].filter((c) => c.overAllocated);
 
   if (loading) return <PageSkeleton variant="cards" rows={3} />;
   if (loadError) return <ErrorState title="Couldn't load goals" message="We couldn't load your goals. Please try again." onRetry={() => { setLoading(true); load(); }} />;
@@ -441,13 +602,14 @@ export default function GoalsPage() {
         </div>
         <Dialog open={addOpen} onOpenChange={(o) => { setAddOpen(o); if (!o) setSeedForm(emptyForm(displayCurrency)); }}>
           <DialogTrigger render={<Button />}><Plus className="h-4 w-4 mr-1" /> Add Goal</DialogTrigger>
-          <DialogContent>
+          <DialogContent className="sm:max-w-lg">
             <DialogHeader><DialogTitle>New Financial Goal</DialogTitle></DialogHeader>
             <GoalEditForm
               mode="add"
               initial={seedForm}
               accounts={accounts}
               displayCurrency={displayCurrency}
+              claims={claims}
               onSave={() => { setAddOpen(false); setSeedForm(emptyForm(displayCurrency)); load(); }}
               onCancel={() => { setAddOpen(false); setSeedForm(emptyForm(displayCurrency)); }}
             />
@@ -457,7 +619,7 @@ export default function GoalsPage() {
 
       {/* Edit dialog — issue #130 */}
       <Dialog open={editGoal !== null} onOpenChange={(o) => { if (!o) setEditGoal(null); }}>
-        <DialogContent>
+        <DialogContent className="sm:max-w-lg">
           <DialogHeader><DialogTitle>Edit Goal</DialogTitle></DialogHeader>
           {editGoal && (
             <GoalEditForm
@@ -466,6 +628,7 @@ export default function GoalsPage() {
               initial={goalToForm(editGoal, displayCurrency)}
               accounts={accounts}
               displayCurrency={displayCurrency}
+              claims={claims}
               onSave={() => { setEditGoal(null); load(); }}
               onCancel={() => setEditGoal(null)}
             />
@@ -511,6 +674,26 @@ export default function GoalsPage() {
               </div>
             </CardContent>
           </Card>
+        </div>
+      )}
+
+      {/* GH #462: over-allocated accounts */}
+      {overAllocated.length > 0 && (
+        <div role="status" className="rounded-lg border border-amber-300 bg-amber-50 px-4 py-3 text-sm text-amber-900 dark:border-amber-900/60 dark:bg-amber-950/30 dark:text-amber-200">
+          <div className="flex items-start gap-2">
+            <AlertTriangle className="h-4 w-4 mt-0.5 shrink-0" />
+            <div className="space-y-1">
+              <p className="font-medium">Some accounts are counted by goals for more than they hold</p>
+              <ul className="space-y-0.5">
+                {overAllocated.map((c) => (
+                  <li key={c.accountId}>{overAllocationText(c)}</li>
+                ))}
+              </ul>
+              <p className="text-xs opacity-80">
+                Edit a goal and set how much of the account it counts (an amount or a percent) so the money isn&apos;t counted twice.
+              </p>
+            </div>
+          </div>
         </div>
       )}
 
@@ -578,10 +761,21 @@ export default function GoalsPage() {
                       {g.currency && g.currency !== displayCurrency && (
                         <Badge variant="outline" className="font-mono text-xs">{g.currency}</Badge>
                       )}
-                      {/* Issue #130 — render every linked account as its own chip. */}
-                      {(g.accounts ?? []).filter((n) => n).map((name, i) => (
-                        <Badge key={`${g.accountIds[i] ?? i}`} variant="secondary">{name}</Badge>
-                      ))}
+                      {/* Issue #130 — every linked account as its own chip; GH #462 — with its allocation. */}
+                      {g.accountLinks
+                        ? g.accountLinks.map((l) => (
+                            <Badge
+                              key={l.accountId}
+                              variant="secondary"
+                              className={l.claims?.overAllocated ? "ring-1 ring-amber-400 dark:ring-amber-700" : undefined}
+                              title={l.claims?.overAllocated ? "Goals count more of this account than it holds" : undefined}
+                            >
+                              {linkLabel(l, g.currency || displayCurrency)}
+                            </Badge>
+                          ))
+                        : (g.accounts ?? []).filter((n) => n).map((name, i) => (
+                            <Badge key={`${g.accountIds[i] ?? i}`} variant="secondary">{name}</Badge>
+                          ))}
                       {g.deadline && (
                         <Badge variant="outline" className="gap-1">
                           <Calendar className="h-3 w-3" />

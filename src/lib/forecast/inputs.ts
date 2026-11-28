@@ -56,7 +56,9 @@ export async function loadForecastInputs(
       if (l.interestCategoryId != null) coveredByLoan.add(l.interestCategoryId);
     }
   }
-  const [budgets, rules] = await Promise.all([loadBudgetsByMonth(ctx, startMonth, endMonth), loadRules(userId)]);
+  // From THIS month, so the page can tell a line budgeted for this month only
+  // (the forecast starts next month and does not carry it; GH #463).
+  const [budgets, rules] = await Promise.all([loadBudgetsByMonth(ctx, ctx.currentMonth, endMonth), loadRules(userId)]);
   const ruleKeys = new Set(rulesByLine(rules).keys());
 
   const incomeLines: ForecastLineDef[] = [];
@@ -68,7 +70,7 @@ export async function loadForecastInputs(
     const gs = c.type === "E" ? ctx.groupSettings.get(c.group) : undefined;
     if (c.excluded || gs?.excluded) continue;
     if (coveredByLoan.has(c.id)) {
-      if (budgets.categories.has(c.id)) {
+      if (Object.keys(budgets.categories.get(c.id) ?? {}).some((m) => m >= startMonth)) {
         leftOut.push({ key: categoryKey(c.id), label: c.name, reason: "Loan interest: the loan payment already includes it, so its budget is not counted again." });
       }
       continue;
@@ -106,6 +108,12 @@ export async function loadForecastInputs(
     if (Object.keys(monthsIn).length === 0 && carryFrom == null) return null;
     return { months: monthsIn, carryFrom, carryAmount };
   };
+  const currentMonthBudget: Record<string, number> = {};
+  for (const l of [...incomeLines, ...allExpense]) {
+    const byMonth = l.key.startsWith("g:") ? budgets.groups.get(l.group) : budgets.categories.get(Number(l.key.slice(2)));
+    const now = byMonth?.[ctx.currentMonth];
+    if (now != null && now !== 0) currentMonthBudget[l.key] = now;
+  }
   for (const l of [...incomeLines, ...allExpense]) {
     const s = l.key.startsWith("g:")
       ? seriesFor(l.key, budgets.groups.get(l.group))
@@ -275,6 +283,7 @@ export async function loadForecastInputs(
     budgetHorizonEnd,
     lines: [...incomeLines, ...allExpense, ...debtLines],
     budget,
+    currentMonthBudget,
     historyMonths,
     history,
     pastBudget,

@@ -104,6 +104,21 @@ const QuantityConditionBetween = z.object({
   max: z.number(),
 });
 
+// GH #464 — the bank's merchant category code (ISO 18245, 4 digits). Plain
+// text, so its `.value` is NOT encrypted by rules/crypto.ts. `is` = one code,
+// `starts_with` = a prefix ("581" covers 5811-5814), `in` = a list of codes
+// separated by commas or spaces.
+const MerchantCategoryCodeCondition = z.object({
+  field: z.literal("merchant_category_code"),
+  op: z.enum(["is", "starts_with", "in"]),
+  value: z
+    .string()
+    .trim()
+    .min(1)
+    .max(500)
+    .regex(/^[\d\s,;]+$/, "Merchant category codes are digits"),
+});
+
 // FINLYNQ-84 cycle 2 (2026-05-21): Zod v4 rejects discriminatedUnion when
 // two branches share a discriminator value. The original schema had
 // `field: "amount"` ×2 (single + between) and `field: "date"` ×3 (weekday +
@@ -126,6 +141,7 @@ export const Condition = z.union([
   SecurityNameCondition,
   QuantityConditionSingle,
   QuantityConditionBetween,
+  MerchantCategoryCodeCondition,
 ]);
 export type Condition = z.infer<typeof Condition>;
 
@@ -258,6 +274,7 @@ export const CONDITION_DEFAULTS: {
   ticker: () => Extract<Condition, { field: "ticker" }>;
   security_name: () => Extract<Condition, { field: "security_name" }>;
   quantity: () => Extract<Condition, { field: "quantity" }>;
+  merchant_category_code: () => Extract<Condition, { field: "merchant_category_code" }>;
 } = {
   payee: () => ({ field: "payee", op: "contains", value: "" }),
   note: () => ({ field: "note", op: "contains", value: "" }),
@@ -269,6 +286,7 @@ export const CONDITION_DEFAULTS: {
   ticker: () => ({ field: "ticker", op: "contains", value: "" }),
   security_name: () => ({ field: "security_name", op: "contains", value: "" }),
   quantity: () => ({ field: "quantity", op: "gt", value: 0 }),
+  merchant_category_code: () => ({ field: "merchant_category_code", op: "is", value: "" }),
 };
 
 /** Build a fully-typed default `Condition` when the editor switches `field`. */

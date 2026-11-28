@@ -21,6 +21,9 @@ import {
   FileSpreadsheet,
   Database,
   Bot,
+  Landmark,
+  ArrowRightLeft,
+  Tags,
   Target,
   Terminal,
   Copy,
@@ -38,8 +41,8 @@ type Step =
   | "welcome"
   | "currency"
   | "accounts"
+  | "categories"
   | "data"
-  | "budget"
   | "mcp"
   | "done";
 
@@ -47,8 +50,8 @@ const STEPS: Step[] = [
   "welcome",
   "currency",
   "accounts",
+  "categories",
   "data",
-  "budget",
   "mcp",
   "done",
 ];
@@ -57,10 +60,36 @@ const STEP_LABELS: Record<Step, string> = {
   welcome: "Welcome",
   currency: "Currency",
   accounts: "Accounts",
-  data: "Import",
-  budget: "Budget",
+  categories: "Categories",
+  data: "Transactions",
   mcp: "Connect AI",
   done: "All set",
+};
+
+type DataChoice = "feed" | "import" | "migrate" | "skip";
+
+/** Where the "All set" button sends the user for each way of starting. */
+const DATA_DESTINATIONS: Record<DataChoice, { href: string | null; label: string; note: string }> = {
+  feed: {
+    href: "/settings/bank-feeds",
+    label: "Connect my bank",
+    note: "Next, connect your bank through SimpleFIN. New transactions will come in on their own.",
+  },
+  import: {
+    href: "/import",
+    label: "Go to Import",
+    note: "Next, upload a statement from your bank. You'll review the rows before anything is saved.",
+  },
+  migrate: {
+    href: "/settings/import?tab=migrate",
+    label: "Move my data",
+    note: "Next, bring your history over from the app you used before.",
+  },
+  skip: {
+    href: null,
+    label: "Go to Dashboard",
+    note: "Your account is ready. Add transactions whenever you like, or import a statement later.",
+  },
 };
 
 const ACCOUNT_PRESETS = [
@@ -73,13 +102,31 @@ const ACCOUNT_PRESETS = [
   { name: "Investment Account", type: "A", group: "Investments", icon: TrendingUp, isInvestment: true },
 ] as const;
 
-const BUDGET_PRESETS = [
-  { category: "Groceries", amount: 600 },
-  { category: "Dining Out", amount: 300 },
-  { category: "Transportation", amount: 200 },
-  { category: "Entertainment", amount: 150 },
-  { category: "Utilities", amount: 150 },
+// A new account starts with no categories at all, so the wizard offers a
+// small starter set. "Dividends" must be spelled exactly that: the dividend
+// report finds the category by name.
+const STARTER_CATEGORIES: Array<{ type: "I" | "E"; group: string; name: string }> = [
+  { type: "I", group: "Income", name: "Salary" },
+  { type: "I", group: "Income", name: "Interest" },
+  { type: "I", group: "Income", name: "Dividends" },
+  { type: "I", group: "Income", name: "Other income" },
+  { type: "E", group: "Housing", name: "Rent or mortgage" },
+  { type: "E", group: "Housing", name: "Utilities" },
+  { type: "E", group: "Housing", name: "Internet and phone" },
+  { type: "E", group: "Food", name: "Groceries" },
+  { type: "E", group: "Food", name: "Dining out" },
+  { type: "E", group: "Transport", name: "Transportation" },
+  { type: "E", group: "Lifestyle", name: "Entertainment" },
+  { type: "E", group: "Lifestyle", name: "Shopping" },
+  { type: "E", group: "Lifestyle", name: "Subscriptions" },
+  { type: "E", group: "Health", name: "Health and fitness" },
+  { type: "E", group: "Other", name: "Gifts" },
+  { type: "E", group: "Other", name: "Other" },
 ];
+
+// Optional monthly budgets, left blank: a fixed amount means something
+// different in every currency, so the user types their own or skips.
+const BUDGET_CATEGORIES = ["Groceries", "Dining out", "Transportation", "Entertainment", "Utilities"];
 
 const slideVariants = {
   enter: (d: number) => ({ x: d > 0 ? 80 : -80, opacity: 0 }),
@@ -89,7 +136,7 @@ const slideVariants = {
 
 export function OnboardingWizard({
   userEmail,
-  displayName: _displayName,
+  displayName,
   onComplete,
 }: OnboardingWizardProps) {
   const [step, setStep] = useState<Step>("welcome");
@@ -109,10 +156,9 @@ export function OnboardingWizard({
   const { setDisplayCurrency: persistDisplayCurrency } = useDisplayCurrency();
   const currencyOptions = useDisplayCurrencyOptions(currency);
   const [selectedAccounts, setSelectedAccounts] = useState<number[]>([0]);
-  const [dataChoice, setDataChoice] = useState<"demo" | "import" | "skip">("import");
-  const [budgetAmounts, setBudgetAmounts] = useState<Record<string, number>>(
-    Object.fromEntries(BUDGET_PRESETS.map((p) => [p.category, p.amount]))
-  );
+  const [dataChoice, setDataChoice] = useState<DataChoice>("import");
+  const [addStarterCategories, setAddStarterCategories] = useState(true);
+  const [budgetAmounts, setBudgetAmounts] = useState<Record<string, string>>({});
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const [copied, setCopied] = useState(false);
@@ -166,31 +212,45 @@ export function OnboardingWizard({
     setError("");
 
     try {
-      // Create selected accounts
-      for (const idx of selectedAccounts) {
-        const preset = ACCOUNT_PRESETS[idx];
-        await fetch("/api/accounts", {
+      // A 409 means the name already exists (e.g. Finish was pressed again
+      // after an earlier attempt failed part-way), which is fine.
+      const postOk = async (url: string, body: unknown) => {
+        const res = await fetch(url, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ name: preset.name, type: preset.type, group: preset.group, currency, isInvestment: preset.isInvestment }),
+          body: JSON.stringify(body),
         });
-      }
+        return res.ok || res.status === 409;
+      };
 
-      // Create budgets for current month
-      const month = new Date().toISOString().slice(0, 7); // YYYY-MM
-      for (const [categoryName, amount] of Object.entries(budgetAmounts)) {
-        if (amount > 0) {
-          await fetch("/api/budgets/seed", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ categoryName, amount, month }),
-          }).catch(() => {/* ignore */});
+      // Categories first, so the budgets below attach to them.
+      if (addStarterCategories) {
+        for (const c of STARTER_CATEGORIES) {
+          if (!(await postOk("/api/categories", c))) {
+            throw new Error("Could not create your categories.");
+          }
         }
       }
 
-      // Load demo data if selected
-      if (dataChoice === "demo") {
-        await fetch("/api/onboarding/sample-data", { method: "POST" });
+      for (const idx of selectedAccounts) {
+        const preset = ACCOUNT_PRESETS[idx];
+        const ok = await postOk("/api/accounts", {
+          name: preset.name,
+          type: preset.type,
+          group: preset.group,
+          currency,
+          isInvestment: preset.isInvestment,
+        });
+        if (!ok) throw new Error(`Could not create "${preset.name}".`);
+      }
+
+      // Budgets for the current month, only for the amounts the user typed.
+      const month = new Date().toISOString().slice(0, 7); // YYYY-MM
+      for (const categoryName of BUDGET_CATEGORIES) {
+        const amount = Number(budgetAmounts[categoryName]);
+        if (Number.isFinite(amount) && amount > 0) {
+          await postOk("/api/budgets/seed", { categoryName, amount, month }).catch(() => false);
+        }
       }
 
       // Persist the chosen display currency to settings.display_currency
@@ -213,8 +273,10 @@ export function OnboardingWizard({
       await fetch("/api/onboarding/complete", { method: "POST" });
 
       setStep("done");
-    } catch {
-      setError("Something went wrong. Please try again.");
+    } catch (e) {
+      setError(
+        `${e instanceof Error && e.message ? e.message + " " : ""}Something went wrong. Please try again.`,
+      );
     } finally {
       setLoading(false);
     }
@@ -229,7 +291,7 @@ export function OnboardingWizard({
       <motion.div
         initial={{ opacity: 0, scale: 0.95, y: 20 }}
         animate={{ opacity: 1, scale: 1, y: 0 }}
-        className="w-full max-w-lg mx-4 rounded-2xl border bg-card shadow-2xl overflow-hidden"
+        className="w-full max-w-lg mx-4 max-h-[92vh] overflow-y-auto rounded-2xl border bg-card shadow-2xl"
       >
         {/* Progress */}
         <div className="flex gap-1 px-6 pt-6">
@@ -275,25 +337,29 @@ export function OnboardingWizard({
                   </motion.div>
                   <h2 className="text-2xl font-bold mb-2">Welcome to Finlynq</h2>
                   <p className="text-muted-foreground max-w-sm mb-4">
-                    Let&apos;s get you set up in 6 steps. You&apos;ll be tracking your finances and
-                    querying them with your AI in under 10 minutes.
+                    A few quick questions and you&apos;re ready: your currency, your accounts,
+                    some categories, and how to bring in your transactions.
                   </p>
-                  <p className="text-xs text-muted-foreground">Signed in as {userEmail}</p>
+                  {(displayName || userEmail) && (
+                    <p className="text-xs text-muted-foreground">
+                      Signed in as {displayName || userEmail}
+                    </p>
+                  )}
 
-                  <div className="flex items-center gap-6 mt-6 text-sm text-muted-foreground">
+                  <div className="flex items-center gap-4 sm:gap-6 mt-6 text-sm text-muted-foreground">
                     <div className="flex flex-col items-center gap-1.5">
                       <Wallet className="h-5 w-5" />
                       <span>Accounts</span>
                     </div>
                     <div className="text-muted-foreground/30">→</div>
                     <div className="flex flex-col items-center gap-1.5">
-                      <Upload className="h-5 w-5" />
-                      <span>Import</span>
+                      <Tags className="h-5 w-5" />
+                      <span>Categories</span>
                     </div>
                     <div className="text-muted-foreground/30">→</div>
                     <div className="flex flex-col items-center gap-1.5">
-                      <Target className="h-5 w-5" />
-                      <span>Budget</span>
+                      <Upload className="h-5 w-5" />
+                      <span>Transactions</span>
                     </div>
                     <div className="text-muted-foreground/30">→</div>
                     <div className="flex flex-col items-center gap-1.5">
@@ -396,41 +462,127 @@ export function OnboardingWizard({
                 </div>
               )}
 
-              {/* ─── Data ────────────────────────────────── */}
+              {/* ─── Categories ──────────────────────────── */}
+              {step === "categories" && (
+                <div className="flex-1 flex flex-col py-6 gap-4">
+                  <div className="flex items-center gap-3 mb-1">
+                    <Tags className="h-6 w-6 text-muted-foreground" />
+                    <h2 className="text-lg font-semibold">Categories</h2>
+                  </div>
+                  <p className="text-sm text-muted-foreground">
+                    Categories sort your income and spending. Start with this set, then
+                    rename, merge or add your own anytime.
+                  </p>
+
+                  <label className="flex items-start gap-3 rounded-xl border-2 border-muted p-3.5 cursor-pointer transition-all hover:border-foreground/30">
+                    <input
+                      type="checkbox"
+                      checked={addStarterCategories}
+                      onChange={(e) => setAddStarterCategories(e.target.checked)}
+                      className="mt-0.5 h-4 w-4 shrink-0 accent-foreground"
+                    />
+                    <span className="text-sm">
+                      <span className="font-medium">Add starter categories</span>
+                      <span className="mt-2 flex flex-wrap gap-1.5">
+                        {STARTER_CATEGORIES.map((c) => (
+                          <span
+                            key={c.name}
+                            className={`rounded-full border px-2 py-0.5 text-xs ${
+                              c.type === "I"
+                                ? "border-emerald-500/40 text-emerald-700 dark:text-emerald-400"
+                                : "text-muted-foreground"
+                            }`}
+                          >
+                            {c.name}
+                          </span>
+                        ))}
+                      </span>
+                    </span>
+                  </label>
+
+                  <div>
+                    <div className="flex items-center gap-2 mb-1">
+                      <Target className="h-4 w-4 text-muted-foreground" />
+                      <p className="text-sm font-medium">Monthly budgets (optional)</p>
+                    </div>
+                    <p className="text-xs text-muted-foreground mb-3">
+                      Type an amount in {currency} for any you want to track this month, or
+                      leave them blank. You can set budgets later on the Budgets page.
+                    </p>
+                    <div className="space-y-2">
+                      {BUDGET_CATEGORIES.map((category) => (
+                        <div key={category} className="flex items-center gap-3">
+                          <span className="w-32 text-sm shrink-0">{category}</span>
+                          <div className="relative flex-1">
+                            <span className="absolute left-3 top-1/2 -translate-y-1/2 text-sm text-muted-foreground">
+                              {currencySymbol}
+                            </span>
+                            <input
+                              type="number"
+                              inputMode="decimal"
+                              min={0}
+                              step="any"
+                              placeholder="No budget"
+                              aria-label={`${category} monthly budget`}
+                              value={budgetAmounts[category] ?? ""}
+                              onChange={(e) =>
+                                setBudgetAmounts((prev) => ({
+                                  ...prev,
+                                  [category]: e.target.value,
+                                }))
+                              }
+                              className={`w-full rounded-lg border bg-background ${amountPadding} pr-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-foreground/20`}
+                            />
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              {/* ─── Transactions ───────────────────────────── */}
               {step === "data" && (
                 <div className="flex-1 flex flex-col py-6 gap-4">
                   <div className="flex items-center gap-3 mb-1">
                     <Database className="h-6 w-6 text-muted-foreground" />
-                    <h2 className="text-lg font-semibold">Import your data</h2>
+                    <h2 className="text-lg font-semibold">Bring in your transactions</h2>
                   </div>
                   <p className="text-sm text-muted-foreground">
-                    How would you like to start?
+                    How would you like to start? You can use any of these later too.
                   </p>
-                  <div className="space-y-3 mt-2">
+                  <div className="space-y-2.5 mt-1">
                     {[
+                      {
+                        key: "feed" as const,
+                        icon: Landmark,
+                        label: "Connect my bank",
+                        desc: "New transactions arrive on their own through SimpleFIN, which works with many US and Canadian banks.",
+                      },
                       {
                         key: "import" as const,
                         icon: FileSpreadsheet,
-                        label: "Import from my bank",
-                        desc: "Upload a CSV or OFX file — takes about 2 minutes",
+                        label: "Upload a statement",
+                        desc: "A CSV, OFX, QFX, Excel or PDF file from your bank's website.",
                       },
                       {
-                        key: "demo" as const,
-                        icon: Sparkles,
-                        label: "Load sample data",
-                        desc: "3 months of realistic transactions to explore features",
+                        key: "migrate" as const,
+                        icon: ArrowRightLeft,
+                        label: "Move from another app",
+                        desc: "Bring your history over from Money Pro, WealthPosition, Interactive Brokers or a spreadsheet.",
                       },
                       {
                         key: "skip" as const,
                         icon: ArrowRight,
                         label: "Start from scratch",
-                        desc: "Add transactions manually, import later",
+                        desc: "Add transactions yourself, or ask your AI assistant to record them.",
                       },
                     ].map(({ key, icon: Icon, label, desc }) => (
                       <button
                         key={key}
+                        type="button"
                         onClick={() => setDataChoice(key)}
-                        className={`flex items-start gap-3 w-full rounded-xl border-2 p-4 text-left transition-all ${
+                        className={`flex items-start gap-3 w-full rounded-xl border-2 p-3.5 text-left transition-all ${
                           dataChoice === key
                             ? "border-foreground bg-foreground/5"
                             : "border-muted hover:border-foreground/30"
@@ -447,46 +599,10 @@ export function OnboardingWizard({
                       </button>
                     ))}
                   </div>
-                </div>
-              )}
-
-              {/* ─── Budget ───────────────────────────────── */}
-              {step === "budget" && (
-                <div className="flex-1 flex flex-col py-6 gap-4">
-                  <div className="flex items-center gap-3 mb-1">
-                    <Target className="h-6 w-6 text-muted-foreground" />
-                    <h2 className="text-lg font-semibold">Set a starter budget</h2>
-                  </div>
-                  <p className="text-sm text-muted-foreground">
-                    Adjust these monthly amounts to match your spending. You can fine-tune anytime.
-                  </p>
-                  <div className="space-y-3 mt-1">
-                    {BUDGET_PRESETS.map(({ category }) => (
-                      <div key={category} className="flex items-center gap-3">
-                        <span className="w-36 text-sm font-medium shrink-0">{category}</span>
-                        <div className="relative flex-1">
-                          <span className="absolute left-3 top-1/2 -translate-y-1/2 text-sm text-muted-foreground">
-                            {currencySymbol}
-                          </span>
-                          <input
-                            type="number"
-                            min={0}
-                            step={10}
-                            value={budgetAmounts[category]}
-                            onChange={(e) =>
-                              setBudgetAmounts((prev) => ({
-                                ...prev,
-                                [category]: Number(e.target.value),
-                              }))
-                            }
-                            className={`w-full rounded-lg border bg-background ${amountPadding} pr-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-foreground/20`}
-                          />
-                        </div>
-                      </div>
-                    ))}
-                  </div>
                   <p className="text-xs text-muted-foreground">
-                    These budgets will be created for the current month.
+                    Want to look around with sample data first? Sign out and choose{" "}
+                    <span className="font-medium text-foreground">One-click demo</span> on the
+                    sign-in page. The demo resets every night.
                   </p>
                 </div>
               )}
@@ -499,20 +615,21 @@ export function OnboardingWizard({
                     <h2 className="text-lg font-semibold">Connect your AI assistant</h2>
                   </div>
                   <p className="text-sm text-muted-foreground">
-                    The MCP server lets Claude, Cursor, or any AI client query your financial data
-                    using natural language — no manual exports needed.
+                    Ask Claude, ChatGPT, Gemini or another AI assistant about your money, and
+                    have it record transactions for you. You sign in to Finlynq once to allow it.
                   </p>
 
                   <div className="rounded-xl border bg-muted/40 p-4 space-y-3">
                     <div className="flex items-center gap-2 text-xs font-medium text-muted-foreground uppercase tracking-wider">
                       <Terminal className="h-3.5 w-3.5" />
-                      MCP Server URL
+                      Server URL
                     </div>
                     <div className="flex items-center gap-2">
                       <code className="flex-1 rounded-lg bg-background border px-3 py-2 text-sm font-mono truncate">
                         {mcpUrl}
                       </code>
                       <button
+                        type="button"
                         onClick={copyMcpUrl}
                         className="flex items-center gap-1.5 rounded-lg border px-3 py-2 text-sm hover:bg-muted transition-colors shrink-0"
                       >
@@ -527,19 +644,36 @@ export function OnboardingWizard({
                   </div>
 
                   <div className="space-y-2">
-                    <p className="text-xs font-medium text-muted-foreground">Quick setup:</p>
-                    <ol className="text-sm text-muted-foreground space-y-1.5 list-decimal list-inside">
-                      <li>Copy the URL above</li>
-                      <li>Open Claude Desktop → Settings → MCP Servers</li>
-                      <li>Add a new server with the URL</li>
-                      <li>Ask Claude anything about your finances!</li>
-                    </ol>
+                    <p className="text-xs font-medium text-muted-foreground">Where to paste it:</p>
+                    <ul className="text-sm text-muted-foreground space-y-1.5">
+                      <li>
+                        <span className="font-medium text-foreground">Claude:</span> Settings →
+                        Connectors → Add custom connector
+                      </li>
+                      <li>
+                        <span className="font-medium text-foreground">ChatGPT:</span> Settings →
+                        Apps → Advanced settings (turn on developer mode), then Create app
+                      </li>
+                      <li>
+                        <span className="font-medium text-foreground">Gemini:</span> Settings →
+                        Connected apps → Custom apps
+                      </li>
+                    </ul>
                   </div>
 
-                  <div className="flex items-center gap-2 text-xs text-muted-foreground">
-                    <span className="inline-flex h-5 w-5 items-center justify-center rounded-full bg-muted text-xs">?</span>
-                    Full setup guide for Cursor, Cline &amp; others on the MCP Guide page.
-                  </div>
+                  <p className="text-xs text-muted-foreground">
+                    Steps for Cursor, Gemini CLI and others are in the{" "}
+                    <a
+                      href="/connect"
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="font-medium text-foreground underline underline-offset-2"
+                    >
+                      connection guide
+                    </a>
+                    . You can skip this and connect later from the sidebar.
+                  </p>
+
                   {error && <p className="text-sm text-destructive">{error}</p>}
                 </div>
               )}
@@ -557,9 +691,7 @@ export function OnboardingWizard({
                   </motion.div>
                   <h2 className="text-2xl font-bold mb-2">You&apos;re all set!</h2>
                   <p className="text-muted-foreground max-w-sm">
-                    {dataChoice === "import"
-                      ? "Head to the Import page to upload your bank statement, then come back to see your data."
-                      : "Your account is ready. Head to the dashboard to start tracking your finances."}
+                    {DATA_DESTINATIONS[dataChoice].note}
                   </p>
                 </div>
               )}
@@ -583,23 +715,16 @@ export function OnboardingWizard({
             {step === "done" ? (
               <button
                 onClick={() => {
-                  if (dataChoice === "import") {
-                    window.location.href = "/import";
+                  const href = DATA_DESTINATIONS[dataChoice].href;
+                  if (href) {
+                    window.location.href = href;
                   } else {
                     onComplete();
                   }
                 }}
                 className="ml-auto flex items-center gap-2 rounded-lg bg-foreground px-5 py-2.5 text-sm font-medium text-background hover:opacity-90 transition-opacity"
               >
-                {dataChoice === "import" ? "Go to Import" : "Go to Dashboard"}
-                <ArrowRight className="h-4 w-4" />
-              </button>
-            ) : step === "budget" ? (
-              <button
-                onClick={goNext}
-                className="ml-auto flex items-center gap-2 rounded-lg bg-foreground px-5 py-2.5 text-sm font-medium text-background hover:opacity-90 transition-opacity"
-              >
-                Continue
+                {DATA_DESTINATIONS[dataChoice].label}
                 <ArrowRight className="h-4 w-4" />
               </button>
             ) : step === "mcp" ? (

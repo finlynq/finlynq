@@ -205,7 +205,7 @@ export function registerReadsTools(server: McpServer, ctx: PgToolContext) {
   // ── search_transactions ────────────────────────────────────────────────────
   server.tool(
     "search_transactions",
-    "Flexible transaction search with partial payee match, amount range, date range, category, and tags. Each row carries both entered (user-typed) and account (settlement) amounts; pass reportingCurrency to also include a converted reporting amount per row. For dedup workflows on blank-payee imports, pass `account_id` (FK fast-path) — a year of activity in one account easily exceeds the default 50-row limit, so raise `limit` accordingly. Each row includes `quantity` (nullable; positive for buys, negative for sells; null for cash-proxy and non-investment transactions).",
+    "Flexible transaction search with partial payee match, amount range, date range, category, and tags. Each row carries both entered (user-typed) and account (settlement) amounts; pass reportingCurrency to also include a converted reporting amount per row. For dedup workflows on blank-payee imports, pass `account_id` (FK fast-path) — a year of activity in one account easily exceeds the default 50-row limit, so raise `limit` accordingly. Each row includes `quantity` (nullable; positive for buys, negative for sells; null for cash-proxy and non-investment transactions) and `merchant_category_code` (the bank's 4-digit merchant category code, or null).",
     {
       payee: z.string().optional().describe("Partial payee/merchant name match"),
       min_amount: z.number().optional().describe("Minimum amount"),
@@ -217,10 +217,11 @@ export function registerReadsTools(server: McpServer, ctx: PgToolContext) {
       account_id: z.number().int().optional().describe("Filter to transactions in this accounts.id (FK fast-path; useful for dedup against blank-payee bank-imported transfers where text search misses)."),
       portfolio_holding_id: z.number().int().optional().describe("Filter to transactions bound to this portfolio_holdings.id (FK fast-path; cheaper than substring search)"),
       external_id: z.string().optional().describe("Exact match on the id another system gave the charge (set through manage_transactions)."),
+      merchant_category_code: z.string().regex(/^\d{4}$/).optional().describe("Exact match on the bank's 4-digit merchant category code (e.g. 5812 restaurants)."),
       limit: z.number().optional().describe("Max results (default 50)"),
       reportingCurrency: z.string().optional().describe("ISO code; if set, each row gets a reportingAmount converted to this currency. Defaults to user's display currency."),
     },
-    async ({ payee, min_amount, max_amount, start_date, end_date, category, tags, account_id, portfolio_holding_id, external_id, limit, reportingCurrency }) => {
+    async ({ payee, min_amount, max_amount, start_date, end_date, category, tags, account_id, portfolio_holding_id, external_id, merchant_category_code, limit, reportingCurrency }) => {
       const lim = limit ?? 50;
       // Push amount/date/category to SQL; payee/tags filter must happen in memory
       // after decryption when the data is encrypted. Fetch a larger window then
@@ -241,12 +242,14 @@ export function registerReadsTools(server: McpServer, ctx: PgToolContext) {
                c.name_ct AS category_ct, c.type AS category_type,
                t.currency, t.amount, t.entered_currency, t.entered_amount, t.entered_fx_rate,
                t.payee, t.note, t.tags, t.portfolio_holding_id, t.quantity,
-               t.created_at, t.updated_at, t.source, t.external_id
+               t.created_at, t.updated_at, t.source, t.external_id,
+               t.merchant_category_code
         FROM transactions t
         LEFT JOIN accounts a ON t.account_id = a.id
         LEFT JOIN categories c ON t.category_id = c.id
         WHERE t.user_id = ${userId}
           ${external_id ? sql`AND t.external_id = ${external_id.trim()}` : sql``}
+          ${merchant_category_code ? sql`AND t.merchant_category_code = ${merchant_category_code}` : sql``}
           ${min_amount !== undefined ? sql`AND t.amount >= ${min_amount}` : sql``}
           ${max_amount !== undefined ? sql`AND t.amount <= ${max_amount}` : sql``}
           ${start_date ? sql`AND t.date >= ${start_date}` : sql``}

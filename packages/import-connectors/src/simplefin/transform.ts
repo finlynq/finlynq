@@ -147,6 +147,21 @@ function parseAmount(raw: string | number): number {
 }
 
 /**
+ * GH #464 — a merchant category code as stored: exactly four digits, with
+ * `0000` (what some banks send for "none", e.g. on card payments) treated as
+ * none. COPY of `normalizeMerchantCategoryCode` in
+ * pf-app/src/lib/transactions/merchant-category-code.ts — this package is
+ * zero-dependency and can't import it. Keep the two in sync.
+ */
+export function normalizeMerchantCategoryCode(raw: unknown): string | null {
+  if (raw == null) return null;
+  const s = String(raw).trim();
+  if (!/^\d{4}$/.test(s)) return null;
+  if (s === "0000") return null;
+  return s;
+}
+
+/**
  * True when a transaction is pending / not-yet-posted.
  *
  * The SimpleFIN standard puts this in the `pending` boolean — but some
@@ -221,10 +236,10 @@ export function simplefinToRawTransactions(
       const payee = (tx.payee || tx.description || "").trim();
       const memo = (tx.memo || "").trim();
       const note = memo && memo !== payee ? memo : undefined;
-      // Merchant category code → a `mcc:<code>` tag so auto-categorization rules
-      // can match on it (e.g. "tags contains mcc:5812" → Dining).
-      const mcc = (tx.mcc || "").trim();
-      const tags = mcc ? `mcc:${mcc}` : undefined;
+      // GH #464 — the merchant category code goes in its own field (stored in
+      // `merchant_category_code`), not a `mcc:<code>` tag. Rules still match
+      // `tags contains mcc:5812` through a virtual tag (auto-categorize.ts).
+      const merchantCategoryCode = normalizeMerchantCategoryCode(tx.mcc);
 
       rows.push({
         date,
@@ -233,8 +248,8 @@ export function simplefinToRawTransactions(
         payee,
         currency,
         note,
-        tags,
         fitId: tx.id,
+        ...(merchantCategoryCode ? { merchantCategoryCode } : {}),
       });
     }
 

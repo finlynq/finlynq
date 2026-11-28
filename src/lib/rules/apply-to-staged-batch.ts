@@ -310,6 +310,9 @@ export async function applyRulesToStagedBatch(
       accountId: null,
       enteredCurrency: row.enteredCurrency ?? null,
       date: row.date,
+      // GH #464 — merchant code for merchant_category_code conditions + the
+      // virtual `mcc:<code>` tag.
+      merchantCategoryCode: row.merchantCategoryCode ?? null,
     };
 
     const match = applyRules(probe, activeRules);

@@ -179,6 +179,10 @@ export const transactions = pgTable("transactions", {
   // tell it is already recorded. Plain text; at most one row per account
   // carries a given id (uq_transactions_external_id).
   externalId: text("external_id"),
+  // GH #464 — the card network's merchant category code (ISO 18245, 4 digits)
+  // the bank sent with the charge (SimpleFIN `mcc`). Plain text like fit_id;
+  // never part of import_hash. NULL when none was sent or the bank sent 0000.
+  merchantCategoryCode: text("merchant_category_code"),
   linkId: text("link_id"),
   // Issue #96 — multi-currency trade pair linker. Server-generated UUID
   // (NEVER accepted from client) that groups the cash leg + stock leg of a
@@ -833,7 +837,16 @@ export const goalAccounts = pgTable("goal_accounts", {
   userId: text("user_id").notNull(),
   goalId: integer("goal_id").notNull().references(() => goals.id, { onDelete: "cascade" }),
   accountId: integer("account_id").notNull().references(() => accounts.id, { onDelete: "cascade" }),
+  // GH #462 (2026-11-27): how much of the account this goal counts. NULL =
+  // the whole account (every link before this). 'amount' = up to
+  // allocation_value in the GOAL's currency; 'percent' = allocation_value %.
+  // Math: src/lib/goals/allocation.ts.
+  allocationKind: text("allocation_kind"),
+  allocationValue: doublePrecision("allocation_value"),
 }, (t) => [
+  check("goal_accounts_allocation_kind_check", sql`${t.allocationKind} IN ('amount','percent')`),
+  // Keep on one line with no trailing comma: tests/schema-check-parity.test.ts parses it as text.
+  check("goal_accounts_allocation_value_check", sql`(${t.allocationKind} IS NULL AND ${t.allocationValue} IS NULL) OR (${t.allocationKind} = 'amount' AND ${t.allocationValue} > 0) OR (${t.allocationKind} = 'percent' AND ${t.allocationValue} > 0 AND ${t.allocationValue} <= 100)`),
   // ON CONFLICT (goal_id, account_id, user_id) target — goals POST/PUT
   // re-point a goal's account set through an upsert. Without this the
   // upsert raises 42P10 on a db:push-built database.
@@ -1742,6 +1755,8 @@ export const stagedTransactions = pgTable("staged_transactions", {
   // OFX FITID — bank-supplied transaction id. Carried through staging so
   // dedup at approve time can match the same key the import-pipeline uses.
   fitId: text("fit_id"),
+  // GH #464 — merchant category code from the feed (plain text, 4 digits).
+  merchantCategoryCode: text("merchant_category_code"),
   // Transfer pairing (tx_type='R'):
   //   - peer_staged_id: when both legs are in staging (e.g. a brokerage CSV
   //     that includes both sides). Self-FK; DEFERRABLE INITIALLY DEFERRED
@@ -1915,6 +1930,9 @@ export const bankTransactions = pgTable("bank_transactions", {
   importHash: text("import_hash").notNull(),
   occurrenceIndex: integer("occurrence_index").notNull().default(0),
   fitId: text("fit_id"),
+  // GH #464 — merchant category code from the feed (plain text, 4 digits).
+  // Written on INSERT only, like the other content columns.
+  merchantCategoryCode: text("merchant_category_code"),
   date: text("date").notNull(), // YYYY-MM-DD, matches transactions.date
   amount: doublePrecision("amount").notNull(),
   currency: text("currency").notNull(),

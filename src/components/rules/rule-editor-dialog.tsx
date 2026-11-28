@@ -54,6 +54,7 @@ import {
 import { computePureActionPatch } from "@/lib/rules/execute";
 import type { Condition, Action, ConditionGroup } from "@/lib/rules/schema";
 import { defaultConditionForField, defaultActionForKind } from "@/lib/rules/schema";
+import { merchantCategoryName } from "@/lib/transactions/merchant-category-names";
 
 export type Category = { id: number; name: string; type: string; group: string };
 export type Account = { id: number; name: string };
@@ -110,6 +111,8 @@ export const CONDITION_FIELDS: Array<{ value: Condition["field"]; label: string 
   { value: "ticker", label: "Ticker" },
   { value: "security_name", label: "Security name" },
   { value: "quantity", label: "Quantity" },
+  // GH #464 — the bank's merchant category code (SimpleFIN).
+  { value: "merchant_category_code", label: "Merchant category code" },
 ];
 
 export const ACTION_KINDS: Array<{ value: Action["kind"]; label: string; sideEffect?: true }> = [
@@ -458,6 +461,28 @@ function ConditionRow({
             </SelectContent>
           </Select>
           <Input value={(cond as { value: string }).value ?? ""} onChange={(e) => onChange({ value: e.target.value } as Partial<Condition>)} className="flex-1" placeholder={cond.field === "ticker" ? "VTI" : ""} />
+        </>
+      )}
+
+      {cond.field === "merchant_category_code" && (
+        <>
+          <Select value={cond.op} onValueChange={(v) => onChange({ op: (v ?? "is") as "is" | "starts_with" | "in" } as Partial<Condition>)}>
+            <SelectTrigger className="w-32"><SelectValue /></SelectTrigger>
+            <SelectContent>
+              <SelectItem value="is">is</SelectItem>
+              <SelectItem value="starts_with">starts with</SelectItem>
+              <SelectItem value="in">is one of</SelectItem>
+            </SelectContent>
+          </Select>
+          <Input
+            value={cond.value ?? ""}
+            onChange={(e) => onChange({ value: e.target.value } as Partial<Condition>)}
+            className="flex-1 font-mono"
+            inputMode="numeric"
+            aria-label="Merchant category code"
+            placeholder={cond.op === "in" ? "5812, 5813, 5814" : cond.op === "starts_with" ? "581" : "5812"}
+            title={cond.op === "is" ? merchantCategoryName(cond.value.trim()) ?? undefined : undefined}
+          />
         </>
       )}
 

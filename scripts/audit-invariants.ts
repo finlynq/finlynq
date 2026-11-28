@@ -167,12 +167,6 @@ const BASELINE_EXCEPTIONS: Record<string, string> = {
   // validateSignVsCategory call here would be dead code.
   "mcp-server/tools-import-templates.ts:sign-vs-category":
     "INSERT hard-codes category_id = NULL — uncategorized rows are exempt by validator",
-  // sample-data onboarding seeds hand-curated rows with signs that match
-  // category type by construction (I=+, E=-). The bulk insert uses pre-built
-  // tuples; running validateSignVsCategoryById N times against in-memory data
-  // would be wasted I/O. Accepted as a baseline exception.
-  "src/app/api/onboarding/sample-data/route.ts:sign-vs-category":
-    "hand-curated fixtures with signs matching category type by construction",
   // register-core-tools.ts is the stdio MCP transport. Stream D Phase 4
   // refuses every write to the 6 encrypted tables (no DEK on stdio). The file
   // DEFINES its own SQLite-shape `fuzzyFind` for read-side cash-account
