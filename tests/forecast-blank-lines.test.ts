@@ -7,9 +7,9 @@
 import { describe, expect, it } from "vitest";
 import { readFileSync } from "node:fs";
 import {
-  blankNoteKeys,
+  areNotesDismissed,
   explainBlankLines,
-  isBlankNoteDismissed,
+  forecastNoteKeys,
   parseDismissedKeys,
 } from "@/lib/forecast/blank-lines";
 import { layerSchema } from "@/lib/forecast/config";
@@ -71,35 +71,57 @@ describe("banner wiring", () => {
   });
 });
 
-describe("dismissing the blank-lines note (GH #469)", () => {
-  const lines = [{ key: "c:1" }, { key: "c:2" }];
+describe("dismissing the Forecast notes strip (GH #469)", () => {
+  const blank = [{ key: "c:1" }, { key: "c:2" }];
+  const notes = [{ key: "warn:scheduled_excluded::1 category" }, { key: "left:c:9:covered" }];
 
-  it("stays dismissed while every blank line was dismissed", () => {
-    expect(isBlankNoteDismissed(lines, ["c:2", "c:1"])).toBe(true);
-    expect(isBlankNoteDismissed([{ key: "c:1" }], ["c:1", "c:2"])).toBe(true);
+  it("keys every note: blank lines plus warnings and left-out lines, once each", () => {
+    expect(forecastNoteKeys([...blank, { key: "c:1" }], notes)).toEqual([
+      "blank:c:1",
+      "blank:c:2",
+      "left:c:9:covered",
+      "warn:scheduled_excluded::1 category",
+    ]);
   });
 
-  it("comes back when a line that was not dismissed turns blank", () => {
-    expect(isBlankNoteDismissed([...lines, { key: "g:Food" }], ["c:1", "c:2"])).toBe(false);
+  it("hides the whole strip, warnings included, once everything shown was dismissed", () => {
+    const keys = forecastNoteKeys(blank, notes);
+    expect(areNotesDismissed(keys, keys)).toBe(true);
+    // A strip with only warnings (no blank lines) can be dismissed too.
+    const warnOnly = forecastNoteKeys([], notes);
+    expect(areNotesDismissed(warnOnly, warnOnly)).toBe(true);
   });
 
-  it("is never 'dismissed' with nothing blank, or nothing stored", () => {
-    expect(isBlankNoteDismissed([], ["c:1"])).toBe(false);
-    expect(isBlankNoteDismissed(lines, [])).toBe(false);
+  it("comes back when a new blank line, a new warning or a changed warning appears", () => {
+    const keys = forecastNoteKeys(blank, notes);
+    expect(areNotesDismissed(forecastNoteKeys([...blank, { key: "g:Food" }], notes), keys)).toBe(false);
+    expect(areNotesDismissed(forecastNoteKeys(blank, [...notes, { key: "warn:cash_negative::x" }]), keys)).toBe(false);
+    expect(areNotesDismissed(forecastNoteKeys(blank, [{ key: "warn:scheduled_excluded::2 categories" }]), keys)).toBe(false);
   });
 
-  it("remembers the named keys once each, and reads junk as nothing dismissed", () => {
-    expect(blankNoteKeys([{ key: "c:2" }, { key: "c:1" }, { key: "c:2" }])).toEqual(["c:1", "c:2"]);
-    expect(parseDismissedKeys(JSON.stringify(["c:1", 3, "c:2"]))).toEqual(["c:1", "c:2"]);
+  it("stays hidden when a note goes away, and is never 'dismissed' with nothing to show", () => {
+    const keys = forecastNoteKeys(blank, notes);
+    expect(areNotesDismissed(forecastNoteKeys([{ key: "c:1" }], []), keys)).toBe(true);
+    expect(areNotesDismissed([], keys)).toBe(false);
+    expect(areNotesDismissed(keys, [])).toBe(false);
+  });
+
+  it("reads stored keys, junk as nothing dismissed", () => {
+    expect(parseDismissedKeys(JSON.stringify(["a", 3, "b"]))).toEqual(["a", "b"]);
     expect(parseDismissedKeys("{oops")).toEqual([]);
     expect(parseDismissedKeys(null)).toEqual([]);
     expect(parseDismissedKeys('{"a":1}')).toEqual([]);
   });
 
-  it("the page wires the dismiss button and a way to show the note again", () => {
+  it("the page keys every note and wires the X to the whole strip, with a way back", () => {
     const page = readFileSync("src/app/(app)/forecast/page.tsx", "utf8");
-    expect(page).toMatch(/onDismissBlank=\{/);
-    expect(page).toMatch(/blank=\{blankDismissed \? \[\] : blankShown\}/);
-    expect(page).toMatch(/saveDismissedBlankKeys\(\[\]\)/);
+    expect(page).toMatch(/onDismiss=\{\(\) => saveDismissedNoteKeys\(noteKeys\)\}/);
+    expect(page).toMatch(/onShowHidden=\{\(\) => saveDismissedNoteKeys\(\[\]\)\}/);
+    expect(page).toMatch(/key: `warn:/);
+    expect(page).toMatch(/key: `left:/);
+    const strip = readFileSync("src/app/(app)/forecast/_components/forecast-overview.tsx", "utf8");
+    // The X is not limited to the blank-lines case.
+    expect(strip).toMatch(/\{onDismiss && \(/);
+    expect(strip).not.toMatch(/hasBlank && onDismiss/);
   });
 });
