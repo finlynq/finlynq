@@ -41,3 +41,33 @@ export function explainBlankLines(
       history && history.kind === "history" ? Math.min(history.params.lookbackMonths, available || history.params.lookbackMonths) : null,
   };
 }
+
+/**
+ * Dismissing the blank-lines note (GH #469). The user can hide the note for
+ * the lines it names; it comes back when a line that was not dismissed turns
+ * blank, so a newly blank line is never hidden by an old dismissal. Stored in
+ * this browser as the dismissed line keys.
+ */
+export const BLANK_NOTE_DISMISSED_KEY = "pf-forecast-blank-note-dismissed";
+
+export function isBlankNoteDismissed(blank: readonly Pick<BlankLine, "key">[], dismissedKeys: readonly string[]): boolean {
+  if (blank.length === 0) return false;
+  const dismissed = new Set(dismissedKeys);
+  return blank.every((b) => dismissed.has(b.key));
+}
+
+/** The keys to remember when the note is dismissed: the ones it names now. */
+export function blankNoteKeys(blank: readonly Pick<BlankLine, "key">[]): string[] {
+  return [...new Set(blank.map((b) => b.key))].sort();
+}
+
+/** Read the stored keys; anything unreadable counts as nothing dismissed. */
+export function parseDismissedKeys(raw: string | null): string[] {
+  if (!raw) return [];
+  try {
+    const v: unknown = JSON.parse(raw);
+    return Array.isArray(v) ? v.filter((k): k is string => typeof k === "string") : [];
+  } catch {
+    return [];
+  }
+}

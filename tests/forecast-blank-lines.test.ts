@@ -6,7 +6,12 @@
  */
 import { describe, expect, it } from "vitest";
 import { readFileSync } from "node:fs";
-import { explainBlankLines } from "@/lib/forecast/blank-lines";
+import {
+  blankNoteKeys,
+  explainBlankLines,
+  isBlankNoteDismissed,
+  parseDismissedKeys,
+} from "@/lib/forecast/blank-lines";
 import { layerSchema } from "@/lib/forecast/config";
 
 const blank = [
@@ -63,5 +68,38 @@ describe("banner wiring", () => {
   it("loads budgets from the current month so a this-month-only budget can be told apart", () => {
     expect(inputs).toMatch(/loadBudgetsByMonth\(ctx, ctx\.currentMonth, endMonth\)/);
     expect(inputs).toMatch(/currentMonthBudget,/);
+  });
+});
+
+describe("dismissing the blank-lines note (GH #469)", () => {
+  const lines = [{ key: "c:1" }, { key: "c:2" }];
+
+  it("stays dismissed while every blank line was dismissed", () => {
+    expect(isBlankNoteDismissed(lines, ["c:2", "c:1"])).toBe(true);
+    expect(isBlankNoteDismissed([{ key: "c:1" }], ["c:1", "c:2"])).toBe(true);
+  });
+
+  it("comes back when a line that was not dismissed turns blank", () => {
+    expect(isBlankNoteDismissed([...lines, { key: "g:Food" }], ["c:1", "c:2"])).toBe(false);
+  });
+
+  it("is never 'dismissed' with nothing blank, or nothing stored", () => {
+    expect(isBlankNoteDismissed([], ["c:1"])).toBe(false);
+    expect(isBlankNoteDismissed(lines, [])).toBe(false);
+  });
+
+  it("remembers the named keys once each, and reads junk as nothing dismissed", () => {
+    expect(blankNoteKeys([{ key: "c:2" }, { key: "c:1" }, { key: "c:2" }])).toEqual(["c:1", "c:2"]);
+    expect(parseDismissedKeys(JSON.stringify(["c:1", 3, "c:2"]))).toEqual(["c:1", "c:2"]);
+    expect(parseDismissedKeys("{oops")).toEqual([]);
+    expect(parseDismissedKeys(null)).toEqual([]);
+    expect(parseDismissedKeys('{"a":1}')).toEqual([]);
+  });
+
+  it("the page wires the dismiss button and a way to show the note again", () => {
+    const page = readFileSync("src/app/(app)/forecast/page.tsx", "utf8");
+    expect(page).toMatch(/onDismissBlank=\{/);
+    expect(page).toMatch(/blank=\{blankDismissed \? \[\] : blankShown\}/);
+    expect(page).toMatch(/saveDismissedBlankKeys\(\[\]\)/);
   });
 });

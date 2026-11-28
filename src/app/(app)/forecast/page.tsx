@@ -28,7 +28,13 @@ import { runForecast, yearlyView } from "@/lib/forecast/engine";
 import { traceCell } from "@/lib/forecast/layers";
 import { HORIZON_CHOICES, scenarioConfigSchema, type ScenarioConfig } from "@/lib/forecast/config";
 import { compareResults, planVsActual } from "@/lib/forecast/compare";
-import { explainBlankLines } from "@/lib/forecast/blank-lines";
+import {
+  BLANK_NOTE_DISMISSED_KEY,
+  blankNoteKeys,
+  explainBlankLines,
+  isBlankNoteDismissed,
+  parseDismissedKeys,
+} from "@/lib/forecast/blank-lines";
 import { hasHistoryFill, isMostlyBlank, quickFillPreview, valueableLines, withHistoryFill } from "@/lib/forecast/quick-fill";
 import type { ForecastInputs, ForecastResult } from "@/lib/forecast/types";
 import { BalancesChart, CashFlowChart, type BalancePoint, type ChartMarker, type FlowPoint } from "./_components/forecast-charts";
@@ -95,6 +101,24 @@ export default function ForecastPage() {
       setFirstRunDismissed(false);
     }
   }, []);
+  // Blank lines the user dismissed from the notes strip (GH #469, this browser only).
+  const [dismissedBlankKeys, setDismissedBlankKeys] = useState<string[]>([]);
+  useEffect(() => {
+    try {
+      setDismissedBlankKeys(parseDismissedKeys(localStorage.getItem(BLANK_NOTE_DISMISSED_KEY)));
+    } catch {
+      /* storage blocked: nothing dismissed */
+    }
+  }, []);
+  const saveDismissedBlankKeys = (keys: string[]) => {
+    setDismissedBlankKeys(keys);
+    try {
+      if (keys.length) localStorage.setItem(BLANK_NOTE_DISMISSED_KEY, JSON.stringify(keys));
+      else localStorage.removeItem(BLANK_NOTE_DISMISSED_KEY);
+    } catch {
+      /* private window: for this visit only */
+    }
+  };
   const dismissFirstRun = () => {
     setFirstRunDismissed(true);
     try {
@@ -391,9 +415,26 @@ export default function ForecastPage() {
     .filter((e) => e.enabled && e.month >= result.startMonth && e.month <= result.months[last])
     .map((e) => ({ date: `${e.month}-01`, text: e.label || EVENT_LABEL[e.kind] }));
 
+  const blankShown = config.layers.some((l) => l.kind === "budget" && l.enabled) ? result.blankLines : [];
+  const blankDismissed = isBlankNoteDismissed(blankShown, dismissedBlankKeys);
   const notes: ForecastNote[] = [
     ...result.warnings.map((w) => ({ tone: "warn" as const, text: w.message })),
     ...data.inputs.leftOut.map((l) => ({ tone: "info" as const, text: <><span className="font-medium">{l.label}</span>: {l.reason}</> })),
+    ...(blankDismissed
+      ? [
+          {
+            tone: "info" as const,
+            text: (
+              <>
+                {blankShown.length} blank {blankShown.length === 1 ? "line is" : "lines are"} hidden from this note.{" "}
+                <button type="button" className="underline underline-offset-2" onClick={() => saveDismissedBlankKeys([])}>
+                  Show
+                </button>
+              </>
+            ),
+          },
+        ]
+      : []),
   ];
 
   const compareSelect = (
@@ -505,10 +546,11 @@ export default function ForecastPage() {
           </Card>
 
           <NotesStrip
-            blank={config.layers.some((l) => l.kind === "budget" && l.enabled) ? result.blankLines : []}
+            blank={blankDismissed ? [] : blankShown}
             explain={explainBlankLines(result.blankLines, data.inputs, config)}
             canFillFromHistory={!hasHistoryFill(config)}
             onFillFromHistory={fillFromHistory}
+            onDismissBlank={() => saveDismissedBlankKeys(blankNoteKeys([...blankShown, ...dismissedBlankKeys.map((key) => ({ key }))]))}
             notes={notes}
           />
 

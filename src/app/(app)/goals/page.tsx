@@ -542,6 +542,10 @@ export default function GoalsPage() {
   const [seedForm, setSeedForm] = useState<FormState>(emptyForm(displayCurrency));
   const [deleteId, setDeleteId] = useState<number | null>(null);
   const [deleting, setDeleting] = useState(false);
+  // Completing a goal asks first (GH #470): the checkmark sits next to Edit.
+  const [completeId, setCompleteId] = useState<number | null>(null);
+  const [completing, setCompleting] = useState(false);
+  const [completeError, setCompleteError] = useState("");
 
   const load = useCallback(() => {
     setLoadError(false);
@@ -560,8 +564,28 @@ export default function GoalsPage() {
   }, [load]);
 
   async function toggleStatus(goal: Goal) {
-    await fetch("/api/goals", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ id: goal.id, status: goal.status === "active" ? "completed" : "active" }) });
+    const res = await fetch("/api/goals", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ id: goal.id, status: goal.status === "active" ? "completed" : "active" }) });
     load();
+    return res;
+  }
+
+  async function handleComplete() {
+    const goal = goals.find((g) => g.id === completeId);
+    if (!goal) return;
+    setCompleting(true);
+    setCompleteError("");
+    try {
+      const res = await toggleStatus(goal);
+      if (!res.ok) {
+        setCompleteError(await parseSaveError(res, "Could not mark the goal complete."));
+        return;
+      }
+      setCompleteId(null);
+    } catch {
+      setCompleteError("Could not reach the server. Try again.");
+    } finally {
+      setCompleting(false);
+    }
   }
 
   async function handleDelete() {
@@ -577,6 +601,7 @@ export default function GoalsPage() {
   }
 
   const deletingGoal = goals.find((g) => g.id === deleteId) ?? null;
+  const completingGoal = goals.find((g) => g.id === completeId) ?? null;
 
   const active = goals.filter((g) => g.status === "active");
   const completed = goals.filter((g) => g.status === "completed");
@@ -789,7 +814,7 @@ export default function GoalsPage() {
                   <Button variant="ghost" size="icon" className="h-8 w-8" onClick={() => setEditGoal(g)} title="Edit" aria-label={`Edit goal ${g.name}`}>
                     <Pencil className="h-4 w-4" />
                   </Button>
-                  <Button variant="ghost" size="icon" className="h-8 w-8" onClick={() => toggleStatus(g)} title="Mark complete" aria-label={`Mark goal ${g.name} complete`}>
+                  <Button variant="ghost" size="icon" className="h-8 w-8" onClick={() => { setCompleteError(""); setCompleteId(g.id); }} title="Mark complete" aria-label={`Mark goal ${g.name} complete`}>
                     <CheckCircle2 className="h-4 w-4" />
                   </Button>
                   <Button variant="ghost" size="icon" className="h-8 w-8 text-destructive" onClick={() => setDeleteId(g.id)} title="Delete" aria-label={`Delete goal ${g.name}`}>
@@ -867,6 +892,33 @@ export default function GoalsPage() {
         confirmLabel="Delete goal"
         busy={deleting}
         onConfirm={handleDelete}
+      />
+
+      <ConfirmDialog
+        open={completeId !== null}
+        onOpenChange={(open) => { if (!open) { setCompleteId(null); setCompleteError(""); } }}
+        tone="default"
+        title="Mark goal complete"
+        description={
+          completingGoal ? (
+            <div className="space-y-2">
+              <p>
+                Mark <strong>{completingGoal.name}</strong> as complete? It moves to Completed goals, and you can reactivate it any time.
+              </p>
+              {completingGoal.progress < 100 && (
+                <p className="text-amber-700 dark:text-amber-400">
+                  It&apos;s at {completingGoal.progress}% ({formatCurrency(completingGoal.currentAmount, completingGoal.currency || displayCurrency)} of{" "}
+                  {formatCurrency(completingGoal.targetAmount, completingGoal.currency || displayCurrency)}), short of its target.
+                </p>
+              )}
+              {completeError && <p className="text-destructive">{completeError}</p>}
+            </div>
+          ) : null
+        }
+        confirmLabel="Complete goal"
+        busy={completing}
+        busyLabel="Saving…"
+        onConfirm={handleComplete}
       />
     </div>
   );

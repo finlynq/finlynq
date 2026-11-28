@@ -97,6 +97,10 @@ If your server is reachable from the internet (so your phone or an AI assistant 
 
 Remove the line, or set it to `true`, to open sign-up again.
 
+### What's New and updates
+
+The **What's New** page lists the release notes for the version your server runs. To tell you when a newer version is out, the server asks GitHub for the latest release at most every 6 hours; nothing about your install is sent. On an offline server, set `PF_UPDATE_CHECK=false` in `.env` and restart to skip that check. To update, run `docker compose pull` and `docker compose up -d`.
+
 ### Important: your password protects your data
 
 Finlynq encrypts your sensitive fields (payees, notes, account and category names, and more) with a key derived from your password. That key never leaves your session — the operator can't see it.
