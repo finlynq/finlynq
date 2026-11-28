@@ -25,6 +25,7 @@ import {
 import { accountDisplayName, buildAccountSections, sumNetWorth } from "../lib/account-sections";
 import { DEFAULT_DISPLAY_CURRENCY } from "../lib/dashboard";
 import { Icon } from "../components/icon";
+import { AccountLogo, useAccountLogoVersions } from "../components/AccountLogo";
 import type { AccountBalance } from "../../../shared/types";
 import type { AccountsStackParamList } from "../navigation/AccountsStack";
 
@@ -33,6 +34,7 @@ type Props = NativeStackScreenProps<AccountsStackParamList, "AccountsList">;
 export default function AccountsScreen({ navigation }: Props) {
   const { colors } = useTheme();
   const isFocused = useIsFocused();
+  const logoVersions = useAccountLogoVersions();
   // ALL balance rows, archived included: the net-worth total sums these; the
   // list itself hides archived rows unless "Show archived" is on.
   const [balances, setBalances] = useState<AccountBalance[]>([]);
@@ -188,11 +190,20 @@ export default function AccountsScreen({ navigation }: Props) {
                 ]}
               >
                 <View style={styles.rowLeft}>
-                  <View style={[styles.iconWrap, { backgroundColor: colors.secondary }]}>
-                    <Icon
-                      name={item.isInvestment ? "portfolio" : item.accountType === "L" ? "bank" : "accounts"}
-                      size={18}
-                      color={colors.mutedForeground}
+                  <View style={styles.logoSlot}>
+                    <AccountLogo
+                      accountId={item.accountId}
+                      version={logoVersions[item.accountId]}
+                      size={36}
+                      fallback={
+                        <View style={[styles.iconWrap, { backgroundColor: colors.secondary }]}>
+                          <Icon
+                            name={item.isInvestment ? "portfolio" : item.accountType === "L" ? "bank" : "accounts"}
+                            size={18}
+                            color={colors.mutedForeground}
+                          />
+                        </View>
+                      }
                     />
                   </View>
                   <View style={styles.rowText}>
@@ -289,13 +300,13 @@ const styles = StyleSheet.create({
   },
   rowArchived: { opacity: 0.6 },
   rowLeft: { flexDirection: "row", alignItems: "center", flex: 1, marginRight: 12 },
+  logoSlot: { marginRight: 12 },
   iconWrap: {
     width: 36,
     height: 36,
     borderRadius: 18,
     alignItems: "center",
     justifyContent: "center",
-    marginRight: 12,
   },
   rowText: { flex: 1 },
   accountName: { fontSize: 15, fontWeight: "600" },

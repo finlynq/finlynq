@@ -32,6 +32,7 @@ const TextInput = React.forwardRef(({ onChangeText, onSubmitEditing, ...props },
 TextInput.displayName = "TextInput";
 const ActivityIndicator = (props) => React.createElement("ActivityIndicator", props);
 const Switch = (props) => React.createElement("Switch", props);
+const Image = (props) => React.createElement("Image", props);
 const Alert = {
   alert: jest.fn(),
 };
@@ -78,6 +79,7 @@ const Linking = {
 
 module.exports = {
   View,
+  Image,
   Text,
   ScrollView,
   FlatList,

@@ -58,7 +58,10 @@ jest.mock("../api/client", () => ({
     getAccountsOverview: jest.fn(),
     getAccountGroupOrder: jest.fn(),
     getDropdownOrder: jest.fn(),
+    getAccountLogoVersions: jest.fn(),
   },
+  getServerUrl: () => "https://finlynq.test",
+  getAuthToken: () => "tok",
 }));
 
 const theme: Theme = {
@@ -117,6 +120,16 @@ describe("AccountsScreen", () => {
     expect(getByText("Old savings")).toBeTruthy();
     expect(getByText("CAD · Archived")).toBeTruthy();
     expect(getByText("Hide archived")).toBeTruthy();
+  });
+
+  it("shows an account's logo in place of its icon, and the icon for the rest", async () => {
+    (endpoints.getAccountLogoVersions as jest.Mock).mockResolvedValue({
+      success: true,
+      data: { versions: { "3": 1732000000000 } },
+    });
+    const { findByTestId, queryByTestId } = renderScreen();
+    expect(await findByTestId("account-logo-3")).toBeTruthy();
+    expect(queryByTestId("account-logo-1")).toBeNull();
   });
 
   it("sections Assets before Liabilities and shows the alias", async () => {

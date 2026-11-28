@@ -24,6 +24,7 @@ import {
 import { logger } from "../lib/logger";
 import { clearSnapshot as clearWidgetSnapshot } from "../../modules/finlynq-widgets";
 import { BUDGET_COLLAPSED_KEY } from "../lib/budgets";
+import { clearLogoVersions } from "../lib/account-logos";
 
 const BIOMETRIC_KEY = "pf_biometric_enabled";
 const AUTO_LOCK_KEY = "pf_auto_lock_minutes";
@@ -620,6 +621,8 @@ function useAuthEngine() {
       );
     logger.info("auth", "sign-out", { purgeCredentials: purge });
     setAuthToken(null);
+    // Which accounts have logos belongs to this user, not the next one.
+    clearLogoVersions();
     await SecureStore.deleteItemAsync(SESSION_TOKEN_KEY);
     if (purge) {
       lastCredentials.current = null;

@@ -613,6 +613,9 @@ export const endpoints = {
   // labelled correctly even when the user has no accounts yet (USD fallback,
   // never CAD).
   getAccountsOverview: () => fetchAccountsOverview(),
+  // Which accounts have a logo (set on the website). `{ versions: { [id]: ms } }`;
+  // the image itself is GET /api/accounts/<id>/logo?v=<ms> (see lib/account-logos).
+  getAccountLogoVersions: () => api.get<{ versions: Record<string, number> }>("/api/accounts/logos"),
 
   // Transactions. The REST route returns a paginated envelope
   // `{ data: Transaction[], total }` (issue #59), NOT a bare array — so unwrap

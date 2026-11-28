@@ -18,6 +18,7 @@ import { formatCurrency, safeName, safeAccountName, formatShortDate } from "../l
 import { OP_ORDER, OP_CONFIGS } from "../lib/portfolio/operations";
 import { accountMetaLine } from "../lib/account-sections";
 import { Icon } from "../components/icon";
+import { AccountLogo, useAccountLogoVersions } from "../components/AccountLogo";
 import { ModePicker } from "../components/inbox/ModePicker";
 import { PickerSheet, type PickerOption } from "../components/picker-sheet";
 import type { AccountBalance, AccountDetailRow, PortfolioOpKey, Transaction } from "../../../shared/types";
@@ -46,6 +47,7 @@ function preselectFor(op: PortfolioOpKey, accountId: number): number | undefined
 export default function AccountDetailScreen({ route, navigation }: Props) {
   const { colors } = useTheme();
   const accountId = route.params.account.accountId;
+  const logoVersions = useAccountLogoVersions();
   const isFocused = useIsFocused();
   // Balance row for the header. Seeded from the route param (instant paint),
   // then re-fetched on focus / pull-to-refresh so a new transaction, an edit or
@@ -334,14 +336,24 @@ export default function AccountDetailScreen({ route, navigation }: Props) {
         onRefresh={onRefresh}
         ListHeaderComponent={
           <View style={[styles.hero, { backgroundColor: colors.card, borderColor: colors.border }]}>
-            <Text style={[styles.accountName, { color: colors.foreground }]} numberOfLines={2}>
-              {heroName}
-            </Text>
-            {metaLine ? (
-              <Text style={[styles.accountMeta, { color: colors.mutedForeground }]}>
-                {metaLine}
-              </Text>
-            ) : null}
+            <View style={styles.heroTitleRow}>
+              <AccountLogo
+                accountId={accountId}
+                version={logoVersions[accountId]}
+                size={44}
+                fallback={null}
+              />
+              <View style={styles.heroTitleText}>
+                <Text style={[styles.accountName, { color: colors.foreground }]} numberOfLines={2}>
+                  {heroName}
+                </Text>
+                {metaLine ? (
+                  <Text style={[styles.accountMeta, { color: colors.mutedForeground }]}>
+                    {metaLine}
+                  </Text>
+                ) : null}
+              </View>
+            </View>
             <Text
               style={[styles.heroValue, { color: colors.foreground }]}
               numberOfLines={1}
@@ -561,6 +573,8 @@ const styles = StyleSheet.create({
     padding: 16,
     marginBottom: 8,
   },
+  heroTitleRow: { flexDirection: "row", alignItems: "center", gap: 12 },
+  heroTitleText: { flex: 1 },
   accountName: { fontSize: 18, fontWeight: "700" },
   accountMeta: { fontSize: 13, marginTop: 4 },
   heroValue: { fontSize: 32, fontWeight: "800", marginTop: 12, fontVariant: ["tabular-nums"] },
