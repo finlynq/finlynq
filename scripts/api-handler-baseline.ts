@@ -155,7 +155,6 @@ export const API_HANDLER_BASELINE: string[] = [
   "src/app/api/mcp/route.ts",
   "src/app/api/net-worth-history/route.ts",
   "src/app/api/onboarding/complete/route.ts",
-  "src/app/api/onboarding/sample-data/route.ts",
   "src/app/api/portfolio/benchmarks/route.ts",
   "src/app/api/portfolio/crypto/route.ts",
   "src/app/api/portfolio/dividends/route.ts",

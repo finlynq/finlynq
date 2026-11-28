@@ -444,8 +444,8 @@ export function McpGuide({ embedded = false }: { embedded?: boolean }) {
                         icon in the chat input
                       </p>
                       <p className="text-muted-foreground">
-                        Or go to <strong>Settings → Integrations</strong> and click{" "}
-                        <strong>Add custom integration</strong>.
+                        Or go to <strong>Settings → Connectors</strong> and click{" "}
+                        <strong>Add custom connector</strong>.
                       </p>
                     </div>
                   </li>
@@ -1194,7 +1194,7 @@ export function McpGuide({ embedded = false }: { embedded?: boolean }) {
                 <span className="text-muted-foreground text-xs group-open:rotate-180 transition-transform">▾</span>
               </summary>
               <div className="px-5 pb-4 text-sm text-muted-foreground leading-relaxed">
-                Sign out of the integration (<strong>Settings → Integrations → Finlynq → Sign out</strong>),
+                Disconnect the connector (<strong>Settings → Connectors → Finlynq → Disconnect</strong>),
                 then restart the OAuth flow from the Claude side. Most common cause: your session expired
                 after a Finlynq deploy. We rotate <code className="bg-muted px-1 rounded text-xs">DEPLOY_GENERATION</code>{" "}
                 on every release, which force-logs out in-flight tokens for security. Re-OAuth and you&apos;re
@@ -1208,8 +1208,8 @@ export function McpGuide({ embedded = false }: { embedded?: boolean }) {
                 <span className="text-muted-foreground text-xs group-open:rotate-180 transition-transform">▾</span>
               </summary>
               <div className="px-5 pb-4 text-sm text-muted-foreground leading-relaxed">
-                Bearer token expired or missing. For Claude.ai web, re-add the integration from{" "}
-                <strong>Settings → Integrations</strong>. For Claude Desktop (which authenticates over OAuth
+                Bearer token expired or missing. For Claude.ai web, re-add the connector from{" "}
+                <strong>Settings → Connectors</strong>. For Claude Desktop (which authenticates over OAuth
                 via <code className="bg-muted px-1 rounded text-xs">mcp-remote</code>), delete{" "}
                 <code className="bg-muted px-1 rounded text-xs">~/.mcp-auth</code> and restart the app to
                 re-run the approval. For Cursor / Windsurf using API-key auth, generate a fresh key at{" "}
