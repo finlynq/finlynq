@@ -44,7 +44,6 @@ jest.mock("../api/client", () => ({
     replyToFeedback: jest.fn(),
     markFeedbackRead: jest.fn(),
     submitFeedback: jest.fn(),
-    loadSampleData: jest.fn(),
   },
   getServerUrl: () => "https://finlynq.example",
 }));

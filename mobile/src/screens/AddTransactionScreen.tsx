@@ -450,9 +450,8 @@ export default function AddTransactionScreen() {
   }
 
   // A brand-new user has no accounts/categories yet, so there's nothing to pick.
-  // Don't strand them on an unusable form — point at the create flows + the
-  // one-tap sample-data shortcut. The list screens (Accounts → + Add, More →
-  // Categories → + Add) are the primary path.
+  // Don't strand them on an unusable form — point at the create flows: the
+  // list screens (Accounts → + Add, More → Categories → + Add).
   if (accounts.length === 0 || (!editSeed && categories.length === 0)) {
     return (
       <SafeAreaView style={[styles.safe, { backgroundColor: colors.background }]} edges={["top"]}>
@@ -475,9 +474,6 @@ export default function AddTransactionScreen() {
               • Add a category: More → Categories → + Add
             </Text>
           )}
-          <Text style={[styles.emptyLine, { color: colors.mutedForeground, marginTop: 8 }]}>
-            Or tap “Load sample data” on the More tab to get started instantly.
-          </Text>
           <TouchableOpacity
             style={[styles.goBackBtn, { backgroundColor: colors.primary }]}
             onPress={() => navigation.goBack()}

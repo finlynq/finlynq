@@ -151,7 +151,6 @@ jest.mock("../api/client", () => ({
     createAccount: jest.fn(),
     createCategory: jest.fn(),
     createGoal: jest.fn(),
-    loadSampleData: jest.fn(),
   },
   getSession: jest.fn(),
 }));

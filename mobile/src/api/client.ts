@@ -774,16 +774,6 @@ export const endpoints = {
   deleteGoal: (id: number) =>
     api.delete<{ success?: boolean }>(`/api/goals?id=${id}`),
 
-  // One-tap onboarding: seeds a full demo-grade dataset (idempotent) —
-  // categories incl. Dividends, 5 accounts (Chequing/Savings/Visa + Brokerage
-  // & TFSA investment accounts), ~6 months of transactions, a funded portfolio
-  // with holdings/cash-sleeves/buys/sells, cash dividends, goals, loans,
-  // subscriptions, and current-month budgets. Returns the enveloped
-  // `{ success, transactionsCreated, summary }` shape directly (request()
-  // passes it through unchanged), so `transactionsCreated` rides at the top
-  // level, NOT under `.data`.
-  loadSampleData: () =>
-    api.post<{ transactionsCreated: number }>("/api/onboarding/sample-data"),
 
   // Portfolio — consolidated holdings + summary (bare JSON → request() wraps).
   getPortfolioOverview: () => api.get<PortfolioOverview>("/api/portfolio/overview"),

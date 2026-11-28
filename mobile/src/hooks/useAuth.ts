@@ -36,8 +36,6 @@ const SERVER_URL_KEY = "pf_server_url";
 // of re-typing their password. NEVER written to AsyncStorage / plaintext —
 // SecureStore only. Purged on toggle-off, signOut, and wipe-account.
 const STORED_CREDENTIALS_KEY = "pf_stored_credentials";
-// Set once the user has seen the first-run sample-data prompt, so it never nags.
-const ONBOARDING_PROMPT_KEY = "pf_onboarding_prompt_shown";
 
 interface StoredCredentials {
   identifier: string;
@@ -196,9 +194,6 @@ interface AuthState {
   autoLockMinutes: number; // 0 = disabled
   /** Admin flag from GET /api/auth/session — gates the Diagnostics panel. */
   isAdmin: boolean;
-  /** True after a fresh register / first sign-in of an un-onboarded account —
-   *  the navigator shows the sample-data prompt. Never set during bootstrap. */
-  pendingOnboarding: boolean;
 }
 
 export type { RegisterPayload };
@@ -212,8 +207,7 @@ function useAuthEngine() {
     biometricAvailable: false,
     biometricEnabled: false,
     autoLockMinutes: 5,
-    isAdmin: false,
-    pendingOnboarding: false,
+    isAdmin: false,
   });
 
   const backgroundedAt = useRef<number | null>(null);
@@ -381,28 +375,16 @@ function useAuthEngine() {
     await AsyncStorage.setItem(SERVER_URL_KEY, cleaned);
   }, []);
 
-  /** Refresh session-derived state after a fresh login/register: admin flag +
-   *  whether to show the first-run sample-data prompt. Only fires on explicit
-   *  sign-in/register (NOT bootstrap), so a returning user is never re-prompted.
+  /** Refresh session-derived state after a fresh login/register (the admin
+   *  flag). Only fires on explicit sign-in/register, not bootstrap.
    *  Non-blocking; rides the cookie jar. */
   const refreshSessionMeta = useCallback(() => {
     getSession()
-      .then(async (sess) => {
+      .then((sess) => {
         const isAdmin = sess.authenticated ? !!sess.isAdmin : false;
-        let pendingOnboarding = false;
-        if (sess.authenticated && sess.onboardingComplete !== true) {
-          const shown = await AsyncStorage.getItem(ONBOARDING_PROMPT_KEY);
-          pendingOnboarding = shown !== "true";
-        }
-        setState((s) => ({ ...s, isAdmin, pendingOnboarding }));
+        setState((s) => ({ ...s, isAdmin }));
       })
       .catch(() => {});
-  }, []);
-
-  /** Dismiss the first-run prompt and remember it so it never shows again. */
-  const dismissOnboarding = useCallback(async () => {
-    await AsyncStorage.setItem(ONBOARDING_PROMPT_KEY, "true");
-    setState((s) => ({ ...s, pendingOnboarding: false }));
   }, []);
 
   /** Account login — `identifier` is a username OR email. */
@@ -460,9 +442,8 @@ function useAuthEngine() {
           isLoading: false,
           biometricEnabled: enabledBiometricNow ? true : s.biometricEnabled,
         }));
-        // The login response doesn't carry admin/onboarding status; refresh it
-        // from the session (rides the cookie jar). Non-blocking so login stays
-        // instant. Also decides whether to show the first-run sample-data prompt.
+        // The login response doesn't carry the admin flag; refresh it from the
+        // session (rides the cookie jar). Non-blocking so login stays instant.
         refreshSessionMeta();
         return true;
       }
@@ -525,8 +506,7 @@ function useAuthEngine() {
           hasSession: true,
           isLoading: false,
         }));
-        // A brand-new account is un-onboarded → this also flags the first-run
-        // sample-data prompt (non-blocking; cookie-jar backed).
+        // Admin flag from the session (non-blocking; cookie-jar backed).
         refreshSessionMeta();
         return true;
       }
@@ -606,8 +586,7 @@ function useAuthEngine() {
       ...s,
       isUnlocked: false,
       hasSession: false,
-      isAdmin: false,
-      pendingOnboarding: false,
+      isAdmin: false,
     }));
     return false;
   }, [clearSessionToken]);
@@ -653,8 +632,7 @@ function useAuthEngine() {
       ...s,
       isUnlocked: false,
       hasSession: false,
-      isAdmin: false,
-      pendingOnboarding: false,
+      isAdmin: false,
       error: null,
     }));
   }, []);
@@ -687,8 +665,7 @@ function useAuthEngine() {
         ...s,
         hasSession: false,
         isUnlocked: false,
-        isAdmin: false,
-        pendingOnboarding: false,
+        isAdmin: false,
       }));
       return "logged_out";
     }
@@ -713,8 +690,7 @@ function useAuthEngine() {
       ...s,
       hasSession: false,
       isUnlocked: false,
-      isAdmin: false,
-      pendingOnboarding: false,
+      isAdmin: false,
     }));
     return "logged_out";
   }, [clearSessionToken]);
@@ -862,7 +838,6 @@ function useAuthEngine() {
     setBiometricEnabled,
     setAutoLockMinutes,
     clearError,
-    dismissOnboarding,
   };
 }
 
