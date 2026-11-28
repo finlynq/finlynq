@@ -207,7 +207,7 @@ function useAuthEngine() {
     biometricAvailable: false,
     biometricEnabled: false,
     autoLockMinutes: 5,
-    isAdmin: false,
+    isAdmin: false,
   });
 
   const backgroundedAt = useRef<number | null>(null);
@@ -586,7 +586,7 @@ function useAuthEngine() {
       ...s,
       isUnlocked: false,
       hasSession: false,
-      isAdmin: false,
+      isAdmin: false,
     }));
     return false;
   }, [clearSessionToken]);
@@ -632,7 +632,7 @@ function useAuthEngine() {
       ...s,
       isUnlocked: false,
       hasSession: false,
-      isAdmin: false,
+      isAdmin: false,
       error: null,
     }));
   }, []);
@@ -665,7 +665,7 @@ function useAuthEngine() {
         ...s,
         hasSession: false,
         isUnlocked: false,
-        isAdmin: false,
+        isAdmin: false,
       }));
       return "logged_out";
     }
@@ -690,7 +690,7 @@ function useAuthEngine() {
       ...s,
       hasSession: false,
       isUnlocked: false,
-      isAdmin: false,
+      isAdmin: false,
     }));
     return "logged_out";
   }, [clearSessionToken]);
